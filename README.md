@@ -150,7 +150,3 @@ sudo /root/vpn_bot/.venv/bin/python /root/vpn_bot/backup.py --test-yandex
 - [`START_HERE.md`](START_HERE.md) — быстрый старт по установке и обновлению.
 - [`SECURITY.md`](SECURITY.md) — модель угроз и рекомендации по безопасности.
 - [`RELEASE_NOTES_3.0.0.md`](RELEASE_NOTES_3.0.0.md) — список изменений текущей версии.
-
-## Лицензия
-
-Не указана в поставке — добавьте файл `LICENSE` перед публикацией репозитория, если планируете открытое распространение.
