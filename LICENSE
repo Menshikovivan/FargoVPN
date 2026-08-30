@@ -1,0 +1,180 @@
+ЛИЦЕНЗИЯ НА ЛИЧНОЕ ИСПОЛЬЗОВАНИЕ / PERSONAL USE LICENSE
+Версия / Version 1.0
+
+Copyright (c) 2026 Ivan Menshikov
+
+============================================================
+РУССКАЯ ВЕРСИЯ
+============================================================
+
+1. Предоставление лицензии
+
+Настоящим предоставляется право любому физическому лицу использовать
+данное программное обеспечение и его исходный код исключительно для
+личных, частных и некоммерческих целей.
+
+Разрешается:
+- устанавливать и запускать программное обеспечение для собственных
+  личных нужд;
+- изменять исходный код для собственного личного использования;
+- создавать частные резервные копии программного обеспечения.
+
+2. Ограничения
+
+Без предварительного письменного разрешения правообладателя ЗАПРЕЩАЕТСЯ:
+
+- использовать программное обеспечение в коммерческих целях;
+- продавать, перепродавать, сдавать в аренду, лизинг или сублицензировать
+  программное обеспечение;
+- получать коммерческую выгоду от программного обеспечения или предоставлять
+  его как платную услугу;
+- распространять, повторно распространять, публиковать или размещать копии
+  программного обеспечения в открытом доступе, за исключением частных
+  резервных копий для личного использования;
+- включать программное обеспечение полностью или в существенной части
+  в коммерческие продукты или услуги;
+- удалять или изменять уведомления об авторских правах, лицензии и
+  авторстве;
+- выдавать изменённую или неизменённую копию за официальную версию
+  правообладателя.
+
+3. Личные модификации
+
+Разрешается изменять программное обеспечение для собственного личного
+использования. Публиковать или передавать правообладателю такие частные
+изменения не требуется.
+
+Распространение изменённых версий запрещено без отдельного письменного
+разрешения правообладателя.
+
+4. Отсутствие передачи иных прав
+
+Настоящая лицензия не предоставляет прав на товарные знаки, фирменное
+наименование, логотипы или иные объекты интеллектуальной собственности,
+кроме прямо указанных в настоящей лицензии прав личного использования.
+
+5. Отказ от гарантий
+
+ПРОГРАММНОЕ ОБЕСПЕЧЕНИЕ ПРЕДОСТАВЛЯЕТСЯ «КАК ЕСТЬ», БЕЗ КАКИХ-ЛИБО
+ПРЯМЫХ ИЛИ ПОДРАЗУМЕВАЕМЫХ ГАРАНТИЙ, ВКЛЮЧАЯ, ПОМИМО ПРОЧЕГО, ГАРАНТИИ
+ТОВАРНОЙ ПРИГОДНОСТИ, СООТВЕТСТВИЯ КОНКРЕТНОЙ ЦЕЛИ И НЕНАРУШЕНИЯ ПРАВ.
+
+6. Ограничение ответственности
+
+В МАКСИМАЛЬНОЙ СТЕПЕНИ, ДОПУСТИМОЙ ЗАКОНОМ, ПРАВООБЛАДАТЕЛЬ НЕ НЕСЁТ
+ОТВЕТСТВЕННОСТИ ЗА ЛЮБЫЕ ПРЕТЕНЗИИ, УБЫТКИ ИЛИ ИНУЮ ОТВЕТСТВЕННОСТЬ,
+ВОЗНИКШУЮ В СВЯЗИ С ПРОГРАММНЫМ ОБЕСПЕЧЕНИЕМ ИЛИ ЕГО ИСПОЛЬЗОВАНИЕМ
+ЛИБО НЕВОЗМОЖНОСТЬЮ ИСПОЛЬЗОВАНИЯ.
+
+7. Прекращение действия
+
+Любые права, предоставленные настоящей лицензией, автоматически
+прекращаются при нарушении её условий. После прекращения действия
+лицензии необходимо прекратить использование программного обеспечения
+и удалить распространённые копии, кроме случаев, когда их сохранение
+требуется законом.
+
+8. Коммерческое использование и распространение
+
+Коммерческое использование, распространение, публикация, размещение
+для третьих лиц, предоставление в виде сервиса и иные виды использования,
+выходящие за рамки личного частного использования, могут быть разрешены
+только на основании отдельного письменного соглашения с правообладателем.
+
+Запросы на такое разрешение следует направлять по контактным данным,
+указанным в репозитории.
+
+9. Применимое право
+
+Настоящая лицензия толкуется в соответствии с применимым законодательством
+юрисдикции, в которой находится правообладатель, если иное не требуется
+императивными нормами закона.
+
+10. Полнота лицензии
+
+Настоящий документ является полным соглашением, регулирующим личное
+использование программного обеспечения, если отдельное письменное
+соглашение прямо не устанавливает иное.
+
+
+============================================================
+ENGLISH VERSION
+============================================================
+
+1. Grant of License
+
+Permission is hereby granted to any individual to use this software and
+its source code solely for personal, private, and non-commercial purposes.
+
+You may:
+- install and run the software for your own personal needs;
+- modify the source code for your own personal use;
+- create private backup copies of the software.
+
+2. Restrictions
+
+Without prior written permission from the copyright holder, you MAY NOT:
+
+- use the software for any commercial purpose;
+- sell, resell, rent, lease, or sublicense the software;
+- obtain commercial benefit from the software or provide it as a paid service;
+- distribute, redistribute, publish, or publicly host copies of the software,
+  except for private backups for personal use;
+- include the software, in whole or in substantial part, in a commercial
+  product or service;
+- remove or alter copyright, license, or authorship notices;
+- present modified or unmodified copies as an official version of the
+  copyright holder.
+
+3. Private Modifications
+
+You may modify the software for your own personal use. Private modifications
+do not need to be published or provided to the copyright holder.
+
+Distribution of modified versions is prohibited without separate written
+permission from the copyright holder.
+
+4. No Transfer of Other Rights
+
+This license does not grant any trademark rights, trade name rights, logo
+rights, or other intellectual property rights except the personal-use rights
+expressly stated in this license.
+
+5. Warranty Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING, WITHOUT LIMITATION, WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+6. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDER SHALL
+NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR
+RELATED TO THE SOFTWARE OR ITS USE OR INABILITY TO USE IT.
+
+7. Termination
+
+Any rights granted under this license automatically terminate upon violation
+of its terms. Upon termination, you must stop using the software and delete
+distributed copies, except where retention is required by law.
+
+8. Commercial Use and Redistribution
+
+Commercial use, redistribution, publication, hosting for third parties,
+provision of the software as a service, and any other use outside personal
+private use may be authorized only by a separate written agreement with the
+copyright holder.
+
+Permission requests should be directed to the contact information provided
+in the repository.
+
+9. Applicable Law
+
+This license shall be interpreted under the applicable laws of the
+jurisdiction in which the copyright holder is domiciled, unless otherwise
+required by mandatory law.
+
+10. Entire License
+
+This document constitutes the complete agreement governing personal use of
+the software unless a separate written agreement expressly states otherwise.
