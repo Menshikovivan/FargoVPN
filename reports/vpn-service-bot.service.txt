@@ -1,0 +1,21 @@
+# /etc/systemd/system/vpn-service-bot.service
+[Unit]
+Description=Telegram-бот VPN Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/vpn_bot
+ExecStart=/root/vpn_bot/run_bot.sh
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Almaty
+UMask=0077
+StandardOutput=append:/var/log/vpn_bot.log
+StandardError=append:/var/log/vpn_bot.log
+
+[Install]
+WantedBy=multi-user.target

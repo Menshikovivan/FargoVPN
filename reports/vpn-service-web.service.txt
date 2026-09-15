@@ -1,0 +1,25 @@
+# /etc/systemd/system/vpn-service-web.service
+[Unit]
+Description=Веб-панель VPN Service
+Requires=vpn-service-web.socket nginx.service
+After=network-online.target nginx.service vpn-service-web.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/vpn_bot
+ExecStart=/root/vpn_bot/web_start.sh
+StandardOutput=append:/var/log/vpn_bot.log
+StandardError=append:/var/log/vpn_bot.log
+UMask=0077
+Restart=on-failure
+RestartSec=5
+# Не держать обновление/перезапуск из-за долгоживущих SSE-соединений.
+TimeoutStopSec=6
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Almaty
+
+[Install]
+WantedBy=multi-user.target

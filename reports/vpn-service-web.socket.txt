@@ -1,0 +1,14 @@
+# /etc/systemd/system/vpn-service-web.socket
+[Unit]
+Description=Unix socket for FargoVPN web panel
+
+[Socket]
+ListenStream=/run/vpn-service/fargovpn.sock
+SocketUser=root
+SocketGroup=nginx
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=no
+
+[Install]
+WantedBy=sockets.target

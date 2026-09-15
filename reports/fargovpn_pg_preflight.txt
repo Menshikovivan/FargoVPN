@@ -1,0 +1,628 @@
+===== SQLITE DIALECT FEATURES =====
+
+--- INSERT OR REPLACE ---
+
+--- INSERT OR IGNORE ---
+/root/vpn_bot/user_events.py:139:        INSERT OR IGNORE INTO user_message_state(
+/root/vpn_bot/init_db.py:323:            INSERT OR IGNORE INTO panel_notification_state(channel,last_read_id,updated_at)
+/root/vpn_bot/init_db.py:332:                INSERT OR IGNORE INTO user_message_state(
+/root/vpn_bot/init_db.py:401:            INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:115:            INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:152:                INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:288:            "INSERT OR IGNORE INTO referral_rewards(referrer_tg_id,referred_tg_id,reward_days,status) VALUES(?,?,?,?)",
+
+--- REPLACE INTO ---
+
+--- lastrowid ---
+/root/vpn_bot/user_events.py:334:        event_id = int(cursor.lastrowid)
+/root/vpn_bot/main.py:1282:            payment_id = int(cur.lastrowid)
+
+--- PRAGMA  ---
+/root/vpn_bot/webapp.py:427:        connection.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/webapp.py:1639:                columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(backup_runs)")}
+/root/vpn_bot/webapp.py:1716:        payment_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(payments)")}
+/root/vpn_bot/webapp.py:2094:                    str(r[1]) for r in connection.execute(f"PRAGMA table_info({quoted})").fetchall()
+/root/vpn_bot/webapp.py:2129:                columns = {str(r[1]) for r in connection.execute(f"PRAGMA table_info({quoted})").fetchall()}
+/root/vpn_bot/tests/test_referral_backup_rebind.py:284:    cols = {r[1] for r in conn.execute("PRAGMA table_info(referral_rewards)")}
+/root/vpn_bot/user_events.py:57:    connection.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/user_events.py:207:            event_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(user_events)")}
+/root/vpn_bot/user_events.py:222:            state_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(user_message_state)")}
+/root/vpn_bot/services/subscriptions.py:90:    connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/services/receipt_ocr.py:594:    connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/broadcast_worker.py:103:        connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/cabinet_service.py:109:    conn.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/identity_migration.py:79:    connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/identity_migration.py:111:    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")}
+/root/vpn_bot/diagnostics.py:69:        connection.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/diagnostics.py:70:        report["quick_check"] = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+/root/vpn_bot/diagnostics.py:71:        report["journal_mode"] = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+/root/vpn_bot/auth_security.py:42:    connection.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/init_db.py:79:    existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+/root/vpn_bot/init_db.py:90:        connection.execute("PRAGMA journal_mode=WAL")
+/root/vpn_bot/init_db.py:96:        connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/main.py:380:        connection.execute("PRAGMA busy_timeout=20000")
+/root/vpn_bot/subscription_refresh_worker.py:145:            connection.execute("PRAGMA busy_timeout=30000")
+/root/vpn_bot/referral_rewards.py:33:    connection.execute("PRAGMA busy_timeout=30000")
+
+--- BEGIN IMMEDIATE ---
+/root/vpn_bot/user_events.py:174:            connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/user_events.py:402:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/user_events.py:715:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/services/subscriptions.py:167:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/services/subscriptions.py:517:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/services/subscriptions.py:594:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/services/subscriptions.py:638:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/identity_migration.py:524:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/identity_migration.py:610:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/identity_migration.py:656:            connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/auth_security.py:128:        connection.execute("BEGIN IMMEDIATE")
+/root/vpn_bot/referral_rewards.py:221:        connection.execute("BEGIN IMMEDIATE")
+
+--- BEGIN EXCLUSIVE ---
+
+--- AUTOINCREMENT ---
+/root/vpn_bot/backup.py:892:                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/tests/test_referral_backup_rebind.py:30:            id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, username TEXT,
+/root/vpn_bot/tests/test_referral_backup_rebind.py:34:        CREATE TABLE message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, username TEXT, message TEXT, success INTEGER, detail TEXT, actor TEXT, created_at TEXT);
+/root/vpn_bot/tests/test_referral_backup_rebind.py:35:        CREATE TABLE user_events (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, username TEXT, direction TEXT, event_type TEXT, text TEXT, actor TEXT, success INTEGER, metadata TEXT, created_at TEXT);
+/root/vpn_bot/tests/test_referral_backup_rebind.py:38:            id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/user_events.py:179:                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/push_service.py:83:            id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/push_service.py:98:            id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:117:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:123:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:136:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:146:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:154:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:168:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:179:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:206:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:219:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:254:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/init_db.py:302:                id INTEGER PRIMARY KEY AUTOINCREMENT,
+/root/vpn_bot/referral_rewards.py:41:            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+--- sqlite_master ---
+/root/vpn_bot/webapp.py:1636:                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_runs'"
+/root/vpn_bot/webapp.py:1725:        user_events_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_events'").fetchone())
+/root/vpn_bot/webapp.py:1736:            audit_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_log'").fetchone())
+/root/vpn_bot/webapp.py:2086:                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+/root/vpn_bot/tests/test_referral_backup_rebind.py:282:    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+/root/vpn_bot/user_events.py:71:            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+/root/vpn_bot/identity_migration.py:214:            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='users'"
+/root/vpn_bot/identity_migration.py:465:            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+/root/vpn_bot/diagnostics.py:73:            "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+/root/vpn_bot/diagnostics.py:86:            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+/root/vpn_bot/init_db.py:93:                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_message_state'"
+
+--- iterdump ---
+
+--- row_factory ---
+/root/vpn_bot/webapp.py:426:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/webapp.py:2225:            _conn.row_factory = sqlite3.Row
+/root/vpn_bot/user_events.py:56:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/services/subscriptions.py:89:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/services/receipt_ocr.py:593:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:129:        c.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:264:        c.row_factory = sqlite3.Row
+/root/vpn_bot/referral_codes.py:16:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/cabinet_service.py:108:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:78:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:209:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/diagnostics.py:68:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/auth_security.py:41:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/broadcast_manager.py:173:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:602:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:667:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:678:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/subscription_refresh_worker.py:21:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/referral_rewards.py:32:    connection.row_factory = sqlite3.Row
+
+--- sqlite3.Row ---
+/root/vpn_bot/webapp.py:426:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/webapp.py:2225:            _conn.row_factory = sqlite3.Row
+/root/vpn_bot/user_events.py:56:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/user_events.py:266:def _event_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+/root/vpn_bot/services/subscriptions.py:89:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/services/receipt_ocr.py:593:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:129:        c.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:264:        c.row_factory = sqlite3.Row
+/root/vpn_bot/referral_codes.py:16:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/cabinet_service.py:108:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:78:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:209:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/diagnostics.py:68:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/auth_security.py:41:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/broadcast_manager.py:173:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:602:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:667:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:678:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/subscription_refresh_worker.py:21:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/referral_rewards.py:32:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/referral_rewards.py:66:def _user_row(connection: sqlite3.Connection, tg_id: int) -> sqlite3.Row | None:
+
+--- last_insert_rowid ---
+
+--- INSERT OR ---
+/root/vpn_bot/user_events.py:139:        INSERT OR IGNORE INTO user_message_state(
+/root/vpn_bot/init_db.py:323:            INSERT OR IGNORE INTO panel_notification_state(channel,last_read_id,updated_at)
+/root/vpn_bot/init_db.py:332:                INSERT OR IGNORE INTO user_message_state(
+/root/vpn_bot/init_db.py:401:            INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:115:            INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:152:                INSERT OR IGNORE INTO referral_rewards(
+/root/vpn_bot/referral_rewards.py:288:            "INSERT OR IGNORE INTO referral_rewards(referrer_tg_id,referred_tg_id,reward_days,status) VALUES(?,?,?,?)",
+
+===== DB HELPERS WITH SQLITE =====
+/root/vpn_bot/webapp.py:88:def public_prefix() -> str:
+/root/vpn_bot/webapp.py:101:def public_path(path: str = "/") -> str:
+/root/vpn_bot/webapp.py:126:def rewrite_public_markup(markup: str) -> str:
+/root/vpn_bot/webapp.py:143:class ReverseProxyAssetRewriteMiddleware:
+/root/vpn_bot/webapp.py:239:class PublicPrefixStripMiddleware:
+/root/vpn_bot/webapp.py:327:async def response_security_headers(request: Request, call_next):
+/root/vpn_bot/webapp.py:372:def _secure_text_compare(left: str, right: str) -> bool:
+/root/vpn_bot/webapp.py:380:def verify_password(password: str) -> bool:
+/root/vpn_bot/webapp.py:394:def request_ip(request: Request) -> str:
+/root/vpn_bot/webapp.py:398:def require_auth(request: Request) -> None:
+/root/vpn_bot/webapp.py:408:def session_csrf_token(request: Request) -> str:
+/root/vpn_bot/webapp.py:416:def require_csrf(request: Request, token: str) -> None:
+/root/vpn_bot/webapp.py:423:def database():
+/root/vpn_bot/webapp.py:437:def audit(actor: str, action: str, details: str = "") -> None:
+/root/vpn_bot/webapp.py:448:def panel_timezone_name() -> str:
+/root/vpn_bot/webapp.py:547:def _format_audit_detail_value(key: str, value: Any) -> str:
+/root/vpn_bot/webapp.py:586:def format_audit_details(details: Any) -> str:
+/root/vpn_bot/webapp.py:591:def audit_details_label(details: Any, action: Any = "") -> str:
+/root/vpn_bot/webapp.py:616:def audit_action_label(action: Any) -> str:
+/root/vpn_bot/webapp.py:621:def fmt_audit_timestamp(value: Any) -> str:
+/root/vpn_bot/webapp.py:640:def fmt_event_timestamp(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+/root/vpn_bot/webapp.py:664:def set_flash(request: Request, message: str, kind: str = "good") -> None:
+/root/vpn_bot/webapp.py:668:def pop_flash(request: Request) -> str:
+/root/vpn_bot/webapp.py:677:def shell(args: list[str], timeout: int = 20) -> str:
+/root/vpn_bot/webapp.py:688:def service_state(unit: str) -> str:
+/root/vpn_bot/webapp.py:700:def fmt_bytes(value: float | int) -> str:
+/root/vpn_bot/webapp.py:709:def fmt_date(milliseconds: int | None) -> str:
+/root/vpn_bot/webapp.py:718:def fmt_last_online(milliseconds: int | None, online: bool = False) -> str:
+/root/vpn_bot/webapp.py:729:def remaining_days(expiry_ms: int, now_ms: int | None = None) -> float:
+/root/vpn_bot/webapp.py:737:def remaining_label(expiry_ms: int, now_ms: int | None = None) -> str:
+/root/vpn_bot/webapp.py:751:def status_badge(active: bool, text_on: str = "Активен", text_off: str = "Отключён") -> str:
+/root/vpn_bot/webapp.py:756:def api_source_badge(stale: bool) -> str:
+/root/vpn_bot/webapp.py:764:def telegram_send(tg_id: int, message: str) -> tuple[bool, str]:
+/root/vpn_bot/webapp.py:780:def telegram_send_media(
+/root/vpn_bot/webapp.py:876:def telegram_receipt_file(payment_id: int) -> tuple[bytes, str, str]:
+/root/vpn_bot/webapp.py:893:def _local_users() -> list[dict[str, Any]]:
+/root/vpn_bot/webapp.py:899:def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+/root/vpn_bot/webapp.py:1017:def get_user(tg_id: int) -> dict[str, Any] | None:
+/root/vpn_bot/webapp.py:1040:def _cabinet_bot_username() -> str:
+/root/vpn_bot/webapp.py:1064:def _cabinet_url() -> str:
+/root/vpn_bot/webapp.py:1074:def _cabinet_active_user(tg_id: int) -> dict[str, Any] | None:
+/root/vpn_bot/webapp.py:1081:def _cabinet_token_user(token: str) -> dict[str, Any] | None:
+/root/vpn_bot/webapp.py:1084:def _cabinet_session_user(request: Request, access: str = "") -> dict[str, Any] | None:
+/root/vpn_bot/webapp.py:1105:def _cabinet_personal_url(tg_id: int, sub_id: str = "") -> str:
+/root/vpn_bot/webapp.py:1109:def _cabinet_identity_candidates(tg_id: int) -> list[str]:
+/root/vpn_bot/webapp.py:1113:def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
+/root/vpn_bot/webapp.py:1139:def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
+/root/vpn_bot/webapp.py:1182:def _event_media_html(event: dict[str, Any]) -> str:
+/root/vpn_bot/webapp.py:1205:def render_user_events(events: list[dict[str, Any]], tg_id: int) -> str:
+/root/vpn_bot/webapp.py:1224:def _chat_media_cache_path(tg_id: int, event_id: int, file_id: str) -> Path:
+/root/vpn_bot/webapp.py:1229:def _prune_chat_media_cache(protected: Path | None = None) -> None:
+/root/vpn_bot/webapp.py:1265:def cached_event_media(tg_id: int, event_id: int) -> tuple[Path, str, str]:
+/root/vpn_bot/webapp.py:1300:def navigation(active: str) -> str:
+/root/vpn_bot/webapp.py:1364:def update_banner() -> str:
+/root/vpn_bot/webapp.py:1379:def page(request: Request, title: str, body: str, active: str = "", scripts: str = "") -> str:
+/root/vpn_bot/webapp.py:1431:async def unauthorized(request: Request, error: Exception):
+/root/vpn_bot/webapp.py:1439:def favicon():
+/root/vpn_bot/webapp.py:1447:def manifest_webmanifest():
+/root/vpn_bot/webapp.py:1473:def cabinet_manifest():
+/root/vpn_bot/webapp.py:1494:def service_worker():
+/root/vpn_bot/webapp.py:1508:def login_page(request: Request):
+/root/vpn_bot/webapp.py:1531:def login_post(request: Request, username: str = Form(), password: str = Form()):
+/root/vpn_bot/webapp.py:1597:def logout(request: Request):
+/root/vpn_bot/webapp.py:1602:def dashboard_backup_status() -> dict[str, Any]:
+/root/vpn_bot/webapp.py:1676:def dashboard(request: Request):
+/root/vpn_bot/webapp.py:1848:def panel_update_status(request: Request):
+/root/vpn_bot/webapp.py:1859:def _database_health() -> bool:
+/root/vpn_bot/webapp.py:1868:def system_status_api(request: Request):
+/root/vpn_bot/webapp.py:1899:def xui_telemetry_api(request: Request):
+/root/vpn_bot/webapp.py:1916:def metrics_api(request: Request):
+/root/vpn_bot/webapp.py:1970:def online_metrics_api(request: Request):
+/root/vpn_bot/webapp.py:2002:def _telegram_bot_username() -> str:
+/root/vpn_bot/webapp.py:2015:def create_telegram_link_request(local_tg_id: int) -> dict[str, Any]:
+/root/vpn_bot/webapp.py:2037:def telegram_link_request_status(token: str) -> dict[str, Any]:
+/root/vpn_bot/webapp.py:2052:def telegram_username_lookup(username: str) -> list[dict[str, Any]]:
+/root/vpn_bot/webapp.py:2160:def update_topology_public(report: dict[str, Any], publisher: bool) -> dict[str, Any]:
+/root/vpn_bot/webapp.py:2169:def telegram_lookup_api(request: Request, username: str = ""):
+/root/vpn_bot/webapp.py:2183:def telegram_link_request_api(request: Request, tg_id: int = Form(...)):
+/root/vpn_bot/webapp.py:2197:def telegram_link_request_status_api(request: Request, token: str):
+/root/vpn_bot/webapp.py:2203:def users_page(
+/root/vpn_bot/webapp.py:2329:def subscription_tools_page(request: Request):
+/root/vpn_bot/webapp.py:2342:def diagnostics_auto_fix(request: Request):
+/root/vpn_bot/webapp.py:2386:def import_users_to_3xui(request: Request):
+/root/vpn_bot/webapp.py:2407:def refresh_subscription_links_start(request: Request, csrf_token: str = Form("")):
+/root/vpn_bot/webapp.py:2427:def refresh_subscription_links_status(request: Request):
+/root/vpn_bot/webapp.py:2433:def import_identities_page(request: Request, token: str = ""):
+/root/vpn_bot/webapp.py:2461:def import_identities_upload(request: Request, source: UploadFile = File(...)):
+/root/vpn_bot/webapp.py:2491:def import_identities_apply(
+/root/vpn_bot/webapp.py:2520:def user_xui_clients_api(request: Request, tg_id: int, q: str = ""):
+/root/vpn_bot/webapp.py:2571:def bind_3xui_user(
+/root/vpn_bot/webapp.py:2606:def user_detail_page(request: Request, tg_id: int):
+/root/vpn_bot/webapp.py:2747:def user_identity_update(
+/root/vpn_bot/webapp.py:2787:def user_messages_read_api(request: Request, tg_id: int, through_event_id: int | None = None):
+/root/vpn_bot/webapp.py:2804:def panel_messages_unread_api(request: Request):
+/root/vpn_bot/webapp.py:2816:def user_events_api(request: Request, tg_id: int, after_id: int = 0):
+/root/vpn_bot/webapp.py:2828:def _app_log_path() -> Path:
+/root/vpn_bot/webapp.py:2836:def _read_app_log_tail(limit: int = 200) -> list[str]:
+/root/vpn_bot/webapp.py:2846:def app_log_api(request: Request, limit: int = 200):
+/root/vpn_bot/webapp.py:2852:def panel_push_config(request: Request):
+/root/vpn_bot/webapp.py:2859:def panel_push_logs(request: Request, limit: int = 80):
+/root/vpn_bot/webapp.py:2865:def panel_push_status(request: Request):
+/root/vpn_bot/webapp.py:2870:async def panel_push_subscribe(request: Request):
+/root/vpn_bot/webapp.py:2879:async def panel_push_unsubscribe(request: Request):
+/root/vpn_bot/webapp.py:2886:def panel_push_test(request: Request, background_tasks: BackgroundTasks):
+/root/vpn_bot/webapp.py:2908:def cabinet_page(request: Request, access: str = ""):
+/root/vpn_bot/webapp.py:2946:def cabinet_logout(request: Request):
+/root/vpn_bot/webapp.py:2953:def cabinet_connection_page(request: Request, access: str = ""):
+/root/vpn_bot/webapp.py:2994:def messages_page(request: Request, tg_id: int = 0, direction: str = "all"):
+/root/vpn_bot/webapp.py:3037:def new_user_page(request: Request):
+/root/vpn_bot/webapp.py:3044:def create_user(request: Request, tg_id: str = Form(""), username: str = Form(), days: int = Form(30)):
+/root/vpn_bot/webapp.py:3071:def adjust_days(request: Request, tg_id: int, days: int = Form()):
+/root/vpn_bot/webapp.py:3107:def bind_telegram_page(request: Request, tg_id: int):
+/root/vpn_bot/webapp.py:3115:def bind_telegram_user(
+/root/vpn_bot/webapp.py:3150:def toggle_user(request: Request, tg_id: int):
+/root/vpn_bot/webapp.py:3176:def delete_user(request: Request, tg_id: int):
+/root/vpn_bot/webapp.py:3203:def message_user_page(request: Request, tg_id: int):
+/root/vpn_bot/webapp.py:3211:def message_user(
+/root/vpn_bot/webapp.py:3280:def broadcast_page(request: Request):
+/root/vpn_bot/webapp.py:3334:def broadcast_status_api(request: Request):
+/root/vpn_bot/webapp.py:3341:def broadcast_log_api(request: Request):
+/root/vpn_bot/webapp.py:3352:def broadcast_start(
+/root/vpn_bot/webapp.py:3406:def payments(request: Request):
+/root/vpn_bot/webapp.py:3455:def receipt(request: Request, payment_id: int):
+/root/vpn_bot/webapp.py:3490:def receipt_image(request: Request, payment_id: int):
+/root/vpn_bot/webapp.py:3503:def approve_payment_logic(payment_id: int) -> tuple[bool, str]:
+/root/vpn_bot/webapp.py:3543:def approve_payment(request: Request, payment_id: int):
+/root/vpn_bot/webapp.py:3555:def decline_payment(request: Request, payment_id: int):
+/root/vpn_bot/webapp.py:3571:def monitoring(request: Request):
+/root/vpn_bot/webapp.py:3609:def safe_backup(name: str) -> Path:
+/root/vpn_bot/webapp.py:3618:def backups(request: Request):
+/root/vpn_bot/webapp.py:3648:def create_backup(request: Request):
+/root/vpn_bot/webapp.py:3670:def backup_download(request: Request, name: str):
+/root/vpn_bot/webapp.py:3676:def backup_delete(request: Request, name: str):
+/root/vpn_bot/webapp.py:3684:def safe_extract_backup(archive_path: Path, destination: Path) -> Path:
+/root/vpn_bot/webapp.py:3711:def restore_sqlite(source: Path, target: Path) -> None:
+/root/vpn_bot/webapp.py:3724:def backup_restore(request: Request, name: str):
+/root/vpn_bot/webapp.py:3764:def _service_unit(service: str) -> str:
+/root/vpn_bot/webapp.py:3774:def _read_service_logs(service: str, lines: int) -> str:
+/root/vpn_bot/webapp.py:3782:def audit_page(request: Request, actor: str = "", action: str = "", q: str = "", limit: int = 200):
+/root/vpn_bot/webapp.py:3824:def audit_api(request: Request, actor: str = "", action: str = "", q: str = "", limit: int = 200):
+/root/vpn_bot/webapp.py:3852:def reminders_page(request: Request):
+/root/vpn_bot/webapp.py:3881:def logs_api(request: Request, service: str = "bot", lines: int = 300):
+/root/vpn_bot/webapp.py:3889:def logs(request: Request, service: str = "bot", lines: int = 300):
+/root/vpn_bot/webapp.py:3933:def replace_assignment(text: str, name: str, value: Any) -> str:
+/root/vpn_bot/webapp.py:3939:def save_config_values(values: dict[str, Any]) -> None:
+/root/vpn_bot/webapp.py:3963:def schedule_restart(units: list[str], delay: int = 2) -> None:
+/root/vpn_bot/webapp.py:3977:def _config_text(name: str, default: Any = "") -> str:
+/root/vpn_bot/webapp.py:3981:def _config_checked(name: str, default: bool = False) -> str:
+/root/vpn_bot/webapp.py:3985:def _password_hash(password: str) -> str:
+/root/vpn_bot/webapp.py:3992:def _http_url(
+/root/vpn_bot/webapp.py:4012:def _form_int(form: Any, name: str, default: int, minimum: int, maximum: int, label: str) -> int:
+/root/vpn_bot/webapp.py:4022:def _form_float(form: Any, name: str, default: float, minimum: float, maximum: float, label: str) -> float:
+/root/vpn_bot/webapp.py:4033:def settings(request: Request):
+/root/vpn_bot/webapp.py:4346:async def save_settings(request: Request):
+/root/vpn_bot/webapp.py:4360:def _save_settings(request: Request, form):
+/root/vpn_bot/webapp.py:4606:def tls_auto_legacy(request: Request):
+/root/vpn_bot/webapp.py:4612:def tls_apply_legacy(request: Request):
+/root/vpn_bot/webapp.py:4618:async def tls_issue_legacy(request: Request):
+/root/vpn_bot/webapp.py:4623:def yandex_settings(request: Request):
+/root/vpn_bot/webapp.py:4642:def save_yandex_settings(
+/root/vpn_bot/webapp.py:4709:def updates_status_api(request: Request):
+/root/vpn_bot/webapp.py:4722:def updates_availability_api(request: Request):
+/root/vpn_bot/webapp.py:4738:def updates_log_api(request: Request):
+/root/vpn_bot/webapp.py:4747:def updates_releases_api(request: Request):
+/root/vpn_bot/webapp.py:4770:def update_publisher_for_request(request: Request) -> bool:
+/root/vpn_bot/webapp.py:4776:def can_publish_update(request: Request) -> bool:
+/root/vpn_bot/webapp.py:4781:def updates_page(request: Request):
+/root/vpn_bot/webapp.py:4922:def updates_check(request: Request):
+/root/vpn_bot/webapp.py:4948:def updates_github_test(request: Request):
+/root/vpn_bot/webapp.py:4960:async def updates_github_config(request: Request):
+/root/vpn_bot/webapp.py:4968:def _updates_github_config(request: Request, form):
+/root/vpn_bot/webapp.py:4995:def updates_config_legacy(request: Request):
+/root/vpn_bot/webapp.py:5000:def updates_token_legacy(request: Request):
+/root/vpn_bot/webapp.py:5005:def updates_publish(request: Request, archive: UploadFile = File(...)):
+/root/vpn_bot/webapp.py:5041:def updates_upload_and_apply(
+/root/vpn_bot/webapp.py:5090:def updates_apply(request: Request):
+/root/vpn_bot/webapp.py:5120:def updates_force_version(
+/root/vpn_bot/webapp.py:5148:def updates_rollback(request: Request, backup_path: str = Form(...)):
+/root/vpn_bot/webapp.py:5165:def diagnostics(request: Request):
+/root/vpn_bot/webapp.py:5359:def diagnostics_api(request: Request):
+/root/vpn_bot/webapp.py:5373:def diagnostics_fix_duplicates(request: Request):
+/root/vpn_bot/webapp.py:5388:def restart_service(request: Request, target: str):
+/root/vpn_bot/webapp.py:5405:def sync(request: Request):
+/root/vpn_bot/webapp.py:5424:async def health():
+/root/vpn_bot/user_events.py:47:def _db_path(db_path: str | Path | None = None) -> str:
+/root/vpn_bot/user_events.py:52:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/user_events.py:68:def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+/root/vpn_bot/user_events.py:76:def _event_type_clause() -> tuple[str, list[str]]:
+/root/vpn_bot/user_events.py:81:def _admin_ids() -> list[int]:
+/root/vpn_bot/user_events.py:85:def _install_unread_trigger(connection: sqlite3.Connection) -> None:
+/root/vpn_bot/user_events.py:134:def _baseline_message_state(connection: sqlite3.Connection) -> None:
+/root/vpn_bot/user_events.py:166:def ensure_schema(db_path: str | Path | None = None) -> None:
+/root/vpn_bot/user_events.py:242:def _compact_metadata(metadata: Any) -> str:
+/root/vpn_bot/user_events.py:255:def _decode_metadata(value: Any) -> dict[str, Any]:
+/root/vpn_bot/user_events.py:266:def _event_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+/root/vpn_bot/user_events.py:273:def plain_text(value: Any) -> str:
+/root/vpn_bot/user_events.py:284:def _is_unread(direction: str, event_type: str, tg_id: int) -> bool:
+/root/vpn_bot/user_events.py:290:def record_event(
+/root/vpn_bot/user_events.py:378:def safe_record_event(*args: Any, **kwargs: Any) -> int | None:
+/root/vpn_bot/user_events.py:386:def _reconcile_unread_state_once(db_path: str | Path | None = None) -> int:
+/root/vpn_bot/user_events.py:482:def reconcile_unread_state(db_path: str | Path | None = None) -> int:
+/root/vpn_bot/user_events.py:500:def last_known_username(tg_id: int, *, db_path: str | Path | None = None) -> str:
+/root/vpn_bot/user_events.py:510:def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+/root/vpn_bot/user_events.py:530:def all_events(*, limit: int = 1000, tg_id: int | None = None, direction: str = 'all', before_id: int = 0, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+/root/vpn_bot/user_events.py:551:def recent_events(
+/root/vpn_bot/user_events.py:576:def get_event(
+/root/vpn_bot/user_events.py:591:def unread_messages_summary(
+/root/vpn_bot/user_events.py:669:def unread_states(
+/root/vpn_bot/user_events.py:700:def unread_summary(*, db_path: str | Path | None = None) -> dict[str, int]:
+/root/vpn_bot/user_events.py:705:def _mark_messages_read_once(
+/root/vpn_bot/user_events.py:794:def _with_busy_retry(operation):
+/root/vpn_bot/user_events.py:806:def mark_messages_read(
+/root/vpn_bot/user_events.py:825:def mark_conversation_opened(
+/root/vpn_bot/user_events.py:843:def mark_read(
+/root/vpn_bot/user_events.py:858:def rekey_message_state(
+/root/vpn_bot/user_events.py:916:def rekey_chat_state(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
+/root/vpn_bot/user_events.py:920:def prune_events(
+/root/vpn_bot/services/subscriptions.py:38:class SubscriptionResult:
+/root/vpn_bot/services/subscriptions.py:50:class PaymentApprovalResult:
+/root/vpn_bot/services/subscriptions.py:58:def clean_username(username: str | None, tg_id: int) -> str:
+/root/vpn_bot/services/subscriptions.py:64:def panel_email_for(username: str | None, tg_id: int) -> str:
+/root/vpn_bot/services/subscriptions.py:80:def _db_path(db_path: str | Path | None = None) -> str:
+/root/vpn_bot/services/subscriptions.py:85:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/services/subscriptions.py:101:def ensure_telegram_user_shell_sync(
+/root/vpn_bot/services/subscriptions.py:144:def get_user_by_tg_id(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
+/root/vpn_bot/services/subscriptions.py:150:def _upsert_user(
+/root/vpn_bot/services/subscriptions.py:198:def _client_from_snapshot_by_email(email: str, force: bool = True) -> dict[str, Any] | None:
+/root/vpn_bot/services/subscriptions.py:206:def recover_user_identity_sync(
+/root/vpn_bot/services/subscriptions.py:245:def _candidate_for_subscription(
+/root/vpn_bot/services/subscriptions.py:256:def _allocate_local_tg_id(username: str, db_path: str | Path | None = None) -> int:
+/root/vpn_bot/services/subscriptions.py:274:def ensure_subscription_sync(
+/root/vpn_bot/services/subscriptions.py:390:def repair_panel_client_identities_sync(db_path: str | Path | None = None) -> dict[str, Any]:
+/root/vpn_bot/services/subscriptions.py:439:def import_local_users_to_3xui_sync(db_path: str | Path | None = None) -> dict[str, Any]:
+/root/vpn_bot/services/subscriptions.py:508:def approve_payment_sync(
+/root/vpn_bot/services/subscriptions.py:588:def decline_payment_sync(
+/root/vpn_bot/services/subscriptions.py:613:def bind_database_user_tg_id_sync(
+/root/vpn_bot/services/receipt_ocr.py:73:class ReceiptAnalysis:
+/root/vpn_bot/services/receipt_ocr.py:161:def _normalize_space(value: str) -> str:
+/root/vpn_bot/services/receipt_ocr.py:166:def _word_text(value: str) -> str:
+/root/vpn_bot/services/receipt_ocr.py:171:def _phone_digits(value: str) -> str:
+/root/vpn_bot/services/receipt_ocr.py:180:def _split_aliases(receiver: str, aliases: str | Iterable[str] | None) -> list[str]:
+/root/vpn_bot/services/receipt_ocr.py:194:def _edit_distance_at_most_one(left: str, right: str) -> bool:
+/root/vpn_bot/services/receipt_ocr.py:218:def match_receiver_name(text: str, receiver: str, aliases: str | Iterable[str] | None = None) -> tuple[bool, str]:
+/root/vpn_bot/services/receipt_ocr.py:244:def _digit_pattern(digits: str) -> re.Pattern[str]:
+/root/vpn_bot/services/receipt_ocr.py:249:def match_recipient_phone(text: str, configured_phone: str, allow_masked: bool = True) -> tuple[bool, str]:
+/root/vpn_bot/services/receipt_ocr.py:274:def _parse_decimal(raw: str) -> float | None:
+/root/vpn_bot/services/receipt_ocr.py:286:def extract_amount(text: str) -> float | None:
+/root/vpn_bot/services/receipt_ocr.py:338:def _timezone(name: str) -> ZoneInfo:
+/root/vpn_bot/services/receipt_ocr.py:346:def _valid_datetime(year: int, month: int, day: int, hour: int, minute: int, zone: ZoneInfo) -> datetime | None:
+/root/vpn_bot/services/receipt_ocr.py:353:def extract_receipt_datetime(text: str, timezone_name: str = "Europe/Moscow", now: datetime | None = None) -> datetime | None:
+/root/vpn_bot/services/receipt_ocr.py:403:def _prepare_image(content: bytes):
+/root/vpn_bot/services/receipt_ocr.py:423:def perceptual_hash(content: bytes) -> str:
+/root/vpn_bot/services/receipt_ocr.py:445:def recognize_text(content: bytes, languages: str = "rus+eng", timeout_seconds: int = 20) -> str:
+/root/vpn_bot/services/receipt_ocr.py:500:def analyze_receipt(
+/root/vpn_bot/services/receipt_ocr.py:591:def _connect(db_path: str | Path) -> sqlite3.Connection:
+/root/vpn_bot/services/receipt_ocr.py:598:def find_duplicate_receipt(
+/root/vpn_bot/services/receipt_ocr.py:643:def save_analysis(db_path: str | Path, payment_id: int, analysis: ReceiptAnalysis) -> None:
+/root/vpn_bot/services/receipt_ocr.py:673:def analyze_payment_receipt(
+/root/vpn_bot/push_service.py:16:def b64u(data: bytes)->str: return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+/root/vpn_bot/push_service.py:17:def b64ud(value: str)->bytes: return base64.urlsafe_b64decode((value+'='*(-len(value)%4)).encode('ascii'))
+/root/vpn_bot/push_service.py:18:def _pub(key)->bytes: return key.public_key().public_bytes(serialization.Encoding.X962,serialization.PublicFormat.UncompressedPoint)
+/root/vpn_bot/push_service.py:19:def _path()->Path: return Path(str(getattr(config,'PUSH_VAPID_PRIVATE_KEY_PATH','/var/lib/vpn-service/vapid_private.pem')))
+/root/vpn_bot/push_service.py:20:def _load(path:Path): return serialization.load_pem_private_key(path.read_bytes(),password=None)
+/root/vpn_bot/push_service.py:22:def ensure_vapid_keys()->str:
+/root/vpn_bot/push_service.py:37:def public_key()->str:
+/root/vpn_bot/push_service.py:41:def _subject()->str:
+/root/vpn_bot/push_service.py:48:def _jwt(key,aud:str)->str:
+/root/vpn_bot/push_service.py:56:def _origin(endpoint:str)->str:
+/root/vpn_bot/push_service.py:61:def _encrypt(sub:dict,payload:bytes)->bytes:
+/root/vpn_bot/push_service.py:79:def migrate_tables(db_path: str) -> None:
+/root/vpn_bot/push_service.py:108:def _log(db_path: str, username: str, event: str, message: str, level: str = 'INFO') -> None:
+/root/vpn_bot/push_service.py:118:def panel_logs(db_path: str, limit: int = 80, username: str = "") -> list[dict]:
+/root/vpn_bot/push_service.py:147:def panel_subscribe(db_path: str, username: str, subscription: dict, user_agent: str = "") -> None:
+/root/vpn_bot/push_service.py:180:def panel_unsubscribe(db_path: str, username: str, endpoint: str) -> None:
+/root/vpn_bot/push_service.py:192:def active_subscription_count(db_path: str, username: str) -> int:
+/root/vpn_bot/push_service.py:201:def panel_status(db_path: str, username: str) -> dict:
+/root/vpn_bot/push_service.py:227:def _send_push(endpoint: str, p256dh: str, auth: str, payload: bytes, urgency: str) -> tuple[bool, int, str]:
+/root/vpn_bot/push_service.py:246:def notify_panel(db_path: str, username: str, title: str, body: str, url: str = "/", tag: str = "fargovpn", urgency: str = "normal") -> dict:
+/root/vpn_bot/push_service.py:307:def _fargovpn_push_hotfix_log(*args, **kwargs):
+/root/vpn_bot/push_service.py:323:def _fargovpn_push_hotfix_notify_panel(*args, **kwargs):
+/root/vpn_bot/referral_codes.py:12:def ensure_referral_code(db_path: str, user_id: int) -> str:
+/root/vpn_bot/broadcast_worker.py:21:def _extract_file_id(kind: str, payload: dict[str, Any]) -> str:
+/root/vpn_bot/broadcast_worker.py:33:def _telegram_call(
+/root/vpn_bot/broadcast_worker.py:80:def _record_result(manifest: dict[str, Any], delivered_ids: list[int], failed: int) -> None:
+/root/vpn_bot/broadcast_worker.py:131:def run(job_id: str, startup_delay: float = 0.0) -> int:
+/root/vpn_bot/broadcast_worker.py:258:def main() -> int:
+/root/vpn_bot/cabinet_service.py:21:def _secret() -> bytes:
+/root/vpn_bot/cabinet_service.py:28:def _sign(payload: str) -> str:
+/root/vpn_bot/cabinet_service.py:32:def make_token(tg_id: int, sub_id: str = "") -> str:
+/root/vpn_bot/cabinet_service.py:39:def token_user_id(token: str) -> int:
+/root/vpn_bot/cabinet_service.py:44:def verify_token(token: str, sub_id: str = "") -> int:
+/root/vpn_bot/cabinet_service.py:59:def public_prefix() -> str:
+/root/vpn_bot/cabinet_service.py:67:def public_path(path: str = "/") -> str:
+/root/vpn_bot/cabinet_service.py:77:def public_web_base_url() -> str:
+/root/vpn_bot/cabinet_service.py:93:def personal_url(tg_id: int, sub_id: str = "") -> str:
+/root/vpn_bot/cabinet_service.py:106:def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
+/root/vpn_bot/cabinet_service.py:113:def identity_candidates(tg_id: int, db_path: str | Path | None = None) -> list[str]:
+/root/vpn_bot/cabinet_service.py:127:def _matched_names(db: sqlite3.Connection, candidates: list[str]) -> list[str]:
+/root/vpn_bot/cabinet_service.py:140:def get_user(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
+/root/vpn_bot/cabinet_service.py:146:def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
+
+===== BACKUP / RESTORE REFERENCES =====
+/root/vpn_bot/backup.py:14:import sqlite3
+/root/vpn_bot/backup.py:38:def sqlite_snapshot(source: Path, destination: Path) -> None:
+/root/vpn_bot/backup.py:43:    source_conn = sqlite3.connect(str(source), timeout=30)
+/root/vpn_bot/backup.py:44:    destination_conn = sqlite3.connect(str(destination), timeout=30)
+/root/vpn_bot/backup.py:46:        source_conn.backup(destination_conn)
+/root/vpn_bot/backup.py:105:    sqlite_snapshot(source, destination)
+/root/vpn_bot/backup.py:887:        connection = sqlite3.connect(config.DB_PATH, timeout=15)
+/root/vpn_bot/backup.py:1027:            with sqlite3.connect(str(config.DB_PATH), timeout=20) as connection:
+/root/vpn_bot/backup.py:1034:        except sqlite3.Error as exc:
+/root/vpn_bot/backup.py:1163:def create_backup() -> Path:
+/root/vpn_bot/backup.py:1249:            archive = create_backup()
+/root/vpn_bot/webapp.py:17:import sqlite3
+/root/vpn_bot/webapp.py:424:    connection = sqlite3.connect(config.DB_PATH, timeout=20)
+/root/vpn_bot/webapp.py:426:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/webapp.py:1021:    except sqlite3.OperationalError as error:
+/root/vpn_bot/webapp.py:1636:                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_runs'"
+/root/vpn_bot/webapp.py:1650:    except (OSError, sqlite3.Error) as error:
+/root/vpn_bot/webapp.py:1725:        user_events_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_events'").fetchone())
+/root/vpn_bot/webapp.py:1736:            audit_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_log'").fetchone())
+/root/vpn_bot/webapp.py:1741:        except sqlite3.Error as error:
+/root/vpn_bot/webapp.py:2086:                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+/root/vpn_bot/webapp.py:2224:        with sqlite3.connect(config.DB_PATH, timeout=10) as _conn:
+/root/vpn_bot/webapp.py:2225:            _conn.row_factory = sqlite3.Row
+/root/vpn_bot/webapp.py:2456:<div class="grid"><div class="card full"><h2>Загрузить старую базу или архив</h2><p class="muted">Поддерживаются SQLite и tar.gz. Импорт сначала создаёт отчёт; изменения не применяются до отдельного подтверждения. Загруженная копия удаляется после применения.</p><form method="post" action="/users/import-identities" enctype="multipart/form-data"><div class="setting"><label>Старая база/архив</label><input type="file" name="source" accept=".db,.sqlite,.sqlite3,.tar,.gz,.tgz,application/gzip" required></div><button>Проверить привязки</button></form></div>{preview_block}</div>'''
+/root/vpn_bot/webapp.py:3609:def safe_backup(name: str) -> Path:
+/root/vpn_bot/webapp.py:3648:def create_backup(request: Request):
+/root/vpn_bot/webapp.py:3672:    return FileResponse(safe_backup(name), filename=Path(name).name)
+/root/vpn_bot/webapp.py:3678:    safe_backup(name).unlink()
+/root/vpn_bot/webapp.py:3684:def safe_extract_backup(archive_path: Path, destination: Path) -> Path:
+/root/vpn_bot/webapp.py:3711:def restore_sqlite(source: Path, target: Path) -> None:
+/root/vpn_bot/webapp.py:3713:    source_connection = sqlite3.connect(source, timeout=30)
+/root/vpn_bot/webapp.py:3714:    target_connection = sqlite3.connect(target, timeout=30)
+/root/vpn_bot/webapp.py:3716:        source_connection.backup(target_connection)
+/root/vpn_bot/webapp.py:3726:    archive = safe_backup(name)
+/root/vpn_bot/webapp.py:3729:        root = safe_extract_backup(archive, work)
+/root/vpn_bot/webapp.py:3744:            restore_sqlite(bot_source, Path(config.DB_PATH))
+/root/vpn_bot/webapp.py:3746:            restore_sqlite(xui_source, Path(config.XUI_DB_PATH))
+/root/vpn_bot/tests/test_referral_backup_rebind.py:2:import sqlite3
+/root/vpn_bot/tests/test_referral_backup_rebind.py:17:    connection = sqlite3.connect(path)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:85:    conn = sqlite3.connect(db)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:117:    conn = sqlite3.connect(db)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:145:    conn=sqlite3.connect(db); assert conn.execute("SELECT status FROM referral_rewards WHERE referred_tg_id=200").fetchone()[0]=="skipped_unlimited"; conn.close()
+/root/vpn_bot/tests/test_referral_backup_rebind.py:187:    conn=sqlite3.connect(db)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:270:    conn = sqlite3.connect(db)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:281:    conn = sqlite3.connect(db)
+/root/vpn_bot/tests/test_referral_backup_rebind.py:282:    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+/root/vpn_bot/tests/test_referral_backup_rebind.py:292:    conn = sqlite3.connect(db)
+/root/vpn_bot/tests/test_regressions.py:2:import sqlite3
+/root/vpn_bot/tests/test_regressions.py:79:        result = webapp.create_backup(request)
+/root/vpn_bot/tests/test_performance_regressions.py:75:    import sqlite3
+/root/vpn_bot/tests/test_performance_regressions.py:77:    with sqlite3.connect(db) as conn:
+/root/vpn_bot/tests/test_performance_regressions.py:88:    with sqlite3.connect(db) as conn:
+/root/vpn_bot/user_events.py:12:import sqlite3
+/root/vpn_bot/user_events.py:52:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/user_events.py:55:    connection = sqlite3.connect(str(path), timeout=20)
+/root/vpn_bot/user_events.py:56:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/user_events.py:68:def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+/root/vpn_bot/user_events.py:71:            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+/root/vpn_bot/user_events.py:85:def _install_unread_trigger(connection: sqlite3.Connection) -> None:
+/root/vpn_bot/user_events.py:134:def _baseline_message_state(connection: sqlite3.Connection) -> None:
+/root/vpn_bot/user_events.py:266:def _event_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+/root/vpn_bot/user_events.py:798:        except sqlite3.OperationalError as error:
+/root/vpn_bot/user_events.py:859:    connection: sqlite3.Connection,
+/root/vpn_bot/user_events.py:916:def rekey_chat_state(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
+/root/vpn_bot/services/subscriptions.py:13:import sqlite3
+/root/vpn_bot/services/subscriptions.py:85:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/services/subscriptions.py:88:    connection = sqlite3.connect(str(path), timeout=30)
+/root/vpn_bot/services/subscriptions.py:89:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/services/receipt_ocr.py:15:import sqlite3
+/root/vpn_bot/services/receipt_ocr.py:591:def _connect(db_path: str | Path) -> sqlite3.Connection:
+/root/vpn_bot/services/receipt_ocr.py:592:    connection = sqlite3.connect(str(db_path), timeout=30)
+/root/vpn_bot/services/receipt_ocr.py:593:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:5:import base64, hashlib, hmac, json, logging, os, secrets, sqlite3, time
+/root/vpn_bot/push_service.py:81:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:111:        with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:128:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:129:        c.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:156:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:183:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:194:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:219:        with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:263:    with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/push_service.py:264:        c.row_factory = sqlite3.Row
+/root/vpn_bot/push_service.py:273:        with sqlite3.connect(db_path, timeout=30) as c:
+/root/vpn_bot/update_manager.py:444:def validate_preupdate_backup(path: str) -> Path:
+/root/vpn_bot/update_manager.py:454:    target = validate_preupdate_backup(backup_path)
+/root/vpn_bot/referral_codes.py:6:import sqlite3
+/root/vpn_bot/referral_codes.py:15:    with sqlite3.connect(db_path, timeout=20) as connection:
+/root/vpn_bot/referral_codes.py:16:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/broadcast_worker.py:8:import sqlite3
+/root/vpn_bot/broadcast_worker.py:101:    connection = sqlite3.connect(str(config.DB_PATH), timeout=30)
+/root/vpn_bot/broadcast_worker.py:125:    except sqlite3.Error:
+/root/vpn_bot/cabinet_service.py:11:import sqlite3
+/root/vpn_bot/cabinet_service.py:106:def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
+/root/vpn_bot/cabinet_service.py:107:    conn = sqlite3.connect(str(db_path or config.DB_PATH), timeout=20)
+/root/vpn_bot/cabinet_service.py:108:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/cabinet_service.py:127:def _matched_names(db: sqlite3.Connection, candidates: list[str]) -> list[str]:
+/root/vpn_bot/identity_migration.py:18:import sqlite3
+/root/vpn_bot/identity_migration.py:74:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/identity_migration.py:77:    connection = sqlite3.connect(str(path), timeout=30)
+/root/vpn_bot/identity_migration.py:78:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:110:def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+/root/vpn_bot/identity_migration.py:140:def _is_sqlite(path: Path) -> bool:
+/root/vpn_bot/identity_migration.py:155:    if _is_sqlite(source):
+/root/vpn_bot/identity_migration.py:179:            if not suffix.endswith((".db", ".sqlite", ".sqlite3")):
+/root/vpn_bot/identity_migration.py:195:            if _is_sqlite(target):
+/root/vpn_bot/identity_migration.py:205:    if not _is_sqlite(path):
+/root/vpn_bot/identity_migration.py:208:        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+/root/vpn_bot/identity_migration.py:209:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/identity_migration.py:210:    except sqlite3.Error:
+/root/vpn_bot/identity_migration.py:214:            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='users'"
+/root/vpn_bot/identity_migration.py:233:    except sqlite3.Error:
+/root/vpn_bot/identity_migration.py:462:def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+/root/vpn_bot/identity_migration.py:465:            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+/root/vpn_bot/identity_migration.py:470:def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+/root/vpn_bot/identity_migration.py:474:def _rekey_referral_rows(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
+/root/vpn_bot/identity_migration.py:489:    connection: sqlite3.Connection,
+/root/vpn_bot/rollback_worker.py:122:    return run(a.job_id,update_manager.validate_preupdate_backup(a.backup))
+/root/vpn_bot/diagnostics.py:15:import sqlite3
+/root/vpn_bot/diagnostics.py:30:def _scalar(connection: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> int:
+/root/vpn_bot/diagnostics.py:67:        connection = sqlite3.connect(str(path), timeout=20)
+/root/vpn_bot/diagnostics.py:68:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/diagnostics.py:73:            "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+/root/vpn_bot/diagnostics.py:86:            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+/root/vpn_bot/subscription_refresh_manager.py:10:import sqlite3
+/root/vpn_bot/trigger_reminders.py:10:import sqlite3
+/root/vpn_bot/trigger_reminders.py:48:        connection = sqlite3.connect(config.DB_PATH, timeout=20)
+/root/vpn_bot/trigger_reminders.py:89:    connection = sqlite3.connect(config.DB_PATH, timeout=20)
+/root/vpn_bot/auth_security.py:5:import sqlite3
+/root/vpn_bot/auth_security.py:37:def _connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+/root/vpn_bot/auth_security.py:40:    connection = sqlite3.connect(str(path), timeout=20)
+/root/vpn_bot/auth_security.py:41:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/init_db.py:5:import sqlite3
+/root/vpn_bot/init_db.py:78:def ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+/root/vpn_bot/init_db.py:88:    connection = sqlite3.connect(path, timeout=30)
+/root/vpn_bot/init_db.py:93:                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_message_state'"
+/root/vpn_bot/broadcast_manager.py:11:import sqlite3
+/root/vpn_bot/broadcast_manager.py:172:    connection = sqlite3.connect(str(config.DB_PATH), timeout=20)
+/root/vpn_bot/broadcast_manager.py:173:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:8:import sqlite3
+/root/vpn_bot/main.py:379:    with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:601:    conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/main.py:602:    conn.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:611:    conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/main.py:666:    with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:667:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:677:    with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:678:        connection.row_factory = sqlite3.Row
+/root/vpn_bot/main.py:947:            with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:994:            with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:1018:                with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:1190:    conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/main.py:1275:        conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/main.py:1420:        with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:1458:    with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:1470:        except sqlite3.Error:
+/root/vpn_bot/main.py:1483:    with sqlite3.connect(config.DB_PATH, timeout=20) as connection:
+/root/vpn_bot/main.py:1698:        conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/main.py:1840:        conn = sqlite3.connect(config.DB_PATH)
+/root/vpn_bot/subscription_refresh_worker.py:7:import sqlite3
+/root/vpn_bot/subscription_refresh_worker.py:20:    connection = sqlite3.connect(str(config.DB_PATH), timeout=20)
+/root/vpn_bot/subscription_refresh_worker.py:21:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/subscription_refresh_worker.py:143:        connection = sqlite3.connect(str(config.DB_PATH), timeout=30)
+/root/vpn_bot/subscription_refresh_worker.py:159:    except sqlite3.Error:
+/root/vpn_bot/referral_rewards.py:11:import sqlite3
+/root/vpn_bot/referral_rewards.py:30:def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
+/root/vpn_bot/referral_rewards.py:31:    connection = sqlite3.connect(str(db_path or config.DB_PATH), timeout=30)
+/root/vpn_bot/referral_rewards.py:32:    connection.row_factory = sqlite3.Row
+/root/vpn_bot/referral_rewards.py:37:def ensure_schema(connection: sqlite3.Connection) -> None:
+/root/vpn_bot/referral_rewards.py:66:def _user_row(connection: sqlite3.Connection, tg_id: int) -> sqlite3.Row | None:
+/root/vpn_bot/referral_rewards.py:71:    connection: sqlite3.Connection,

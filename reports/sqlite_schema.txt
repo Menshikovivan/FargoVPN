@@ -1,0 +1,243 @@
+TABLE|access_attempts|CREATE TABLE access_attempts (
+        tg_id INTEGER PRIMARY KEY, attempts INTEGER NOT NULL, reset_at INTEGER NOT NULL
+    )
+TABLE|access_invites|CREATE TABLE access_invites (
+        code TEXT PRIMARY KEY, owner_id INTEGER NOT NULL UNIQUE,
+        expires_at INTEGER NOT NULL, used_by INTEGER, revoked INTEGER NOT NULL DEFAULT 0
+    )
+TABLE|audit_log|CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                actor TEXT,
+                action TEXT,
+                details TEXT
+            )
+TABLE|backup_runs|CREATE TABLE backup_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                filename TEXT,
+                size INTEGER,
+                telegram_ok INTEGER,
+                telegram_detail TEXT,
+                yandex_ok INTEGER,
+                yandex_detail TEXT,
+                google_ok INTEGER,
+                google_detail TEXT,
+                error TEXT
+            )
+TABLE|cabinet_login_requests|CREATE TABLE cabinet_login_requests (
+                token_hash TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at INTEGER NOT NULL,
+                resolved_tg_id INTEGER,
+                consumed_at TEXT
+            )
+TABLE|identity_import_runs|CREATE TABLE identity_import_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                source_name TEXT,
+                scanned INTEGER DEFAULT 0,
+                matched INTEGER DEFAULT 0,
+                updated INTEGER DEFAULT 0,
+                conflicts INTEGER DEFAULT 0,
+                panel_updated INTEGER DEFAULT 0,
+                details TEXT
+            )
+TABLE|login_security|CREATE TABLE login_security (
+                identity TEXT PRIMARY KEY,
+                failures INTEGER NOT NULL DEFAULT 0,
+                first_failed_at INTEGER NOT NULL DEFAULT 0,
+                last_failed_at INTEGER NOT NULL DEFAULT 0,
+                blocked_until INTEGER NOT NULL DEFAULT 0,
+                blocks INTEGER NOT NULL DEFAULT 0
+            )
+TABLE|manual_keys|CREATE TABLE manual_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT,
+                remark TEXT
+            )
+TABLE|message_log|CREATE TABLE message_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                actor TEXT,
+                tg_id INTEGER,
+                username TEXT,
+                message TEXT,
+                success INTEGER,
+                detail TEXT
+            )
+TABLE|metrics|CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                cpu REAL,
+                ram REAL,
+                disk REAL,
+                net_in INTEGER,
+                net_out INTEGER
+            )
+TABLE|panel_notification_state|CREATE TABLE panel_notification_state (
+                channel TEXT PRIMARY KEY,
+                last_read_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+TABLE|panel_push_logs|CREATE TABLE panel_push_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            level TEXT NOT NULL DEFAULT 'INFO',
+            event TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+TABLE|panel_push_subscriptions|CREATE TABLE panel_push_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            endpoint TEXT NOT NULL UNIQUE,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            user_agent TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_success_at TEXT,
+            last_error TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+TABLE|payments|CREATE TABLE payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER NOT NULL,
+                username TEXT,
+                telegram_file_id TEXT,
+                status TEXT DEFAULT 'pending',
+                amount INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                processed_at TEXT,
+                processed_by TEXT,
+                last_error TEXT
+            , receipt_sha256 TEXT, receipt_text_sha256 TEXT, receipt_phash TEXT, receipt_amount REAL, receipt_date TEXT, receipt_phone TEXT, receipt_receiver TEXT, ocr_status TEXT DEFAULT 'not_checked', ocr_text TEXT, ocr_details TEXT, auto_approved INTEGER DEFAULT 0)
+TABLE|pending_registrations|CREATE TABLE pending_registrations (
+                tg_id INTEGER PRIMARY KEY,
+                username TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+TABLE|push_subscriptions|CREATE TABLE push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                user_agent TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_success_at TEXT,
+                last_error TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1
+            )
+TABLE|referral_rewards|CREATE TABLE referral_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_tg_id INTEGER NOT NULL,
+                referred_tg_id INTEGER NOT NULL UNIQUE,
+                reward_days INTEGER NOT NULL DEFAULT 10,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                granted_at TEXT,
+                target_expiry_ms INTEGER,
+                observed_expiry_before_ms INTEGER,
+                details TEXT
+            )
+TABLE|telegram_link_requests|CREATE TABLE telegram_link_requests (token TEXT PRIMARY KEY, local_tg_id INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, resolved_tg_id INTEGER)
+TABLE|user_events|CREATE TABLE user_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                tg_id INTEGER NOT NULL,
+                username TEXT,
+                direction TEXT NOT NULL DEFAULT 'system',
+                event_type TEXT NOT NULL DEFAULT 'event',
+                text TEXT,
+                actor TEXT,
+                success INTEGER DEFAULT 1,
+                metadata TEXT
+            )
+TABLE|user_message_state|CREATE TABLE user_message_state (
+                tg_id INTEGER PRIMARY KEY,
+                last_read_event_id INTEGER NOT NULL DEFAULT 0,
+                last_incoming_event_id INTEGER NOT NULL DEFAULT 0,
+                unread_count INTEGER NOT NULL DEFAULT 0,
+                last_message_at TEXT,
+                last_message_text TEXT
+            )
+TABLE|users|CREATE TABLE users (
+                tg_id INTEGER PRIMARY KEY,
+                username TEXT,
+                uuid TEXT,
+                email TEXT,
+                expiry_time INTEGER DEFAULT 0,
+                enable INTEGER DEFAULT 0,
+                up INTEGER DEFAULT 0,
+                down INTEGER DEFAULT 0,
+                total INTEGER DEFAULT 0,
+                sub_id TEXT,
+                last_online TEXT,
+                last_online_ts INTEGER DEFAULT 0,
+                last_sync_at TEXT,
+                last_reminder_days INTEGER DEFAULT -1
+            , identity_source TEXT, identity_updated_at TEXT, notes TEXT, referral_code TEXT, referred_by_tg_id INTEGER, referred_by_code TEXT, registered_at TEXT, referral_code_updated_at INTEGER DEFAULT 0)
+TABLE|web_push_subscriptions|CREATE TABLE web_push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                endpoint TEXT NOT NULL UNIQUE,
+                subscription_json TEXT NOT NULL,
+                vapid_public_key TEXT,
+                vapid_subject TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+INDEX|idx_audit_log_actor_action|audit_log|CREATE INDEX idx_audit_log_actor_action ON audit_log(actor, action, created_at DESC)
+INDEX|idx_audit_log_created|audit_log|CREATE INDEX idx_audit_log_created ON audit_log(created_at DESC, id DESC)
+INDEX|idx_backup_runs_created|backup_runs|CREATE INDEX idx_backup_runs_created ON backup_runs(created_at DESC)
+INDEX|idx_cabinet_login_expires|cabinet_login_requests|CREATE INDEX idx_cabinet_login_expires ON cabinet_login_requests(expires_at)
+INDEX|idx_identity_import_created|identity_import_runs|CREATE INDEX idx_identity_import_created ON identity_import_runs(created_at DESC)
+INDEX|idx_login_security_last_failed|login_security|CREATE INDEX idx_login_security_last_failed ON login_security(last_failed_at)
+INDEX|idx_panel_notification_state_updated|panel_notification_state|CREATE INDEX idx_panel_notification_state_updated ON panel_notification_state(updated_at)
+INDEX|idx_panel_push_logs_created|panel_push_logs|CREATE INDEX idx_panel_push_logs_created ON panel_push_logs(created_at DESC)
+INDEX|idx_panel_push_enabled|panel_push_subscriptions|CREATE INDEX idx_panel_push_enabled ON panel_push_subscriptions(enabled)
+INDEX|idx_panel_push_username|panel_push_subscriptions|CREATE INDEX idx_panel_push_username ON panel_push_subscriptions(username)
+INDEX|idx_payments_receipt_sha|payments|CREATE INDEX idx_payments_receipt_sha ON payments(receipt_sha256)
+INDEX|idx_payments_receipt_text_sha|payments|CREATE INDEX idx_payments_receipt_text_sha ON payments(receipt_text_sha256)
+INDEX|idx_payments_status|payments|CREATE INDEX idx_payments_status ON payments(status, id DESC)
+INDEX|idx_push_subscriptions_enabled|push_subscriptions|CREATE INDEX idx_push_subscriptions_enabled ON push_subscriptions(enabled)
+INDEX|idx_push_subscriptions_tg|push_subscriptions|CREATE INDEX idx_push_subscriptions_tg ON push_subscriptions(tg_id)
+INDEX|idx_referral_rewards_referrer|referral_rewards|CREATE INDEX idx_referral_rewards_referrer ON referral_rewards(referrer_tg_id, id DESC)
+INDEX|idx_referral_rewards_status|referral_rewards|CREATE INDEX idx_referral_rewards_status ON referral_rewards(status, id DESC)
+INDEX|idx_tg_link_local|telegram_link_requests|CREATE INDEX idx_tg_link_local ON telegram_link_requests(local_tg_id)
+INDEX|idx_user_events_created|user_events|CREATE INDEX idx_user_events_created ON user_events(created_at DESC)
+INDEX|idx_user_events_incoming_id|user_events|CREATE INDEX idx_user_events_incoming_id ON user_events(direction,event_type,id,tg_id)
+INDEX|idx_user_events_message_lookup|user_events|CREATE INDEX idx_user_events_message_lookup ON user_events(tg_id, direction, event_type, id DESC)
+INDEX|idx_user_events_tg_id_id|user_events|CREATE INDEX idx_user_events_tg_id_id ON user_events(tg_id, id DESC)
+INDEX|idx_user_message_state_unread|user_message_state|CREATE INDEX idx_user_message_state_unread ON user_message_state(unread_count, last_incoming_event_id DESC)
+INDEX|idx_users_email|users|CREATE INDEX idx_users_email ON users(email)
+INDEX|idx_users_expiry|users|CREATE INDEX idx_users_expiry ON users(expiry_time)
+INDEX|idx_users_last_online|users|CREATE INDEX idx_users_last_online ON users(last_online_ts)
+INDEX|idx_users_referral_code|users|CREATE INDEX idx_users_referral_code ON users(referral_code)
+INDEX|idx_users_referred_by|users|CREATE INDEX idx_users_referred_by ON users(referred_by_tg_id)
+INDEX|idx_web_push_username|web_push_subscriptions|CREATE INDEX idx_web_push_username ON web_push_subscriptions(username)
+TRIGGER|trg_user_events_unread_insert_v268|user_events|CREATE TRIGGER trg_user_events_unread_insert_v268
+        AFTER INSERT ON user_events
+        WHEN NEW.direction='in'
+          AND NEW.event_type IN ('telegram_audio','telegram_document','telegram_message','telegram_photo','telegram_sticker','telegram_video','telegram_voice')
+           AND NEW.tg_id NOT IN (53976335)
+        BEGIN
+            INSERT INTO user_message_state(
+                tg_id,last_read_event_id,last_incoming_event_id,unread_count,
+                last_message_at,last_message_text
+            ) VALUES(
+                NEW.tg_id,0,NEW.id,1,NEW.created_at,SUBSTR(COALESCE(NEW.text,''),1,500)
+            )
+            ON CONFLICT(tg_id) DO UPDATE SET
+                last_incoming_event_id=MAX(user_message_state.last_incoming_event_id,NEW.id),
+                unread_count=CASE
+                    WHEN NEW.id>user_message_state.last_read_event_id
+                    THEN MAX(0,user_message_state.unread_count)+1
+                    ELSE MAX(0,user_message_state.unread_count)
+                END,
+                last_message_at=NEW.created_at,
+                last_message_text=SUBSTR(COALESCE(NEW.text,''),1,500);
+        END

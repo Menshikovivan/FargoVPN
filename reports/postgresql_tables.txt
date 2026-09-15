@@ -1,0 +1,27 @@
+                    List of relations
+ Schema |           Name           | Type  |    Owner     
+--------+--------------------------+-------+--------------
+ public | access_attempts          | table | fargovpn_app
+ public | access_invites           | table | fargovpn_app
+ public | audit_log                | table | fargovpn_app
+ public | backup_runs              | table | fargovpn_app
+ public | cabinet_login_requests   | table | fargovpn_app
+ public | identity_import_runs     | table | fargovpn_app
+ public | login_security           | table | fargovpn_app
+ public | manual_keys              | table | fargovpn_app
+ public | message_log              | table | fargovpn_app
+ public | metrics                  | table | fargovpn_app
+ public | panel_notification_state | table | fargovpn_app
+ public | panel_push_logs          | table | fargovpn_app
+ public | panel_push_subscriptions | table | fargovpn_app
+ public | payments                 | table | fargovpn_app
+ public | pending_registrations    | table | fargovpn_app
+ public | push_subscriptions       | table | fargovpn_app
+ public | referral_rewards         | table | fargovpn_app
+ public | telegram_link_requests   | table | fargovpn_app
+ public | user_events              | table | fargovpn_app
+ public | user_message_state       | table | fargovpn_app
+ public | users                    | table | fargovpn_app
+ public | web_push_subscriptions   | table | fargovpn_app
+(22 rows)
+
