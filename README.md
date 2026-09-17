@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.2-5865F2)
+![Version](https://img.shields.io/badge/version-4.3.4-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -10,7 +10,7 @@
 
 Проект объединяет Telegram-бота, веб-панель, Telegram Mini App/PWA, интеграцию с **3x-ui**, приём и проверку чеков, резервное копирование, диагностику, рассылки и автоматические обновления через GitHub Releases.
 
-> **FargoVPN 4.2** — PostgreSQL-first релиз: безопаснее обрабатывает существующие PostgreSQL-установки, миграцию старых SQLite-баз и lifecycle обновлений, сохраняя отдельную SQLite-базу 3x-ui.
+> **FargoVPN 4.3.4** — production-релиз с единым сценарием установки через `wget`: пользователь скачивает только `install.sh`, после чего установщик сам получает полный актуальный пакет из `main` и запускает полноценную установку с консоли.
 
 ---
 
@@ -49,9 +49,9 @@
 - Сомнительные операции могут оставаться на ручной проверке.
 
 ### 💾 Резервное копирование
-В 4.2 база приложения работает с PostgreSQL. Локальный backup может включать PostgreSQL logical dump, исходники приложения, конфигурационные данные и отдельные данные 3x-ui.
+В 4.3.4 база приложения работает с PostgreSQL. Локальный backup может включать PostgreSQL logical dump, исходники приложения, конфигурационные данные и отдельные данные 3x-ui.
 
-Дополнительная доставка поддерживается через Telegram и Яндекс.Диск. Локально проверенный архив не считается неуспешным только из-за временной недоступности внешнего хранилища.
+Дополнительная доставка поддерживается через Telegram и Яндекс.Диск. Успешность внешней доставки проверяется отдельно от локального создания backup.
 
 ### 🔄 Обновления и rollback
 - Источник релизов — GitHub Releases.
@@ -62,31 +62,76 @@
 
 ---
 
-## 🆕 FargoVPN 4.2
+## 🆕 FargoVPN 4.3.4
 
-### PostgreSQL-first lifecycle
+### Установка одной командой
 
-- Уже настроенный `DATABASE_URL` определяется до миграции.
-- Если приложение уже использует PostgreSQL, старая SQLite-копия не импортируется поверх актуальных данных.
-- Legacy SQLite-установка без PostgreSQL может быть автоматически мигрирована.
-- Состояние миграции хранится в `/var/lib/vpn-service/migration-state/` и не удаляется при `rsync --delete`.
-- Существующий PostgreSQL DSN сохраняется при обновлении.
-- `/etc/x-ui/x-ui.db` остаётся SQLite и не мигрируется.
+Для новой установки не нужно вручную скачивать и распаковывать архив.
 
-### Совместимость PostgreSQL
+### Full
 
-В 4.2 сохранены исправления для:
+```bash
+wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --profile full
+```
 
-- генерации ID без зависимости от SQLite `lastrowid`;
-- PostgreSQL-safe группировки страницы сообщений;
-- SQLite-style datetime/scalar MAX совместимости;
-- построения кнопок личного кабинета.
+Или с явным сохранением установщика:
 
-Подробности: [`RELEASE_NOTES_4.2.md`](./RELEASE_NOTES_4.2.md).
+```bash
+wget -O /tmp/fargovpn-install.sh https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh
+sudo bash /tmp/fargovpn-install.sh --profile full
+```
+
+Bootstrap `install.sh` сам:
+
+1. проверяет права root;
+2. скачивает `FargoVPN_FULL.tar.gz` из ветки `main`;
+3. проверяет SHA-256;
+4. распаковывает полный пакет во временный каталог;
+5. запускает штатный installer из полного пакета;
+6. передаёт ему параметры `--profile`, `--mask` и `--update-existing`.
+
+### Lite
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --profile lite
+```
+
+### Обновление существующей установки
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --update-existing /root/vpn_bot
+```
+
+При обновлении полный пакет скачивается автоматически; вручную загружать архив на сервер не требуется.
 
 ---
 
-## Архитектура
+## Архитектура GitHub
+
+В `main` хранятся только файлы, нужные для быстрого запуска и публикации актуального релиза:
+
+```text
+FargoVPN/
+├── install.sh
+├── README.md
+├── VERSION
+├── LICENSE
+├── CHANGELOG.md
+├── RELEASE_NOTES_4.3.4.md
+├── FargoVPN_FULL.tar.gz
+├── FargoVPN_FULL.tar.gz.sha256
+└── .github/
+    └── workflows/
+        └── publish-release.yml
+```
+
+Полный исходный код и установщик находятся внутри `FargoVPN_FULL.tar.gz`.
+
+Это позволяет держать корень `main` компактным и не загружать десятки отдельных файлов через веб-интерфейс GitHub.
+
+---
+
+## Архитектура приложения
 
 ```text
                          ┌──────────────────────┐
@@ -95,7 +140,7 @@
                                     │
 ┌──────────────────┐       ┌────────▼─────────┐       ┌──────────────────┐
 │ Telegram / PWA   │◄─────►│     FargoVPN     │◄─────►│      3x-ui        │
-│ Client Cabinet   │       │ Bot + Web + Jobs │       │     REST API       │
+│ Client Cabinet   │       │ Bot + Web + Jobs │       │     REST API      │
 └──────────────────┘       └────────┬─────────┘       └────────┬─────────┘
                                     │                           │
                               ┌─────▼─────┐               ┌─────▼─────┐
@@ -142,38 +187,11 @@ PostgreSQL может быть установлен скриптами прое�
 
 ---
 
-## Установка
-
-### Full
-
-```bash
-cd /root
-# распакуйте архив FargoVPN-4.2
-cd FargoVPN-4.2
-sudo bash install.sh --profile full
-```
-
-### Lite
-
-```bash
-sudo bash install.sh --profile lite
-```
-
-### Обновление существующей установки
-
-```bash
-sudo bash install.sh --update-existing /root/vpn_bot
-```
-
-При обновлении установщик проверяет текущую конфигурацию, создаёт backup, определяет backend БД, при необходимости выполняет SQLite → PostgreSQL migration, обновляет файлы и запускает финальные проверки.
-
----
-
 ## PostgreSQL migration
 
 Подробная инструкция находится в [`POSTGRESQL_MIGRATION.md`](./POSTGRESQL_MIGRATION.md).
 
-Ключевой принцип 4.2:
+Ключевой принцип 4.3.4:
 
 > **Если приложение уже работает на PostgreSQL, старая SQLite-база не должна использоваться как источник повторной миграции.**
 
@@ -184,7 +202,7 @@ sudo bash install.sh --update-existing /root/vpn_bot
 ```bash
 python migration_tool.py \
   --sqlite /path/to/vpn_bot.db \
-  --manifest migration_manifest.json \
+  --manifest /tmp/fargovpn-migration-manifest.json \
   --manifest-only
 ```
 
@@ -233,36 +251,39 @@ sudo /root/vpn_bot/.venv/bin/python \
 Дополнительные проверки:
 
 ```bash
-sudo bash diagnose_panel.sh
-sudo bash check_tls.sh
+sudo bash /root/vpn_bot/diagnose_panel.sh
+sudo bash /root/vpn_bot/check_tls.sh
 ```
 
 ---
 
 ## Тесты
 
-В репозитории есть регрессионные и контрактные тесты для PostgreSQL, миграции, referral/rebind, backup/push performance, release contract и других сценариев.
+В полном исходном пакете находятся регрессионные и контрактные тесты.
 
 ```bash
 python -m pytest tests -q
 ```
 
+Test-зависимости:
+
+```bash
+python -m pip install -r requirements-test.txt
+```
+
 ---
 
-## Структура проекта
+## Структура полного пакета
 
 ```text
-FargoVPN-4.2/
+FargoVPN-4.3.4/
 ├── app/
+│   └── VERSION
 ├── services/
-│   ├── xui_api.py
-│   ├── subscriptions.py
-│   ├── media.py
-│   ├── receipt_ocr.py
-│   └── telegram_events.py
-├── tests/
 ├── scripts/
-│   └── setup_postgresql.sh
+├── static/
+├── tests/
+├── tools/
 ├── main.py
 ├── webapp.py
 ├── cabinet_service.py
@@ -281,11 +302,15 @@ FargoVPN-4.2/
 ├── referral_codes.py
 ├── referral_rewards.py
 ├── install.sh
-├── web_start.sh
-├── service-worker.js
+├── config.example.py
+├── requirements.txt
+├── requirements-lite.txt
+├── requirements-test.txt
 ├── SECURITY.md
 ├── POSTGRESQL_MIGRATION.md
 ├── CHANGELOG.md
+├── RELEASE_NOTES_4.3.4.md
+├── LICENSE
 └── VERSION
 ```
 
@@ -295,33 +320,58 @@ FargoVPN-4.2/
 
 Проект включает rate limiting авторизации, PBKDF2-хеширование пароля панели, security headers при HTTPS, защищённую выдачу медиа, проверку обновляемых архивов, backup перед обновлением и отдельное хранение migration state.
 
-Не храните `config.py`, Bot Token, API-токены и пароли в публичном репозитории.
+Не храните `config.py`, Bot Token, API-токены, пароли PostgreSQL и пароль приложения Яндекс.Диска в публичном репозитории.
 
 Подробнее: [`SECURITY.md`](./SECURITY.md).
 
 ---
 
-## Документация
-
-- [`POSTGRESQL_MIGRATION.md`](./POSTGRESQL_MIGRATION.md) — миграция и восстановление PostgreSQL.
-- [`SECURITY.md`](./SECURITY.md) — безопасность.
-- [`CHANGELOG.md`](./CHANGELOG.md) — история изменений.
-- [`RELEASE_NOTES_4.2.md`](./RELEASE_NOTES_4.2.md) — изменения версии 4.2.
-- [`LICENSE`](./LICENSE) — Personal Use License 1.0.
-
----
-
 ## Релизы
 
-Официальные релизы и архивы:
+Официальные релизы:
 
 https://github.com/Menshikovivan/FargoVPN/releases
 
-Архив полного профиля:
+Актуальный полный пакет в `main`:
+
+```text
+FargoVPN_FULL.tar.gz
+```
+
+Версионный asset GitHub Release:
 
 ```text
 VPN_Service_Platform_{version}_FULL.tar.gz
 ```
+
+---
+
+## Как выпускается новая версия
+
+Источник истины для актуальной публичной версии — ветка `main`.
+
+Начиная с 4.3.4 ручная публикация файлов в `main` не требуется. Главная панель делает это автоматически после успешной публикации GitHub Release.
+
+Для нового релиза из панели:
+
+1. Подготовьте полный архив новой версии.
+2. Откройте `Настройки → Обновления` на назначенной GitHub Publisher панели.
+3. Загрузите `.tar.gz`.
+4. FargoVPN проверит архив и опубликует GitHub Release.
+5. Сразу после успешного Release панель одним Git commit обновит публичную `main`.
+6. Старые лишние файлы `main` будут удалены из нового дерева; force-push не используется.
+
+Если `main` успела измениться параллельно, публикация `main` остановится без перезаписи чужого commit. Уже созданный Release останется доступен.
+
+Workflow `publish-release.yml` больше не нужен для обычной публикации из панели и может использоваться только как дополнительный CI-механизм.
+
+GitHub Release содержит versioned asset:
+
+```text
+VPN_Service_Platform_{version}_FULL.tar.gz
+```
+
+GitHub поддерживает прямую ссылку на asset последнего Release через `/releases/latest/download/<asset-name>`; workflow использует versioned asset для системы обновлений FargoVPN. citeturn462422search0turn590512search1
 
 ---
 
@@ -335,7 +385,7 @@ FargoVPN распространяется по **Personal Use License 1.0**.
 
 ---
 
-### FargoVPN 4.2
+### FargoVPN 4.3.4
 
 **Telegram + Web Panel + PWA + 3x-ui + PostgreSQL + backups + updates**
 

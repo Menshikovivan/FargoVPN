@@ -1,0 +1,43 @@
+# Local configuration and secrets
+config.py
+config.py.before_*
+config.py.corrupt.*
+*.env
+.env
+.env.*
+
+# Python environments/cache
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor/OS artifacts
+.DS_Store
+*.orig
+*.bak
+*~
+*.swp
+*.swo
+
+# Runtime data, logs and generated state
+data/
+*.log
+*.pid
+*.sock
+*.tmp
+
+# Local backups/release artifacts
+*.tar
+*.tar.gz
+*.zip
+backup/
+backups/
+
+# Public GitHub main bootstrap asset (intentionally tracked)
+!FargoVPN_FULL.tar.gz
+!FargoVPN_FULL.tar.gz.sha256
