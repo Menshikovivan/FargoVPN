@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.3.6-5865F2)
+![Version](https://img.shields.io/badge/version-4.4.0-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -10,7 +10,7 @@
 
 Проект объединяет Telegram-бота, веб-панель, Telegram Mini App/PWA, интеграцию с **3x-ui**, приём и проверку чеков, резервное копирование, диагностику, рассылки и автоматические обновления через GitHub Releases.
 
-> **FargoVPN 4.3.6 hardened** — PostgreSQL-релиз с атомарной обработкой платежей, CSRF, одноразовыми ссылками кабинета, шифрованием внешних backup и staged restore. Рекомендуется установка из проверенного локального архива.
+> **FargoVPN 4.4.0 hardened** — PostgreSQL-релиз с атомарной обработкой платежей, CSRF, одноразовыми ссылками кабинета, шифрованием внешних backup и staged restore. Рекомендуется установка из проверенного локального архива.
 
 ---
 
@@ -62,7 +62,7 @@
 
 ---
 
-## 🆕 FargoVPN 4.3.6
+## 🆕 FargoVPN 4.4.0
 
 ### Безопасная установка из архива
 
@@ -71,10 +71,10 @@
 ### Full
 
 ```bash
-sha256sum VPN_Service_Platform_4.3.6_FULL.tar.gz
+sha256sum VPN_Service_Platform_4.4.0_FULL.tar.gz
 mkdir -p /root/fargovpn-release
-tar -xzf VPN_Service_Platform_4.3.6_FULL.tar.gz -C /root/fargovpn-release
-cd /root/fargovpn-release/FargoVPN-4.3.6
+tar -xzf VPN_Service_Platform_4.4.0_FULL.tar.gz -C /root/fargovpn-release
+cd /root/fargovpn-release/FargoVPN-4.4.0
 sudo bash ./install.sh --profile full
 ```
 
@@ -107,7 +107,7 @@ FargoVPN/
 ├── VERSION
 ├── LICENSE
 ├── CHANGELOG.md
-├── RELEASE_NOTES_4.3.6.md
+├── RELEASE_NOTES_4.4.0.md
 ├── FargoVPN_FULL.tar.gz
 ├── FargoVPN_FULL.tar.gz.sha256
 └── .github/
@@ -266,7 +266,7 @@ python -m pip install -r requirements-test.txt
 ## Структура полного пакета
 
 ```text
-FargoVPN-4.3.6/
+FargoVPN-4.4.0/
 ├── app/
 │   └── VERSION
 ├── services/
@@ -299,7 +299,7 @@ FargoVPN-4.3.6/
 ├── SECURITY.md
 ├── POSTGRESQL_MIGRATION.md
 ├── CHANGELOG.md
-├── RELEASE_NOTES_4.3.6.md
+├── RELEASE_NOTES_4.4.0.md
 ├── LICENSE
 └── VERSION
 ```
@@ -375,11 +375,11 @@ FargoVPN распространяется по **Personal Use License 1.0**.
 
 ---
 
-### FargoVPN 4.3.6
+### FargoVPN 4.4.0
 
-- Исправлена отправка сообщений пользователям через панель при PostgreSQL backend.
-- Старые integer-колонки статуса сообщений автоматически приводятся к boolean.
-- Ошибки отправки больше не маскируются сообщением `JSON.parse`.
+- Исправлена ошибка `Недействительный CSRF-токен` при запуске массовой рассылки с загрузкой файлов.
+- Ручной бэкап из Telegram-админки и плановая systemd-служба сохранены на одном общем `backup.py --force/--scheduled` пути.
+- Исправлены устаревшие контрактные тесты WebDAV/PostgreSQL, чтобы релизная проверка соответствовала текущему WebDAV+PostgreSQL стеку.
 
 **Telegram + Web Panel + PWA + 3x-ui + PostgreSQL + backups + updates**
 
