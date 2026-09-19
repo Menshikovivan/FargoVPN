@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.3.4-5865F2)
+![Version](https://img.shields.io/badge/version-4.3.6-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -10,7 +10,7 @@
 
 Проект объединяет Telegram-бота, веб-панель, Telegram Mini App/PWA, интеграцию с **3x-ui**, приём и проверку чеков, резервное копирование, диагностику, рассылки и автоматические обновления через GitHub Releases.
 
-> **FargoVPN 4.3.4** — production-релиз с единым сценарием установки через `wget`: пользователь скачивает только `install.sh`, после чего установщик сам получает полный актуальный пакет из `main` и запускает полноценную установку с консоли.
+> **FargoVPN 4.3.6 hardened** — PostgreSQL-релиз с атомарной обработкой платежей, CSRF, одноразовыми ссылками кабинета, шифрованием внешних backup и staged restore. Рекомендуется установка из проверенного локального архива.
 
 ---
 
@@ -39,7 +39,7 @@
 - Получение актуальных данных о клиентах, трафике и подключениях.
 - Синхронизация данных между FargoVPN и 3x-ui.
 
-**Важно:** `/etc/x-ui/x-ui.db` остаётся отдельной SQLite-базой 3x-ui. PostgreSQL-миграция FargoVPN не переносит `x-ui.db` и не должна менять структуру базы 3x-ui.
+**Важно:** актуальная 3x-ui может использовать PostgreSQL через `XUI_DB_DSN`; `/etc/x-ui/x-ui.db` поддерживается только для legacy auto-detect. База FargoVPN и база 3x-ui управляются раздельно.
 
 ### 💳 Платежи и OCR
 - Загрузка чека через Telegram.
@@ -62,44 +62,34 @@
 
 ---
 
-## 🆕 FargoVPN 4.3.4
+## 🆕 FargoVPN 4.3.6
 
-### Установка одной командой
+### Безопасная установка из архива
 
-Для новой установки не нужно вручную скачивать и распаковывать архив.
+До запуска сравните SHA-256 архива с опубликованным по независимому каналу. Не передавайте непроверенный сетевой скрипт прямо в `bash` от root.
 
 ### Full
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --profile full
+sha256sum VPN_Service_Platform_4.3.6_FULL.tar.gz
+mkdir -p /root/fargovpn-release
+tar -xzf VPN_Service_Platform_4.3.6_FULL.tar.gz -C /root/fargovpn-release
+cd /root/fargovpn-release/FargoVPN-4.3.6
+sudo bash ./install.sh --profile full
 ```
 
-Или с явным сохранением установщика:
-
-```bash
-wget -O /tmp/fargovpn-install.sh https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh
-sudo bash /tmp/fargovpn-install.sh --profile full
-```
-
-Bootstrap `install.sh` сам:
-
-1. проверяет права root;
-2. скачивает `FargoVPN_FULL.tar.gz` из ветки `main`;
-3. проверяет SHA-256;
-4. распаковывает полный пакет во временный каталог;
-5. запускает штатный installer из полного пакета;
-6. передаёт ему параметры `--profile`, `--mask` и `--update-existing`.
+Если Mask ещё не установлен, полный профиль требует SHA-256 отдельно проверенного `install.sh` Mask: `sudo env MASK_INSTALLER_SHA256=<64 hex> bash ./install.sh --profile full`. Уже установленный Mask повторно не скачивается.
 
 ### Lite
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --profile lite
+sudo bash ./install.sh --profile lite
 ```
 
 ### Обновление существующей установки
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash -s -- --update-existing /root/vpn_bot
+sudo bash ./install.sh --update-existing /root/vpn_bot
 ```
 
 При обновлении полный пакет скачивается автоматически; вручную загружать архив на сервер не требуется.
@@ -117,7 +107,7 @@ FargoVPN/
 ├── VERSION
 ├── LICENSE
 ├── CHANGELOG.md
-├── RELEASE_NOTES_4.3.4.md
+├── RELEASE_NOTES_4.3.6.md
 ├── FargoVPN_FULL.tar.gz
 ├── FargoVPN_FULL.tar.gz.sha256
 └── .github/
@@ -144,8 +134,8 @@ FargoVPN/
 └──────────────────┘       └────────┬─────────┘       └────────┬─────────┘
                                     │                           │
                               ┌─────▼─────┐               ┌─────▼─────┐
-                              │ PostgreSQL │               │  x-ui.db  │
-                              │  app data  │               │  SQLite   │
+                              │ PostgreSQL │               │ PostgreSQL│
+                              │  app data  │               │  3x-ui DB │
                               └─────┬─────┘               └───────────┘
                                     │
                               ┌─────▼─────────┐
@@ -163,7 +153,7 @@ FargoVPN/
 | Telegram | Python + aiogram 3.31 |
 | Web | FastAPI 0.141 + Uvicorn |
 | Application DB | PostgreSQL |
-| 3x-ui DB | SQLite (`x-ui.db`) |
+| 3x-ui DB | PostgreSQL (`XUI_DB_DSN`), legacy SQLite auto-detect |
 | PostgreSQL runtime | SQLAlchemy 2.x + psycopg 3 |
 | HTTP | httpx + aiohttp |
 | OCR | Tesseract + pytesseract + Pillow |
@@ -238,7 +228,7 @@ sudo systemctl status vpn-service-web.socket --no-pager
 Web health:
 
 ```bash
-curl -fsS http://127.0.0.1:8088/health
+curl --unix-socket /run/vpn-service/fargovpn.sock http://localhost/health
 ```
 
 Общая диагностика:
@@ -276,7 +266,7 @@ python -m pip install -r requirements-test.txt
 ## Структура полного пакета
 
 ```text
-FargoVPN-4.3.4/
+FargoVPN-4.3.6/
 ├── app/
 │   └── VERSION
 ├── services/
@@ -309,7 +299,7 @@ FargoVPN-4.3.4/
 ├── SECURITY.md
 ├── POSTGRESQL_MIGRATION.md
 ├── CHANGELOG.md
-├── RELEASE_NOTES_4.3.4.md
+├── RELEASE_NOTES_4.3.6.md
 ├── LICENSE
 └── VERSION
 ```
@@ -385,7 +375,11 @@ FargoVPN распространяется по **Personal Use License 1.0**.
 
 ---
 
-### FargoVPN 4.3.4
+### FargoVPN 4.3.6
+
+- Исправлена отправка сообщений пользователям через панель при PostgreSQL backend.
+- Старые integer-колонки статуса сообщений автоматически приводятся к boolean.
+- Ошибки отправки больше не маскируются сообщением `JSON.parse`.
 
 **Telegram + Web Panel + PWA + 3x-ui + PostgreSQL + backups + updates**
 
