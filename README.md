@@ -379,7 +379,7 @@ FargoVPN распространяется по **Personal Use License 1.0**.
 
 - Исправлена ошибка `Недействительный CSRF-токен` при запуске массовой рассылки с загрузкой файлов.
 - Ручной бэкап из Telegram-админки и плановая systemd-служба сохранены на одном общем `backup.py --force/--scheduled` пути.
-- Исправлены устаревшие контрактные тесты WebDAV/PostgreSQL, чтобы релизная проверка соответствовала текущему WebDAV+PostgreSQL стеку.
+- Исправлены устаревшие контрактные тесты davfs2/PostgreSQL, чтобы релизная проверка соответствовала текущему davfs2+PostgreSQL стеку.
 
 **Telegram + Web Panel + PWA + 3x-ui + PostgreSQL + backups + updates**
 
