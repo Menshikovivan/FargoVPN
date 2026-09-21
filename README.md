@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.4.0-5865F2)
+![Version](https://img.shields.io/badge/version-4.4.6-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
