@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.4.9-5865F2)
+![Version](https://img.shields.io/badge/version-4.4.10-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -10,7 +10,7 @@
 
 Проект объединяет Telegram-бота, веб-панель, Telegram Mini App/PWA, интеграцию с **3x-ui**, приём и проверку чеков, резервное копирование, диагностику, рассылки и автоматические обновления через GitHub Releases.
 
-> **FargoVPN 4.4.9** — Яндекс.Диск подключается через `davfs2` только на время резервного копирования и больше не удерживает перезагрузку сервера постоянным WebDAV mount.
+> **FargoVPN 4.4.10** — Яндекс.Диск подключается через `davfs2` только на время резервного копирования и больше не удерживает перезагрузку сервера постоянным WebDAV mount.
 
 ---
 
