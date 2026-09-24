@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.4.10-5865F2)
+![Version](https://img.shields.io/badge/version-4.5-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -10,7 +10,6 @@
 
 Проект объединяет Telegram-бота, веб-панель, Telegram Mini App/PWA, интеграцию с **3x-ui**, приём и проверку чеков, резервное копирование, диагностику, рассылки и автоматические обновления через GitHub Releases.
 
-> **FargoVPN 4.4.10** — Яндекс.Диск подключается через `davfs2` только на время резервного копирования и больше не удерживает перезагрузку сервера постоянным WebDAV mount.
 
 ---
 
@@ -51,7 +50,7 @@
 ### 💾 Резервное копирование
 В 4.3.4 база приложения работает с PostgreSQL. Локальный backup может включать PostgreSQL logical dump, исходники приложения, конфигурационные данные и отдельные данные 3x-ui.
 
-Дополнительная доставка поддерживается через Telegram и Яндекс.Диск. Успешность внешней доставки проверяется отдельно от локального создания backup.
+Доставка резервных копий выполняется через Telegram. Успешность отправки проверяется отдельно от локального создания backup.
 
 ### 🔄 Обновления и rollback
 - Источник релизов — GitHub Releases.
@@ -140,7 +139,7 @@ FargoVPN/
                                     │
                               ┌─────▼─────────┐
                               │ Backup / Push  │
-                              │ Telegram/Yandex│
+                              │ Telegram│
                               └───────────────┘
 ```
 
@@ -310,7 +309,8 @@ FargoVPN-4.4.0/
 
 Проект включает rate limiting авторизации, PBKDF2-хеширование пароля панели, security headers при HTTPS, защищённую выдачу медиа, проверку обновляемых архивов, backup перед обновлением и отдельное хранение migration state.
 
-Не храните `config.py`, Bot Token, API-токены, пароли PostgreSQL и пароль приложения Яндекс.Диска в публичном репозитории.
+Не храните `config.py`, Bot Token, API-токены и пароли PostgreSQL в публичном репозитории.
+`.env.example` содержит только имена переменных и заглушки; установщик FargoVPN не считывает его автоматически и создаёт runtime `config.py` из введённых параметров.
 
 Подробнее: [`SECURITY.md`](./SECURITY.md).
 
@@ -379,7 +379,6 @@ FargoVPN распространяется по **Personal Use License 1.0**.
 
 - Исправлена ошибка `Недействительный CSRF-токен` при запуске массовой рассылки с загрузкой файлов.
 - Ручной бэкап из Telegram-админки и плановая systemd-служба сохранены на одном общем `backup.py --force/--scheduled` пути.
-- Исправлены устаревшие контрактные тесты davfs2/PostgreSQL, чтобы релизная проверка соответствовала текущему davfs2+PostgreSQL стеку.
 
 **Telegram + Web Panel + PWA + 3x-ui + PostgreSQL + backups + updates**
 
