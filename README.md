@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.5.3-5865F2)
+![Version](https://img.shields.io/badge/version-4.5.5-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -83,10 +83,10 @@ https://example.com/fargovpn-admin-<random>/ -> FargoVPN
 ```
 
 ```bash
-sha256sum VPN_Service_Platform_4.5.3_FULL.tar.gz
+sha256sum VPN_Service_Platform_4.5.5_FULL.tar.gz
 mkdir -p /root/fargovpn-release
-tar -xzf VPN_Service_Platform_4.5.3_FULL.tar.gz -C /root/fargovpn-release
-cd /root/fargovpn-release/FargoVPN-4.5.3
+tar -xzf VPN_Service_Platform_4.5.5_FULL.tar.gz -C /root/fargovpn-release
+cd /root/fargovpn-release/FargoVPN-4.5.5
 sudo bash ./install.sh --profile full
 ```
 
