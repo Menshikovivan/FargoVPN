@@ -1,6 +1,6 @@
 # FargoVPN — VPN Service Platform
 
-![Version](https://img.shields.io/badge/version-4.5.1-5865F2)
+![Version](https://img.shields.io/badge/version-4.5.2-5865F2)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141.1-009688)
 ![aiogram](https://img.shields.io/badge/aiogram-3.31.0-2CA5E0)
@@ -28,7 +28,7 @@
 - Сообщения и журнал переписки.
 - Массовые рассылки.
 - Мониторинг, диагностика и просмотр системных журналов.
-- Резервные копии и восстановление.
+- Резервные копии Telegram-only и консольное восстановление из частей архива.
 - Управление обновлениями и откатом.
 - Настройки сервиса и интеграций.
 - PWA/Web Push и личный кабинет.
@@ -50,7 +50,11 @@
 ### 💾 Резервное копирование
 В 4.3.4 база приложения работает с PostgreSQL. Локальный backup может включать PostgreSQL logical dump, исходники приложения, конфигурационные данные и отдельные данные 3x-ui.
 
-Доставка резервных копий выполняется через Telegram. Успешность отправки проверяется отдельно от локального создания backup.
+Доставка резервных копий выполняется только через Telegram. Используется один systemd-сервис `vpn-service-backup.service`; архив — обычный `.tar.gz`, при необходимости делится на части до 45 MB.
+
+В архив входят PostgreSQL FargoVPN (включая `users` и связанные данные), база/конфигурация 3x-ui, исходники FargoVPN, systemd-конфигурация 3x-ui/Xray и необходимые persistent-файлы. Архив содержит `manifest.json` и SHA-256 для критических файлов.
+
+Восстановление выполняется через `install.sh` → «Восстановление»: установщик принимает папку с `.part001/.part002`, автоматически собирает архив и предлагает восстановить только базу пользователей либо всю систему. Перед переключением рабочей PostgreSQL-базы dump восстанавливается в staging и проверяется, включая точное количество записей `users`; прежняя база сохраняется для отката.
 
 ### 🔄 Обновления и rollback
 - Источник релизов — GitHub Releases.
@@ -69,15 +73,22 @@
 
 ### Full
 
-```bash
-sha256sum VPN_Service_Platform_4.4.0_FULL.tar.gz
-mkdir -p /root/fargovpn-release
-tar -xzf VPN_Service_Platform_4.4.0_FULL.tar.gz -C /root/fargovpn-release
-cd /root/fargovpn-release/FargoVPN-4.4.0
-sudo bash ./install.sh --profile full
+Внешний проект `Nginx-L4-Stream-Router-Mask-for-3x-ui` должен быть установлен и настроен **до** FargoVPN. FargoVPN не устанавливает Nginx, не меняет L4-роутинг и не управляет TLS. После запуска веб-панели он добавляет только **один отдельный URI FargoVPN** в уже существующий HTTPS virtual host внешнего Nginx, поэтому 3x-ui и FargoVPN остаются по разным адресам на одном домене.
+
+Например:
+
+```text
+https://example.com/my-3x-panel/           -> 3x-ui
+https://example.com/fargovpn-admin-<random>/ -> FargoVPN
 ```
 
-Если Mask ещё не установлен, полный профиль требует SHA-256 отдельно проверенного `install.sh` Mask: `sudo env MASK_INSTALLER_SHA256=<64 hex> bash ./install.sh --profile full`. Уже установленный Mask повторно не скачивается.
+```bash
+sha256sum VPN_Service_Platform_4.5.2_FULL.tar.gz
+mkdir -p /root/fargovpn-release
+tar -xzf VPN_Service_Platform_4.5.2_FULL.tar.gz -C /root/fargovpn-release
+cd /root/fargovpn-release/FargoVPN-4.5.2
+sudo bash ./install.sh --profile full
+```
 
 ### Lite
 
@@ -170,7 +181,7 @@ FargoVPN/
 - Python 3.10+.
 - Установленная и доступная 3x-ui с API.
 - Telegram Bot Token.
-- Для полного профиля — Nginx L4 Stream Router Mask согласно логике установщика.
+- Для полного профиля — заранее установленный внешний reverse proxy/L4 и 3x-ui. FargoVPN использует их как внешнюю инфраструктуру.
 
 PostgreSQL может быть установлен скриптами проекта либо уже существовать на сервере.
 
@@ -209,7 +220,6 @@ vpn-service-reminders.service
 vpn-service-reminders.timer
 vpn-service-update@.service
 vpn-service-broadcast@.service
-vpn-service-nginx-guard.service
 ```
 
 Проверка:

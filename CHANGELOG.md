@@ -1,3 +1,12 @@
+## 4.5.2
+
+- FargoVPN no longer installs Nginx or manages the external L4/TLS stack; it only adds a separate randomized FargoVPN URI to the existing HTTPS virtual host. 3x-ui keeps its own URI.
+- The socket group is derived from the existing Nginx worker account so the external proxy can access the FargoVPN Unix socket.
+- Backup delivery is Telegram-only and uses one canonical `vpn-service-backup.service`.
+- Full backups are plain `.tar.gz` archives containing FargoVPN PostgreSQL, 3x-ui database/configuration, FargoVPN source, systemd units and required persistent runtime data.
+- Telegram archives are split into size-safe parts and verified with SHA-256 manifest data.
+- Console restore supports users-only or full-system restore, including reassembly of `.part001/.part002` archives and post-restore health verification.
+
 ## 4.5.1
 
 - Публикация релиза в GitHub и установка разделены.
