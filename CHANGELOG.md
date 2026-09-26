@@ -1,3 +1,10 @@
+## 4.5.3
+
+- Исправлена публикация веб-панели FargoVPN на сервере с заранее установленным Nginx/L4/3x-ui из внешнего проекта.
+- После установки автоматически определяется публичный домен из реально загруженного Nginx и выводится готовая HTTPS-ссылка на FargoVPN.
+- Публичный URL сохраняется в `config.py` для дальнейших обновлений и отображения в web-update status.
+- Усилена совместимость с фактическим Unix-socket HTTPS listener внешнего проекта.
+
 ## 4.5.2
 
 - FargoVPN no longer installs Nginx or manages the external L4/TLS stack; it only adds a separate randomized FargoVPN URI to the existing HTTPS virtual host. 3x-ui keeps its own URI.
