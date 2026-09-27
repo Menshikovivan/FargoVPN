@@ -1,3 +1,8 @@
+# FargoVPN 4.6.9
+
+- Push/VAPID reliability and Safari/iOS `BadJwtToken` diagnostics hardened.
+- Browser `AbortError: Error retrieving push subscription` gets one controlled Service Worker reset/retry.
+
 ## 4.6.8
 
 - Исправлена изоляция недоступных Telegram-чатов: terminal `Forbidden/BadRequest` больше не роняют рассылки, напоминания и другие workflow; ошибки журналируются с `user_id`.
