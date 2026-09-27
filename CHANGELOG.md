@@ -1,3 +1,13 @@
+# FargoVPN 4.6.10
+
+## Push и Telegram-подключение
+
+- Переработано Telegram-меню подключения: сначала выбор устройства, затем отдельные кнопки HAPP/INCY с автозапуском и импортом подписки.
+- Добавлен подписанный короткоживущий HTTPS launcher для native deep-link, совместимый с ограничениями Telegram Bot API.
+- Launcher получает актуальную подписку пользователя на момент клика; URL подписки не передаётся в `callback_data`.
+- В браузерный Push flow добавлена диагностика внешнего push-сервиса и валидация VAPID P-256 на клиенте.
+- После `AbortError: Error retrieving push subscription` выполняется проверка доступности внешнего push-сервиса; при недоступности пользователю показывается конкретная сетевая причина, при доступности делается одна повторная попытка без лишнего сброса Service Worker.
+
 # FargoVPN 4.6.9
 
 - Push/VAPID reliability and Safari/iOS `BadJwtToken` diagnostics hardened.
