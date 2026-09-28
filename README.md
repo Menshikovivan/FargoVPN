@@ -1,4 +1,4 @@
-# FargoVPN 4.6.14
+# FargoVPN 4.6.15
 
 Платформа продажи VPN-подписок через Telegram-бота и web-панель с интеграцией 3x-ui.
 
@@ -33,4 +33,6 @@ Production-секреты хранятся вне архива: `.env`/`config.p
 
 В production-архиве нет старых audit/diff/test-релизов и исторических patch-файлов.
 
-Текущие изменения: `RELEASE_NOTES_4.6.14_RU.md`.
+Текущие изменения: `RELEASE_NOTES_4.6.15_RU.md`.
+
+Полный changelog релиза: `CHANGELOG.md`.
