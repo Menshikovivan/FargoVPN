@@ -1,3 +1,7 @@
+## 4.7.8 — Messages panel hotfix
+
+- Fixed missing `message_journal` import in the web-panel send path. Previously this caused a hidden `NameError`: Telegram delivery succeeded, but outgoing messages were not persisted to `user_events` and therefore did not appear in conversation history.
+
 # Changelog
 
 ## 4.7.7
