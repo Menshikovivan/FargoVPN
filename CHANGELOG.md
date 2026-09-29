@@ -1,3 +1,7 @@
+## 4.7.9 — Исправление регистрации по коду
+
+- Исправлены преобразование строки PostgreSQL и тип времени регистрации при вводе верного кода.
+
 ## 4.7.8 — Messages panel hotfix
 
 - Fixed missing `message_journal` import in the web-panel send path. Previously this caused a hidden `NameError`: Telegram delivery succeeded, but outgoing messages were not persisted to `user_events` and therefore did not appear in conversation history.
