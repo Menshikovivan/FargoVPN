@@ -1,58 +1,70 @@
-# FargoVPN 4.9
+# FargoVPN 4.9.2
 
-<!-- Место под баннер/логотип -->
+<div align="center">
 
-[![Version](https://img.shields.io/badge/version-4.9-blue)](./VERSION)
-[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](./requirements.txt)
-[![License](https://img.shields.io/badge/license-personal--use-lightgrey)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-4.9--release-informational)](./CHANGELOG.md)
+### Telegram · VPN-подписки · Панель управления
 
-FargoVPN — персональная платформа управления VPN-подписками через Telegram-бота и web-панель администратора с интеграцией 3x-ui. Проект рассчитан на самостоятельную установку на собственный сервер; production-секреты находятся вне репозитория.
+Одна платформа для пользователей, платежей, сообщений и обслуживания VPN.
+
+[![Version](https://img.shields.io/badge/version-4.9.2-2563eb)](./VERSION)
+![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white)
+![Database](https://img.shields.io/badge/database-PostgreSQL-4169e1?logo=postgresql&logoColor=white)
+[![License](https://img.shields.io/badge/license-Personal_Use-64748b)](./LICENSE)
+
+[Установка](#быстрая-установка) · [Архитектура](#архитектура) · [Обновления](#обновление-и-откат) · [FAQ](#диагностика-и-faq) · [История версий](./CHANGELOG.md)
+
+</div>
+
+---
+
+FargoVPN — персональная платформа управления VPN-подписками через Telegram-бота и веб-панель с интеграцией 3x-ui. Пользователь регистрируется, оплачивает подписку и получает ссылку подключения; администратор управляет сервисом из одного интерфейса.
+
+> **В версии 4.9.2:** исправлены Internal Server Error в настройках, обновлениях и диагностике. Сохранены ограничения прав издателя, исправления резервного копирования из 4.8 и обработка недоступных Telegram-чатов из 4.9. [Изменения →](./CHANGELOG.md)
 
 ## Возможности
 
-### Telegram-бот
-- регистрация по 4-значному коду приглашения с защитой от перебора;
-- личный кабинет, подписка, продление и уведомления;
-- приём чеков и OCR-проверка;
-- реферальная программа;
-- поддержка Telegram-сообщений и массовых рассылок;
-- ссылки подписки и запуск VPN-клиента через deep-link.
-
-### Web-панель
-- пользователи и привязки Telegram;
-- платежи и просмотр чеков;
-- сообщения с live-обновлением, unread-счётчиками и исходящими ответами;
-- мониторинг и диагностика;
-- настройки бота, платежей, 3x-ui, Web Push и обновлений;
-- создание и восстановление backup;
-- проверка, установка и откат версий.
-
-### 3x-ui и подписки
-- создание и управление клиентами через API 3x-ui;
-- новый клиент создаётся без заданного `flow`;
-- поддерживается работа с несколькими inbound;
-- ссылки подписки формируются для используемых конфигураций и deep-link приложений HAPP/INCY.
-
-### Backup / restore
-- полный архив в формате `.tar.gz`;
-- разбиение большого архива на части;
-- Telegram-доставка;
-- восстановление только пользовательских данных или полного состояния;
-- проверка структуры, контрольных сумм и защита от path traversal.
+| | Раздел | Что доступно |
+|:--:|---|---|
+| 🤖 | Telegram-бот | Регистрация по коду, кабинет, продление, напоминания и поддержка |
+| 💳 | Оплата | Приём чеков, OCR-проверка и подтверждение платежей |
+| 🛠️ | Веб-панель | Пользователи, оплаты, настройки, журналы и диагностика |
+| 💬 | Сообщения | Live-обновления диалогов, непрочитанные сообщения, ответы и рассылки |
+| 🔗 | 3x-ui | Управление клиентами через API и выбор нескольких inbound |
+| 🎟️ | Приглашения | Коды регистрации с защитой от перебора и реферальная программа |
+| 📦 | Резервные копии | `.tar.gz`, разделение больших архивов, доставка в Telegram и восстановление |
+| 🚀 | Обновления | GitHub Releases, проверка SHA-256, фоновая установка и откат |
+| 🔔 | Уведомления | Web Push и напоминания об окончании подписки |
 
 ## Архитектура
 
 ```mermaid
-flowchart LR
-    TG[Telegram] <--> BOT[Telegram bot / main.py]
-    BOT <--> DB[(PostgreSQL FargoVPN DB)]
-    WEB[FastAPI web panel] <--> DB
-    BOT <--> XUI[3x-ui API]
-    WEB <--> XUI
-    WORKERS[background workers] <--> DB
-    WORKERS <--> TG
-    WEB <--> WORKERS
+flowchart TD
+    user["Пользователь"] --> telegram["Telegram"]
+    telegram <--> bot["Telegram-бот"]
+    admin["Администратор"] --> proxy["HTTPS reverse proxy"]
+    proxy -->|Unix socket| panel["FastAPI-панель"]
+    bot <--> database[("PostgreSQL FargoVPN")]
+    panel <--> database
+    bot <--> xui["3x-ui API"]
+    panel <--> xui
+    panel --> workers["Фоновые задачи"]
+    workers <--> database
+    workers --> telegram
+```
+
+PostgreSQL хранит данные платформы. Бот и панель обращаются к 3x-ui через API; длительные операции выполняют отдельные workers. HTTPS завершается на внешнем reverse proxy, который передаёт запросы панели через Unix-сокет.
+
+### От регистрации до подключения
+
+```mermaid
+flowchart TD
+    invite["Код приглашения"] --> register["Регистрация в Telegram"]
+    register --> payment["Отправка чека"]
+    payment --> review{"Платёж подтверждён?"}
+    review -->|Да| subscription["Создание или продление подписки"]
+    review -->|Нет| retry["Уточнение оплаты"]
+    retry --> payment
+    subscription --> link["Ссылка и инструкция подключения"]
 ```
 
 ## Требования
@@ -71,6 +83,10 @@ sudo bash /tmp/fargovpn-install.sh
 Установщик проверяет root/systemd, зависимости, целостность скачанного архива и его SHA-256, затем запускает штатную установку. В конце отображается итоговая сводка по установленной версии, web-панели, службам и health-check.
 
 ## Конфигурация
+
+<details>
+<summary><b>Параметры подключения, безопасности и обслуживания</b></summary>
+
 
 | Параметр | Назначение |
 |---|---|
@@ -109,6 +125,9 @@ sudo bash /tmp/fargovpn-install.sh
 
 Полный список исходных ключей с базовыми значениями находится в `config.example.py`. Реальные секреты и production-ID в README не приводятся.
 
+
+</details>
+
 ## Подключение клиентов
 
 В личном кабинете раздел «Как подключиться» формирует deep-link вида `happ://add/...` или `incy://add/...`. В интерфейсе доступны HAPP и INCY для Android, iPhone/iPad и Windows-сценариев. Если deep-link не открывается, ссылку подписки можно скопировать вручную.
@@ -134,33 +153,41 @@ sudo bash /tmp/fargovpn-install.sh
 
 Канал обновлений использует GitHub Releases. Перед применением проверяются версия, имя архива, размер и SHA-256; установка выполняется фоновым worker-процессом. Для rollback используется сохранённый pre-update архив.
 
+```mermaid
+flowchart TD
+    release["GitHub Release"] --> verify["Проверка версии и SHA-256"]
+    verify --> valid{"Архив корректен?"}
+    valid -->|Нет| stop["Установка не запускается"]
+    valid -->|Да| backup["Снимок перед обновлением"]
+    backup --> worker["Установка и миграции"]
+    worker --> health{"Health-check"}
+    health -->|Успешно| done["Новая версия работает"]
+    health -->|Ошибка| inspect["Журнал и диагностика"]
+    inspect --> rollback["Откат из сохранённого снимка"]
+```
+
+Откат запускается отдельной административной операцией. Публикация доступна назначенной главной панели; обычные панели получают релизы из GitHub.
+
 ## Структура репозитория
 
-```text
-FargoVPN/
-├── main.py                  # Telegram-бот
-├── webapp.py                # FastAPI web-панель
-├── db.py / init_db.py       # слой БД и миграции
-├── services/                # 3x-ui, подписки, OCR, Telegram events, media
-├── broadcast_*.py            # массовые рассылки
-├── backup.py                 # backup
-├── restore_*.py              # restore
-├── update_*.py               # update / rollback
-├── migrations/               # SQL-миграции
-├── scripts/                  # сервисные скрипты
-├── static/                   # CSS/JS/icons
-├── tests/                    # regression tests
-├── systemd units             # файлы единиц в корне релиза
-├── install.sh                # установщик
-├── VERSION                   # версия релиза
-├── CHANGELOG.md              # история изменений
-├── SECURITY.md               # security notes
-└── config.example.py         # шаблон конфигурации
-```
+| Файл или каталог в полном архиве | Назначение |
+|---|---|
+| `main.py` · `webapp.py` | Telegram-бот и FastAPI-панель |
+| `db.py` · `init_db.py` · `migrations/` | PostgreSQL и миграции |
+| `services/` | 3x-ui, подписки, OCR и медиа |
+| `broadcast_*.py` · `subscription_refresh_*.py` | Рассылки и обновление подписок |
+| `backup.py` · `restore_*.py` | Резервное копирование и восстановление |
+| `update_*.py` · `rollback_worker.py` | Установка версий и откат |
+| `static/` | Стили, JavaScript и иконки |
+| `scripts/` · `*.service` · `*.socket` | Сервисные скрипты и systemd |
+| `tests/` · `requirements-dev.txt` | Регрессионные проверки |
+| `config.example.py` | Шаблон конфигурации |
+
+На главной ветке GitHub штатная публикация оставляет публичную документацию, установщик, версию и полный архив с SHA-256. Исходный код и тесты находятся внутри полного архива.
 
 ## Безопасность
 
-Не храните Telegram Bot Token, API-токены 3x-ui, пароли PostgreSQL, VAPID private key и production-конфигурацию в Git. Для ручного восстановления используйте только доверенные архивы. Не подключайте произвольные reverse-proxy правила к панели без проверки маршрутизации и TLS. Канонические рекомендации и канал для security-issues описаны в `SECURITY.md`.
+Не храните Telegram Bot Token, API-токены 3x-ui, пароли PostgreSQL, VAPID private key и production-конфигурацию в Git. Для ручного восстановления используйте только доверенные архивы. Не подключайте произвольные reverse-proxy правила к панели без проверки маршрутизации и TLS. Рекомендации описаны в [SECURITY.md](./SECURITY.md).
 
 ## Диагностика и FAQ
 
@@ -178,10 +205,6 @@ FargoVPN/
 
 FargoVPN is a personal-use Telegram VPN subscription platform with a FastAPI admin panel and 3x-ui integration. It provides invitation-gated registration, payments/receipt handling, subscriptions, messaging, broadcasts, Web Push, backup/restore, and GitHub Release based updates.
 
-## Roadmap
-
-Поддерживаются текущие сценарии бота, панели, 3x-ui, backup/restore и обновлений. Новые изменения должны сохранять обратную совместимость с существующими PostgreSQL-данными и production-конфигурацией.
-
 ## Вклад в проект
 
 Для изменений сначала добавляйте regression test, затем проверяйте `compileall`/`pytest` и shell syntax. Production-секреты и персональные данные в PR не добавляются.
@@ -193,3 +216,11 @@ FargoVPN распространяется по условиям `LICENSE` — Pe
 ## Ответственное использование
 
 Используйте проект только в соответствии с законодательством, правилами провайдера и применимыми условиями сервисов, с которыми он интегрируется.
+
+## Исправление 4.9.2
+
+Исправлены Internal Server Error на страницах настроек, обновлений и диагностики после перехода на 4.9.
+Подробности проверки: `TEST_REPORT_4.9.2.md` внутри полного архива.
+Для запуска тестов: `python -m pip install -r requirements-dev.txt`, затем `python -m pytest tests -q`.
+Релизный asset: `VPN_Service_Platform_4.9.2_FULL.tar.gz`; стандартный tag: `FargoVPN-4.9.2`.
+Используйте штатную публикацию архива на основной панели или загрузите архив в GitHub Releases.
