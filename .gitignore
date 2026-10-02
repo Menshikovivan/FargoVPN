@@ -37,7 +37,11 @@ data/
 *.zip
 backup/
 backups/
+INSTALLED_CHANGELOG.md
+INSTALLED_CHANGELOG_VERSION
+RELEASE_NOTES_*.md
+POST_SUCCESS_AUDIT_*.md
 
-# Public GitHub main bootstrap asset (intentionally tracked)
+# Public GitHub bootstrap asset (intentionally tracked)
 !FargoVPN_FULL.tar.gz
 !FargoVPN_FULL.tar.gz.sha256
