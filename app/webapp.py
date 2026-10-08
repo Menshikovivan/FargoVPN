@@ -2907,7 +2907,7 @@ def user_detail_page(request: Request, tg_id: int):
 const b=document.getElementById('telegram-lookup-button'),r=document.getElementById('telegram-lookup-result');
 const initialChatScroll=()=>{{const chat=document.getElementById('chat-window');if(chat)chat.scrollTop=chat.scrollHeight;}};
 requestAnimationFrame(initialChatScroll);setTimeout(initialChatScroll,100);
-if(b)b.addEventListener('click',async()=>{{const i=document.querySelector('input[name=\"username\"]'),u=String((i&&i.value)||'').trim().replace(/^@/,'');if(!u){{r.textContent='Укажите @username';return;}}b.disabled=true;r.textContent='Поиск…';try{{const x=await fetch('/api/telegram/lookup?username='+encodeURIComponent(u));const d=await x.json();if(!x.ok)throw new Error(d.detail||'Ошибка');r.textContent=d.matches&&d.matches.length?d.matches.map(z=>'@'+(z.username||u)+' — Telegram ID '+z.tg_id+(z.telegram_connected?' · подключён':' · без привязки')).join('\n'):'Совпадений нет. Для произвольного @username Telegram Bot API не даёт универсального способа получить ID.';}}catch(e){{r.textContent=e.message||'Ошибка';}}finally{{b.disabled=false;}}}});
+if(b)b.addEventListener('click',async()=>{{const i=document.querySelector('input[name=\"username\"]'),u=String((i&&i.value)||'').trim().replace(/^@/,'');if(!u){{r.textContent='Укажите @username';return;}}b.disabled=true;r.textContent='Поиск…';try{{const x=await fetch('/api/telegram/lookup?username='+encodeURIComponent(u));const d=await x.json();if(!x.ok)throw new Error(d.detail||'Ошибка');r.textContent=d.matches&&d.matches.length?d.matches.map(z=>'@'+(z.username||u)+' — Telegram ID '+z.tg_id+(z.telegram_connected?' · подключён':' · без привязки')).join('\\n'):'Совпадений нет. Для произвольного @username Telegram Bot API не даёт универсального способа получить ID.';}}catch(e){{r.textContent=e.message||'Ошибка';}}finally{{b.disabled=false;}}}});
 
 const linkButton=document.getElementById('telegram-link-button'),linkResult=document.getElementById('telegram-link-result');
 if(linkButton)linkButton.addEventListener('click',async()=>{{linkButton.disabled=true;linkResult.style.display='block';linkResult.textContent='Создание одноразовой ссылки…';try{{const body=new URLSearchParams();body.set('tg_id',String({tg_id}));const response=await fetch('/api/telegram/link-request',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body,credentials:'same-origin'}});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка');linkResult.innerHTML='Передайте пользователю ссылку: <a href="'+data.deep_link+'" target="_blank" rel="noopener">'+data.deep_link+'</a>';const token=data.token;const poll=async()=>{{try{{const r=await fetch('/api/telegram/link-request/'+encodeURIComponent(token),{{credentials:'same-origin',cache:'no-store'}});const status=await r.json();if(status.status==='resolved'){{linkResult.textContent='✅ Telegram ID получен: '+status.tg_id;setTimeout(()=>location.reload(),600);return;}}if(status.status==='expired'){{linkResult.textContent='Ссылка истекла. Создайте новую.';return;}}setTimeout(poll,2000);}}catch(_e){{setTimeout(poll,3000);}}}};poll();}}catch(error){{linkResult.textContent=error.message||'Ошибка';}}finally{{linkButton.disabled=false;}}}});
@@ -5455,12 +5455,12 @@ def _update_output_tail() -> str:
     from log_reader import tail_lines
     from log_security import redact
     paths = [update_manager.update_launcher_log_path(), update_manager.update_log_path()]
-    chunks = []
+    chunks=[]
     for path in paths:
         try:
-            value = ''.join(tail_lines(path, 100, 131072)[0]).strip()
-            if value:
-                chunks.append(f"--- {path.name} ---\n{value}")
+            text=''.join(tail_lines(path, 100, 131072)[0]).strip()
+            if text:
+                chunks.append(f"--- {path.name} ---\n{text}")
         except FileNotFoundError:
             continue
         except OSError as error:

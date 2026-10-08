@@ -117,6 +117,10 @@ def run(job_id: str, startup_delay: float = 0.0) -> int:
             if status.get("state") != "completed":
                 _status(job_id, "completed", 100, "complete", "Обновление успешно установлено", version=version)
             log.write(f"[{datetime.now(timezone.utc).isoformat()}] задача {job_id} завершена\n")
+            try:
+                update_manager.write_status("completed", job_id=job_id, progress=100, phase="complete", message="Обновление успешно установлено", version=version, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            except Exception:
+                pass
             return 0
         except Exception as error:
             log.write(traceback.format_exc() + "\n")

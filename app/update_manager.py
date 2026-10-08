@@ -1932,6 +1932,7 @@ def start_publish_job(source: Path, original_name: str, actor: str = "web") -> d
             [str(python), str(worker), "--job-id", job_id],
             description=f"Публикация FargoVPN {info['version']} в GitHub",
             working_directory=APP_DIR,
+            output_path=update_dir() / "publish" / "launcher.log",
         )
     except DetachedJobError as error:
         target.unlink(missing_ok=True)
@@ -2378,17 +2379,16 @@ def _make_update_launcher(job_id: str, command: list[str]) -> Path:
     path = root / f"{re.sub(r'[^A-Za-z0-9._-]', '_', job_id)}.sh"
     log_path = update_launcher_log_path()
     quoted = " ".join(shlex.quote(str(item)) for item in command)
-    script = (
+    text = (
         "#!/usr/bin/env bash\nset -Eeuo pipefail\n"
         f"mkdir -p {shlex.quote(str(log_path.parent))}\n"
         f"exec >> {shlex.quote(str(log_path))} 2>&1\n"
         f"echo '[FargoVPN update launcher] $(date -Is) job={shlex.quote(job_id)} starting'\n"
         f"exec {quoted}\n"
     )
-    path.write_text(script, encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
     os.chmod(path, 0o700)
     return path
-
 
 def start_update_job(
     actor: str = "web",

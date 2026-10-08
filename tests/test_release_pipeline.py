@@ -144,3 +144,5 @@ def test_update_completion_refresh_contract():
     web=(ROOT/"webapp.py").read_text(encoding="utf-8")
     assert "watchedJob=currentJob" in web
     assert "window.location.replace(purl('/updates')" in web
+
+
