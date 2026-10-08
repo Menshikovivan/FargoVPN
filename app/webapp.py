@@ -1910,7 +1910,7 @@ def dashboard(request: Request):
 
     message_items: list[str] = []
     for row in recent_events:
-        name = str(row["username"] or f"id_{int(row["tg_id"])}")
+        name = str(row["username"] or f"id_{int(row['tg_id'])}")
         message_items.append(
             f'<a class="dash-message" href="/messages?tg_id={int(row["tg_id"])}">'
             f'<span class="avatar avatar-{(int(row["tg_id"]) % 5) + 1}">{html.escape(initials(name))}</span>'
