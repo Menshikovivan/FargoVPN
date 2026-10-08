@@ -260,7 +260,8 @@ def panel_subscribe(db_path: str, username: str, subscription: dict, user_agent:
 
 def panel_unsubscribe(db_path: str, username: str, endpoint: str) -> None:
     migrate_tables(db_path)
-    _log(db_path, username, 'unsubscribe', f'Удаление Push-подписки endpoint={str(endpoint or '')[:80]}…')
+    endpoint_preview = str(endpoint or '')[:80]
+    _log(db_path, username, 'unsubscribe', f"Удаление Push-подписки endpoint={endpoint_preview}…")
     with database_adapter.connect(db_path, timeout=30) as c:
         c.execute(
             "DELETE FROM panel_push_subscriptions WHERE username=? AND endpoint=?",
