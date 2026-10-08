@@ -1,0 +1,11 @@
+/var/log/vpn_bot.log {
+    daily
+    rotate 14
+    size 25M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 root root
+}

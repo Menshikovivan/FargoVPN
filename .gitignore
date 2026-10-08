@@ -5,6 +5,7 @@ config.py.corrupt.*
 *.env
 .env
 .env.*
+!.env.example
 
 # Python environments/cache
 .venv/
@@ -14,6 +15,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+pytest-of-root/
 htmlcov/
 
 # Editor/OS artifacts

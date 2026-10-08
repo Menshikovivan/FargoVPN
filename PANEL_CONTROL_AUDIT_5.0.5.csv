@@ -1,0 +1,62 @@
+﻿page,control,id,method,action,label,evidence
+audit,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+audit,a,,GET,/qa-panel/audit,Сбросить фильтры,NOT_EXECUTED
+audit,button,,get,,Фильтровать,NOT_EXECUTED
+backups,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+backups,button,,post,/qa-panel/backups/create,＋ Создать и отправить сейчас,NOT_EXECUTED
+backups,button,,post,/qa-panel/backups/restore,Восстановить выбранный архив,NOT_EXECUTED
+broadcast,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+broadcast,a,,GET,/qa-panel/users,К пользователям,NOT_EXECUTED
+broadcast,button,broadcast-start,post,/qa-panel/broadcast/start,Запустить рассылку,NOT_EXECUTED
+broadcast,a,,GET,/qa-panel/api/broadcast/log,Открыть журнал рассылки,NOT_EXECUTED
+dashboard,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+diagnostics,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+diagnostics,button,diagnostic-collect,GET,,Запустить диагностику и собрать логи,BROWSER+REAL_PROCESS_API
+diagnostics,a,diagnostic-download,GET,,Скачать лог-файл,BROWSER_DOWNLOAD+REAL_API
+diagnostics,a,,GET,/qa-panel/api/diagnostics?download=1,Скачать JSON-отчёт,NOT_EXECUTED
+diagnostics,button,,post,/qa-panel/diagnostics/fix-duplicates,Удалить дубли запусков,NOT_EXECUTED
+diagnostics,button,,post,/qa-panel/diagnostics/auto-fix,🔧 Найти и исправить проблемы,NOT_EXECUTED
+diagnostics,button,,post,/qa-panel/service/all/restart,Перезапустить всё,NOT_EXECUTED
+diagnostics,a,,GET,/qa-panel/users/import-identities,Восстановить из старой БД,NOT_EXECUTED
+diagnostics,a,,GET,/qa-panel/users,Проверить вручную,NOT_EXECUTED
+logs,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+messages,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=all&message_kind=all&q=&page_no=1&per_page=50,Все направления,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=in&message_kind=all&q=&page_no=1&per_page=50,Входящие,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=out&message_kind=all&q=&page_no=1&per_page=50,Исходящие,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=system&message_kind=all&q=&page_no=1&per_page=50,Система,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=all&message_kind=all&q=&page_no=1&per_page=50,Все типы,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=all&message_kind=message&q=&page_no=1&per_page=50,Обычные,NOT_EXECUTED
+messages,a,,GET,/qa-panel/messages?tg_id=0&direction=all&message_kind=service&q=&page_no=1&per_page=50,Служебные,NOT_EXECUTED
+messages,button,,get,/qa-panel/messages,Искать,NOT_EXECUTED
+monitoring,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+payments,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+reminders,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+settings,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+settings,a,,post,/qa-panel/broadcast,Открыть рассылку,NOT_EXECUTED
+settings,button,,post,/qa-panel/settings/xui,Сохранить подключение 3x-ui,NOT_EXECUTED
+settings,a,,post,https://panel.example.com,◈ Открыть 3x-ui,NOT_EXECUTED
+settings,button,panel-push-enable,post,/qa-panel/settings,Включить,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,panel-push-test,post,/qa-panel/settings,Тест,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,panel-push-disable,post,/qa-panel/settings,Выключить,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,panel-push-check,post,/qa-panel/settings,Проверить,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,panel-push-log-refresh,post,/qa-panel/settings,Обновить журнал,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,app-log-refresh,post,/qa-panel/settings,Обновить,BROWSER_REQUEST_AND_FEEDBACK; provider tested separately
+settings,button,,post,/qa-panel/settings,Сохранить настройки,NOT_EXECUTED
+subscription-tools,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+subscription-tools,button,subscription-refresh-start,post,/qa-panel/users/refresh-subscription-links,↻ Запустить отправку,NOT_EXECUTED
+updates,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+updates,button,check-updates-button,post,/qa-panel/updates/check,Проверить сейчас,NOT_EXECUTED
+users,button,mobile-nav-toggle,GET,,,NOT_EXECUTED
+users,a,,GET,/qa-panel/subscription-tools,↻ Ссылки подписок,NOT_EXECUTED
+users,a,,GET,/qa-panel/broadcast,✉ Массовая рассылка,NOT_EXECUTED
+users,a,,GET,/qa-panel/users/import-identities,Импорт привязок,NOT_EXECUTED
+users,button,,post,/qa-panel/users/import-to-3xui,⬆ Загрузить в 3x-ui,NOT_EXECUTED
+users,a,,GET,/qa-panel/users/new,＋ Создать пользователя,NOT_EXECUTED
+users,button,,GET,,← Назад,BROWSER_PAGINATION
+users,button,,GET,,Далее →,BROWSER_PAGINATION
+users,a,,GET,/qa-panel/users/{id},Открыть чат,NOT_EXECUTED
+users,button,,post,/qa-panel/users/{id}/days,Срок,NOT_EXECUTED
+users,button,,post,/qa-panel/users/{id}/toggle,Блокировать,NOT_EXECUTED
+users,button,,post,/qa-panel/users/{id}/delete,Удалить,NOT_EXECUTED
+users,button,,post,/qa-panel/users/{id}/toggle,Включить,NOT_EXECUTED

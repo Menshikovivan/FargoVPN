@@ -1,0 +1,17 @@
+aiogram==3.31.0
+aiohttp==3.14.3
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart>=0.0.9
+itsdangerous>=2.2,<3
+psutil>=6,<8
+httpx>=0.27,<1
+Pillow==12.3.0
+pytesseract>=0.3.13,<1
+cryptography==50.0.1
+
+# PostgreSQL runtime driver
+psycopg[binary]>=3.2,<4
+
+# PostgreSQL SQLAlchemy runtime used by db.py
+SQLAlchemy>=2.0,<3
