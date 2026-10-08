@@ -4820,6 +4820,24 @@ def settings(request: Request):
 
     panel_push_script = f'<script src="/static/push.js?v={_panel_asset_version()}" defer></script>'
 
+    xui_panel_href = html.escape(
+        str(getattr(config, "XUI_PANEL_URL", "") or getattr(config, "BASE_URL", "")).rstrip("/"),
+        quote=True,
+    )
+    bot_panel_href = html.escape(
+        str(getattr(config, "BOT_PANEL_URL", "") or "").rstrip("/"),
+        quote=True,
+    )
+    xui_panel_link = (
+        f'<a class="button secondary" href="{xui_panel_href}" target="_blank" rel="noopener noreferrer">◈ Открыть 3x-ui</a>'
+        if str(getattr(config, "XUI_PANEL_URL", "") or getattr(config, "BASE_URL", "")).strip()
+        else ""
+    )
+    bot_panel_link = (
+        f'<a class="button secondary" href="{bot_panel_href}" target="_blank" rel="noopener noreferrer">V Открыть FargoVPN</a>'
+        if str(getattr(config, "BOT_PANEL_URL", "") or "").strip()
+        else ""
+    )
 
     body = f'''
 <header>
@@ -4926,7 +4944,7 @@ def settings(request: Request):
         <div class="setting"><label>Пароль 3x-ui</label><input type="password" name="xui_password" placeholder="Пусто — оставить текущий" autocomplete="new-password"></div>
         <div class="check-row"><label><input type="checkbox" name="xui_verify_tls" value="1" {_config_checked('XUI_VERIFY_TLS', True)}> Проверять TLS-сертификат 3x-ui</label></div>
         <button type="submit" formaction="{html.escape(public_path('/settings/xui'), quote=True)}">Сохранить подключение 3x-ui</button>
-        <div class="integration-actions">{f'<a class="button secondary" href="{html.escape(str(getattr(config, 'XUI_PANEL_URL', '') or getattr(config, 'BASE_URL', '')).rstrip('/'), quote=True)}" target="_blank" rel="noopener noreferrer">◈ Открыть 3x-ui</a>' if (str(getattr(config, 'XUI_PANEL_URL', '') or getattr(config, 'BASE_URL', '')).strip()) else ''}{f'<a class="button secondary" href="{html.escape(str(getattr(config, 'BOT_PANEL_URL', '')).rstrip('/'), quote=True)}" target="_blank" rel="noopener noreferrer">V Открыть FargoVPN</a>' if str(getattr(config, 'BOT_PANEL_URL', '') or '').strip() else ''}</div>
+        <div class="integration-actions">{xui_panel_link}{bot_panel_link}</div>
       </div>
       <div class="card full">
         <div class="section-title"><div><h2>Инбаунды для новых клиентов</h2><div class="muted">Настройка применяется только при создании нового клиента/подписки. Существующие клиенты не перебиндиваются.</div></div></div>
