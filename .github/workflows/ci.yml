@@ -47,10 +47,15 @@ jobs:
           test -f install.sh
           test -f README.md
           test -f LICENSE
+          test -f diagnose.sh
           test -f app/install.sh
           test -f app/VERSION
           test -f app/static/VERSION
-          if find . -maxdepth 1 -type f ! -name 'install.sh' ! -name 'README.md' ! -name 'LICENSE' | grep -q .; then
+          if find . -maxdepth 1 -type f \
+              ! -name 'install.sh' \
+              ! -name 'README.md' \
+              ! -name 'LICENSE' \
+              ! -name 'diagnose.sh' | grep -q .; then
             echo 'Unexpected file in repository root.' >&2
             find . -maxdepth 1 -type f -print >&2
             exit 1

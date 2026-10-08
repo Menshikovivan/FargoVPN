@@ -16,7 +16,7 @@ window.fetch = (url, opts) => Promise.resolve({
   text:async()=>''
 });
 class QA_XHR {
-  constructor(){this.upload={};this.status=200;this.responseText='{"ok":true,"status":{"state":"queued","progress":2,"version":"5.1.16"}}';}
+  constructor(){this.upload={};this.status=200;this.responseText='{"ok":true,"status":{"state":"queued","progress":2,"version":"5.1.17"}}';}
   open(m,u){this.method=m;this.url=u;}
   setRequestHeader(){}
   send(){if(this.upload.onprogress)this.upload.onprogress({lengthComputable:true,loaded:1,total:1});setTimeout(()=>this.onload&&this.onload(),10);}

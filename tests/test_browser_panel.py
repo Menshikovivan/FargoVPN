@@ -20,7 +20,7 @@ def _updates_script() -> str:
     script = source[start:end].split("<script>\n", 1)[1]
     return (
         script.replace("__INITIAL__", "{}")
-        .replace("__PAGE_VERSION__", '"5.1.16"')
+        .replace("__PAGE_VERSION__", '"5.1.17"')
         .replace("__PUBLISHER__", "true")
         .replace("__BASE_PATH__", '""')
     )
@@ -38,7 +38,7 @@ def test_real_browser_publish_button_upload_progress_and_live_log():
     <div id='upload-progress'><span id='upload-progress-bar'></span><span id='upload-progress-text'></span></div>
     <div id='github-publish-progress'><span id='github-publish-progress-bar'></span><span id='github-publish-progress-value'></span><span id='github-publish-progress-text'></span><button id='publish-cancel-button' type='button' disabled>Cancel</button><pre id='github-publish-live-log'></pre></div></form>
     <form id='check-updates-form' action='/updates/check'><button id='check-updates-button'>check</button><span id='check-updates-status'></span></form>
-    <script>window.confirm=()=>true;window.panelToast=(m)=>window.lastToast=m;window.__lastPoll=0;window.fetch=(u)=>Promise.resolve({ok:true,status:200,json:async()=>({state:'completed',progress:100,version:'5.1.16',github_tag:'v5.1.16',message:'GitHub Release подтверждён',output:'2026-10-08 [INFO] [pub-browser-1] GitHub Release подтверждён'})});class FakeXHR{constructor(){this.upload={};this.status=0;this.responseText='';}open(m,u){this.method=m;this.url=u;}setRequestHeader(){}send(){window.__xhr={method:this.method,url:this.url};if(this.upload.onprogress)this.upload.onprogress({lengthComputable:true,loaded:10,total:10});setTimeout(()=>{this.status=202;this.responseText=JSON.stringify({ok:true,job:{job_id:'pub-browser-1'},status:{state:'queued',progress:2,version:'5.1.16'}});this.onload&&this.onload();},30);}}window.XMLHttpRequest=FakeXHR;</script>
+    <script>window.confirm=()=>true;window.panelToast=(m)=>window.lastToast=m;window.__lastPoll=0;window.fetch=(u)=>Promise.resolve({ok:true,status:200,json:async()=>({state:'completed',progress:100,version:'5.1.17',github_tag:'v5.1.17',message:'GitHub Release подтверждён',output:'2026-10-08 [INFO] [pub-browser-1] GitHub Release подтверждён'})});class FakeXHR{constructor(){this.upload={};this.status=0;this.responseText='';}open(m,u){this.method=m;this.url=u;}setRequestHeader(){}send(){window.__xhr={method:this.method,url:this.url};if(this.upload.onprogress)this.upload.onprogress({lengthComputable:true,loaded:10,total:10});setTimeout(()=>{this.status=202;this.responseText=JSON.stringify({ok:true,job:{job_id:'pub-browser-1'},status:{state:'queued',progress:2,version:'5.1.17'}});this.onload&&this.onload();},30);}}window.XMLHttpRequest=FakeXHR;</script>
     <script>""" + _updates_script() + """</script></body>"""
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
@@ -60,7 +60,7 @@ def test_real_browser_publish_button_upload_progress_and_live_log():
         browser.close()
 
 
-@pytest.mark.skip(reason="Legacy about:blank fixture superseded by real HTTP browser smoke in 5.1.16")
+@pytest.mark.skip(reason="Legacy about:blank fixture superseded by real HTTP browser smoke in 5.1.17")
 def test_real_browser_logs_switch_refresh_and_filter():
     html = """<!doctype html><base href='http://qa.local/'><body>
     <select id='logs-service'><option value='bot'>bot</option><option value='github-publish'>github</option></select>
@@ -92,7 +92,7 @@ def test_real_browser_update_progress_and_live_log_survive_status_poll():
     html = """<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><body>
     <div id='update-progress-bar'><span></span></div><strong id='update-progress-value'></strong><span id='update-message'></span><span id='update-phase'></span><span id='update-elapsed'></span><div id='update-connection-note'></div><div id='update-error'></div><span id='update-state'></span><span id='update-current-version'></span><pre id='update-live-output'></pre>
     <form id='apply-update-form'><button id='apply-update-button' type='submit'>Apply</button></form>
-    <script>window.confirm=()=>true;window.__polls=0;window.fetch=(u)=>{window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({job_id:'upd-browser-1',state:'installing',progress:42,phase:'python',message:'Устанавливаются Python-зависимости',installed_version:'5.1.16',output:'2026-10-08 22:00:00 [INFO] pip: 42%'})});};</script>
+    <script>window.confirm=()=>true;window.__polls=0;window.fetch=(u)=>{window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({job_id:'upd-browser-1',state:'installing',progress:42,phase:'python',message:'Устанавливаются Python-зависимости',installed_version:'5.1.17',output:'2026-10-08 22:00:00 [INFO] pip: 42%'})});};</script>
     <script>""" + _updates_script() + """</script></body>"""
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
@@ -104,7 +104,7 @@ def test_real_browser_update_progress_and_live_log_survive_status_poll():
         assert page.locator("#update-message").text_content() == "Устанавливаются Python-зависимости"
         assert "python" in page.locator("#update-phase").text_content()
         assert "pip: 42%" in page.locator("#update-live-output").text_content()
-        assert page.locator("#update-current-version").text_content() == "5.1.16"
+        assert page.locator("#update-current-version").text_content() == "5.1.17"
         assert page.evaluate("window.__polls") >= 1
         assert not errors
         browser.close()
@@ -164,7 +164,7 @@ def test_real_browser_github_authorization_button_is_ajax_and_visible_511():
     <script>""" + _updates_script() + """</script></body>"""
     # The updates script also includes other page handlers; provide the minimal
     # DOM they expect so the authorization handler can run independently.
-    html=html.replace("__VERSION__", "5.1.16")
+    html=html.replace("__VERSION__", "5.1.17")
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
         page=browser.new_page(); errors=[]

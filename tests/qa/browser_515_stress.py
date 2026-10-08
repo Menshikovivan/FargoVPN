@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small headless-browser stress/regression checks for the critical 5.1.16 controllers."""
+"""Small headless-browser stress/regression checks for the critical 5.1.17 controllers."""
 from __future__ import annotations
 from pathlib import Path
 from playwright.sync_api import sync_playwright
