@@ -26,22 +26,22 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.5"] * 2
-    assert "## 5.1.5" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.6"] * 2
+    assert "## 5.1.6" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
     with tempfile.TemporaryDirectory() as temp:
         root=Path(temp)
         (root/"app").mkdir()
-        (root/"app/VERSION").write_text("5.1.5\n")
+        (root/"app/VERSION").write_text("5.1.6\n")
         (root/"install.sh").write_text("#!/bin/bash\n")
         (root/"README.md").write_text("# FargoVPN\n")
         (root/"LICENSE").write_text("license\n")
         (root/"old.zip").write_bytes(b"zip")
         (root/"secret.pem").write_text("PRIVATE")
         (root/".env").write_text("TOKEN=x\n")
-        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.5", hashlib.sha256(b"x").hexdigest())
+        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.6", hashlib.sha256(b"x").hexdigest())
         assert set(files)=={"install.sh","README.md","LICENSE","app/VERSION"}
 
 def test_pruning_contract():
@@ -71,7 +71,7 @@ def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
     new_tree = 'c' * 40
     commit_sha = 'd' * 40
     blob_sha = 'e' * 40
-    backup_ref = 'backup/before-v5.1.5-test'
+    backup_ref = 'backup/before-v5.1.6-test'
     def fake_request(method, path, **kwargs):
         calls.append((method, path, kwargs))
         if method == 'GET' and path.endswith('/git/ref/heads/main'):
@@ -120,7 +120,7 @@ def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
         archive = Path(temp) / 'release.tar.gz'
         archive.write_bytes(b'archive')
         monkeypatch.setattr(m, '_github_main_public_files', lambda *_args: {'keep.txt': b'new'})
-        result = m._github_main_sync(archive, '5.1.5', hashlib.sha256(b'archive').hexdigest())
+        result = m._github_main_sync(archive, '5.1.6', hashlib.sha256(b'archive').hexdigest())
         assert result['stale_count'] == 1
         assert result['stale_paths_removed'] == ['obsolete.md']
 
@@ -146,3 +146,18 @@ def test_update_completion_refresh_contract():
     assert "window.location.replace(purl('/updates')" in web
 
 
+
+
+def test_update_worker_launch_contract_and_changelog_history():
+    manager=(ROOT/"update_manager.py").read_text(encoding="utf-8")
+    worker=(ROOT/"update_worker.py").read_text(encoding="utf-8")
+    web=(ROOT/"webapp.py").read_text(encoding="utf-8")
+    start=manager.index("def start_update_job")
+    end=manager.index("def _package_installer")
+    assert '"--startup-delay"' not in manager[start:end]
+    assert "time.monotonic() + 6.0" in manager
+    assert "update-launcher.log" in manager
+    assert 'run(job_id: str, startup_delay: float = 0.0)' in worker
+    assert '_status(' in worker and 'worker_pid=os.getpid()' in worker
+    assert "def changelog_history(" in manager
+    assert "История изменений предыдущих версий" in web

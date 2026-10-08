@@ -35,7 +35,7 @@ usage() {
   cat <<USAGE
 Использование: $0 [--profile <старый-профиль>] [--update-existing /путь/к/приложению]
 
-Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.5 всегда используется полный профиль.
+Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.6 всегда используется полный профиль.
 Без параметра --update-existing установщик предлагает:
   1) новую установку
   2) обновление существующей установки
@@ -1932,7 +1932,7 @@ Wants=network-online.target
 Type=oneshot
 User=root
 WorkingDirectory=$TARGET
-ExecStart=$TARGET/.venv/bin/python $TARGET/update_worker.py --job-id %i --startup-delay 4
+ExecStart=$TARGET/.venv/bin/python $TARGET/update_worker.py --job-id %i
 Nice=10
 IOSchedulingClass=best-effort
 TimeoutStartSec=infinity
