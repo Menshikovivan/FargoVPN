@@ -2379,17 +2379,11 @@ def _make_update_launcher(job_id: str, command: list[str]) -> Path:
     log_path = update_launcher_log_path()
     quoted = " ".join(shlex.quote(str(item)) for item in command)
     script = (
-        "#!/usr/bin/env bash
-set -Eeuo pipefail
-"
-        f"mkdir -p {shlex.quote(str(log_path.parent))}
-"
-        f"exec >> {shlex.quote(str(log_path))} 2>&1
-"
-        f"echo '[FargoVPN update launcher] $(date -Is) job={shlex.quote(job_id)} starting'
-"
-        f"exec {quoted}
-"
+        "#!/usr/bin/env bash\\nset -Eeuo pipefail\\n"
+        f"mkdir -p {shlex.quote(str(log_path.parent))}\\n"
+        f"exec >> {shlex.quote(str(log_path))} 2>&1\\n"
+        f"echo '[FargoVPN update launcher] $(date -Is) job={shlex.quote(job_id)} starting'\\n"
+        f"exec {quoted}\\n"
     )
     path.write_text(script, encoding="utf-8")
     os.chmod(path, 0o700)
