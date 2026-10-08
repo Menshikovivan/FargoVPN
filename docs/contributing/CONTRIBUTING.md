@@ -26,7 +26,7 @@ chore: clean repository structure
 docs: rewrite README
 fix: harden github release publication
 feat: add panel update verification
-release: 5.1.4
+release: 5.1.5
 ```
 
 ## Pull Request
