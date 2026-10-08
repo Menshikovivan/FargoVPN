@@ -31,7 +31,8 @@ def main():
             checks.append({'check': name, 'ok': False, 'detail': detail[:1000]})
     def versions():
         values = [(ROOT / p).read_text().strip() for p in ('VERSION', 'app/VERSION', 'static/VERSION')]
-        if values != ['5.0.2'] * 3: raise RuntimeError('Version copies mismatch: ' + repr(values))
+        if len(set(values)) != 1: raise RuntimeError('Version copies mismatch: ' + repr(values))
+        if not __import__('re').fullmatch(r'\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?', values[0]): raise RuntimeError('Invalid VERSION: ' + repr(values[0]))
         return values[0]
     check('version', versions)
     def database():
@@ -64,7 +65,8 @@ def main():
             response.raise_for_status()
             assert 'javascript' in response.headers.get('content-type', '')
             assert response.headers.get('service-worker-allowed')
-            assert "const VERSION = '5.0.2';" in response.text
+            expected = versions()
+            assert f"const VERSION = '{expected}';" in response.text
             return {'status': response.status_code, 'scope': response.headers['service-worker-allowed']}
         check('public HTTPS / SW version and scope', service_worker)
     def github():

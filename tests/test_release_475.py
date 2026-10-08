@@ -17,9 +17,9 @@ def read(name):
 
 class ReleaseContractTests(unittest.TestCase):
     def test_version_is_current_everywhere(self):
-        self.assertEqual((ROOT / "VERSION").read_text().strip(), "5.0.5")
-        self.assertEqual((ROOT / "app" / "VERSION").read_text().strip(), "5.0.5")
-        self.assertIn("# FargoVPN 5.0.5", read("README.md"))
+        self.assertEqual((ROOT / "VERSION").read_text().strip(), "5.1")
+        self.assertEqual((ROOT / "app" / "VERSION").read_text().strip(), "5.1")
+        self.assertIn("Текущая версия: `5.1`", read("README.md"))
         self.assertRegex(read("CHANGELOG.md"), r"(?m)^##\s+4\.7\.3\s*$")
 
     def test_python_and_shell_syntax(self):
@@ -104,7 +104,7 @@ class ReleaseContractTests(unittest.TestCase):
                 info = tarfile.TarInfo("FargoVPN-4.9/CHANGELOG.md")
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
-            text = module._read_changelog_from_archive(archive_path, "5.0.5")
+            text = module._read_changelog_from_archive(archive_path, "5.1")
             self.assertTrue(text.startswith("## 5.0.5"))
             self.assertNotIn("## 4.9.2", text)
 
@@ -141,10 +141,10 @@ class ReleaseContractTests(unittest.TestCase):
             with tarfile.open(tar_path, "r:gz") as archive:
                 archive.extractall(extracted, filter="data")
             root = extracted / "FargoVPN-4.9"
-            files = module._github_main_public_files(root, tar_path, "5.0.5", hashlib.sha256(tar_path.read_bytes()).hexdigest())
+            files = module._github_main_public_files(root, tar_path, "5.1", hashlib.sha256(tar_path.read_bytes()).hexdigest())
             self.assertIn("CHANGELOG.md", files)
             self.assertRegex(files["CHANGELOG.md"].decode(), r"(?m)^##\s+4\.9(?:\s|$)")
-            body = module.github_notes(module._read_changelog_from_archive(tar_path, "5.0.5"), "5.0.5", "a" * 64, tar_path.stat().st_size)
+            body = module.github_notes(module._read_changelog_from_archive(tar_path, "5.1"), "5.1", "a" * 64, tar_path.stat().st_size)
             self.assertIn("## 5.0.5", body)
             self.assertNotIn("## 4.9", body)
             self.assertIn("### Метаданные", body)
@@ -164,7 +164,7 @@ class ReleaseContractTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(module)
         result = module.installed_changelog()
-        self.assertEqual(result["version"], "5.0.5")
+        self.assertEqual(result["version"], "5.1")
         self.assertIn("## 5.0.5", result["text"])
 
     def test_changelog_contains_current_section(self):

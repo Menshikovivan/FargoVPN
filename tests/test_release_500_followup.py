@@ -50,13 +50,14 @@ def test_3xui_server_status_supports_current_and_legacy_network_keys():
 
 def test_notifications_buttons_are_not_left_disabled_after_preflight_failure():
     text = (ROOT / 'webapp.py').read_text(encoding='utf-8')
+    push_text = (ROOT / 'static/push.js').read_text(encoding='utf-8')
     assert '<button type="button" id="panel-push-enable">' in text
-    boot = re.search(r'const boot=\(\)=>.*?window\.addEventListener\(\'pagehide\'', text, re.S).group(0)
+    boot = re.search(r'const boot=\(\)=>.*?window\.addEventListener\(\'pagehide\'', push_text, re.S).group(0)
     assert "['panel-push-enable','panel-push-test','panel-push-disable','panel-push-check','panel-push-log-refresh','app-log-refresh']" in boot
     assert 'el.disabled=false;el.removeAttribute(\'disabled\')' in boot
     assert 'Push подготовится по действию пользователя' in boot
-    assert 'Подготавливаю Push непосредственно после клика пользователя' in text
-    assert 'if(b)b.disabled=false' in text
+    assert 'Подготавливаю Push непосредственно после клика пользователя' in push_text
+    assert 'if(b)b.disabled=false' in push_text
 
 
 def test_github_publish_syncs_full_safe_project_tree():
@@ -69,13 +70,12 @@ def test_github_publish_syncs_full_safe_project_tree():
     assert 'forbidden_dirs' in source
     assert 'forbidden_suffixes' in source
     assert 'config.py' in source and '.env' in source
-    assert 'files["FargoVPN_FULL.tar.gz"]' in source
     assert 'files["install.sh"] = _github_main_bootstrap()' in source
 
 
 def test_current_release_versions_are_consistent():
     for name in ('VERSION', 'app/VERSION', 'static/VERSION'):
-        assert (ROOT / name).read_text(encoding='utf-8').strip() == '5.0.5'
+        assert (ROOT / name).read_text(encoding='utf-8').strip() == '5.1'
 
 
 def test_install_accepts_legacy_profile_argument():
@@ -83,7 +83,7 @@ def test_install_accepts_legacy_profile_argument():
     assert "--profile)" in src
     assert "--profile=*)" in src
     assert "LEGACY_PROFILE" in src
-    assert "в 5.0 используется полный профиль" in src
+    assert "в 5.1 используется полный профиль" in src
 
 
 
@@ -108,7 +108,7 @@ def test_monitoring_traffic_summary_does_not_overwrite_speed_sample():
 
 
 def test_users_filters_rebuild_list_in_selected_order():
-    text = (ROOT / 'webapp.py').read_text(encoding='utf-8')
+    text = (ROOT / 'static/users.js').read_text(encoding='utf-8')
     assert 'list.replaceChildren(frag)' in text
     assert "filtered.sort((a,b)=>" in text
     assert "const key=keys[so]||keys.remaining" in text

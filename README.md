@@ -1,277 +1,339 @@
-# FargoVPN 5.0.5
+# FargoVPN
 
-<div align="center">
+> Telegram-бот и веб-панель для управления продажей VPN-подписок с интеграцией 3x-ui и системой обновлений через GitHub Releases.
 
-### Telegram · VPN-подписки · Панель управления
+<!-- Баннер намеренно не добавлен: используйте docs/screenshots/banner.png после подготовки реального изображения. -->
 
-Одна платформа для пользователей, платежей, сообщений и обслуживания VPN.
+[![Release](https://img.shields.io/github/v/release/Menshikovivan/FargoVPN?display_name=tag&sort=semver)](https://github.com/Menshikovivan/FargoVPN/releases)
+[![CI](https://github.com/Menshikovivan/FargoVPN/actions/workflows/ci.yml/badge.svg)](https://github.com/Menshikovivan/FargoVPN/actions/workflows/ci.yml)
+[![Last commit](https://img.shields.io/github/last-commit/Menshikovivan/FargoVPN)](https://github.com/Menshikovivan/FargoVPN/commits/main)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 
-[![Version](https://img.shields.io/badge/version-5.0.5-2563eb)](./VERSION)
-![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white)
-![Database](https://img.shields.io/badge/database-PostgreSQL-4169e1?logo=postgresql&logoColor=white)
-[![License](https://img.shields.io/badge/license-Personal_Use-64748b)](./LICENSE)
+**Текущая версия: `5.1`**
 
-[Установка](#быстрая-установка) · [Архитектура](#архитектура) · [Обновления](#обновление-и-откат) · [FAQ](#диагностика-и-faq) · [История версий](./CHANGELOG.md)
+## Оглавление
 
-</div>
+- [Что это](#что-это)
+- [Возможности](#возможности)
+- [Скриншоты](#скриншоты)
+- [Архитектура](#архитектура)
+- [Требования](#требования)
+- [Быстрая установка](#быстрая-установка)
+- [Ручная установка](#ручная-установка)
+- [Настройка](#настройка)
+- [Обновление](#обновление)
+- [Откат](#откат)
+- [GitHub Releases из панели](#github-releases-из-панели)
+- [Структура проекта](#структура-проекта)
+- [Диагностика и логи](#диагностика-и-логи)
+- [FAQ](#faq)
+- [Безопасность](#безопасность)
+- [Изменения](#изменения)
+- [Разработка](#разработка)
+- [Дорожная карта](#дорожная-карта)
+- [Лицензия](#лицензия)
 
----
+## Что это
 
-FargoVPN — персональная платформа управления VPN-подписками через Telegram-бота и веб-панель с интеграцией 3x-ui. Пользователь регистрируется, оплачивает подписку и получает ссылку подключения; администратор управляет сервисом из одного интерфейса.
+FargoVPN состоит из двух пользовательских интерфейсов и серверной части:
 
-> **В версии 5.0.5:** устранена зависимость пользователей и push от inline JavaScript; добавлены автономная диагностика и её запуск из панели. Конфликтующий CSP внешнего nginx требует отдельного исправления. Проверки и ограничения: [RELEASE_REPORT_5.0.5.md](./RELEASE_REPORT_5.0.5.md).
+- Telegram-бот на Python для регистрации пользователей, оформления и продления подписок, оплаты, поддержки и выдачи данных подписки;
+- веб-панель администратора на FastAPI для пользователей, сообщений, подписок, оплат, рассылок, резервных копий, диагностики, Push и обновлений;
+- интеграция с 3x-ui и его клиентами/inbounds;
+- PostgreSQL как основная БД с миграционной совместимостью со старой SQLite-базой;
+- установщик и менеджер обновлений с резервным копированием и откатом;
+- публикация релизов через GitHub Releases.
+
+Описание выше ограничено возможностями, представленными в исходном коде версии 5.1.
 
 ## Возможности
 
-| | Раздел | Что доступно |
-|:--:|---|---|
-| 🤖 | Telegram-бот | Регистрация по коду, кабинет, продление, напоминания и поддержка |
-| 💳 | Оплата | Приём чеков, OCR-проверка и подтверждение платежей |
-| 🛠️ | Веб-панель | Пользователи, оплаты, настройки, журналы и диагностика |
-| 💬 | Сообщения | Live-обновления диалогов, непрочитанные сообщения, ответы и рассылки |
-| 🔗 | 3x-ui | Управление клиентами через API и выбор нескольких inbound |
-| 🎟️ | Приглашения | Коды регистрации с защитой от перебора и реферальная программа |
-| 📦 | Резервные копии | `.tar.gz`, разделение больших архивов, доставка в Telegram и восстановление |
-| 🚀 | Обновления | GitHub Releases, проверка SHA-256, фоновая установка и откат |
-| 🔔 | Уведомления | Web Push и напоминания об окончании подписки |
+### Telegram-бот
+
+Поддерживаются регистрация и доступ пользователя, работа с подпиской, платежными заявками и чеками, пользовательская поддержка, реферальная логика и выдача данных подключения. Конкретные тексты и поведение зависят от настроек `config.py`.
+
+### Веб-панель
+
+В коде присутствуют разделы обзора/диагностики, пользователи, сообщения, платежи и настройки, а также управление резервными копиями/восстановлением и обновлениями. Для Push используется отдельный Service Worker.
+
+### 3x-ui
+
+`services/xui_api.py` и связанные сервисы работают с 3x-ui API и клиентами inbounds. Настройки URL, авторизации и управляемых inbound задаются в `config.py`.
+
+### Обновления
+
+Источник обновлений — GitHub Releases. Проверка новой версии берёт `VERSION` установленного экземпляра и реальные данные GitHub API. Публикация из панели автоматически пересобирает полный безопасный tree `main` из загруженного архива, удаляет из текущего `main` всё, чего нет в новой версии, создаёт тег `vX.Y`, GitHub Release и assets, а также пытается привести безопасные метаданные репозитория к штатному виду. Перед изменением `main` создаётся backup-ref; при ошибке выполняется автоматический rollback без `force-push`. До завершения API-проверок успех не показывается.
+
+### Резервное копирование и откат
+
+Перед обновлением создаются резервная копия текущей установки и снимок systemd. При ошибке установщик пытается автоматически восстановить предыдущую версию. В панели есть откат к последней валидной копии и отдельное безопасное понижение до опубликованной более старой версии.
+
+## Скриншоты
+
+Реальные изображения пока не добавлены в пакет. Для README подготовлены места в [`docs/screenshots/`](docs/screenshots/). Список нужных кадров — в [`docs/screenshots/README.md`](docs/screenshots/README.md).
 
 ## Архитектура
 
-```mermaid
-flowchart TD
-    user["Пользователь"] --> telegram["Telegram"]
-    telegram <--> bot["Telegram-бот"]
-    admin["Администратор"] --> proxy["HTTPS reverse proxy"]
-    proxy -->|Unix socket| panel["FastAPI-панель"]
-    bot <--> database[("PostgreSQL FargoVPN")]
-    panel <--> database
-    bot <--> xui["3x-ui API"]
-    panel <--> xui
-    panel --> workers["Фоновые задачи"]
-    workers <--> database
-    workers --> telegram
+```text
+Telegram
+   │
+   ▼
+main.py / services/
+   │
+   ├── PostgreSQL
+   ├── 3x-ui API
+   └── payment / receipt / subscription services
+
+Browser
+   │ HTTPS
+   ▼
+External Nginx
+   │ Unix socket
+   ▼
+FastAPI webapp.py
+   │
+   ├── static/
+   ├── Service Worker / Push
+   ├── backup / restore
+   └── update_manager.py → GitHub Releases
 ```
 
-PostgreSQL хранит данные платформы. Бот и панель обращаются к 3x-ui через API; длительные операции выполняют отдельные workers. HTTPS завершается на внешнем reverse proxy, который передаёт запросы панели через Unix-сокет.
-
-### От регистрации до подключения
-
-```mermaid
-flowchart TD
-    invite["Код приглашения"] --> register["Регистрация в Telegram"]
-    register --> payment["Отправка чека"]
-    payment --> review{"Платёж подтверждён?"}
-    review -->|Да| subscription["Создание или продление подписки"]
-    review -->|Нет| retry["Уточнение оплаты"]
-    retry --> payment
-    subscription --> link["Ссылка и инструкция подключения"]
-```
+Веб-приложение по умолчанию использует Unix-socket `/run/vpn-service/fargovpn.sock`; внешний HTTPS reverse proxy остаётся отдельной частью серверной конфигурации.
 
 ## Требования
 
-Поддерживаемая установщиком среда — сервер Ubuntu/Debian с `systemd`. Основной runtime использует Python, PostgreSQL, SQLAlchemy/psycopg и HTTP-клиенты. OCR требует Tesseract. Для web-панели нужен Unix-сокет, а внешний reverse-proxy/Nginx, если он используется, настраивается отдельно от FargoVPN.
+Для штатного установщика рассчитано окружение Linux с `systemd`, правами `root` и Debian/Ubuntu с `apt`.
 
-Точный перечень Python-зависимостей находится в `requirements.txt`. Рекомендуется выделять отдельный серверный runtime и не переносить production `config.py` в репозиторий.
+Установщик автоматически устанавливает Python-инструменты, `rsync`, `curl`, `openssl`, `socat`, SQLite CLI и Tesseract OCR. PostgreSQL подготавливается штатным скриптом `scripts/setup_postgresql.sh`.
+
+**Nginx устанавливается и настраивается не автоматически.** Перед полноценным запуском панели должен существовать внешний Nginx, а его конфигурация должна проксировать запросы на сокет FargoVPN. Установщик выполняет проверку `nginx -t`, но не подменяет пользовательскую конфигурацию.
+
+Минимальная версия Python для runtime: **3.10**.
 
 ## Быстрая установка
+
+Рекомендуемый способ — всегда брать актуальный `install.sh` из `main`, а сам пакет получать из последнего GitHub Release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash
 ```
 
-Интерактивное меню читает ввод из терминала даже при запуске через pipe. Для автоматического обновления: `sudo bash install.sh --update-existing /root/vpn_bot`.
+Bootstrap не хранит релизный архив в `main`: он скачивает `FargoVPN_FULL.tar.gz` и SHA-256 из последнего GitHub Release, проверяет контрольную сумму и запускает внутренний установщик.
 
-Установщик проверяет root/systemd, зависимости, целостность скачанного архива и его SHA-256, затем запускает штатную установку. В конце отображается итоговая сводка по установленной версии, web-панели, службам и health-check.
+## Ручная установка
 
-## Конфигурация
+```bash
+git clone https://github.com/Menshikovivan/FargoVPN.git
+cd FargoVPN
+sudo bash install.sh --profile full
+```
 
-<details>
-<summary><b>Параметры подключения, безопасности и обслуживания</b></summary>
+Установщик:
 
+1. проверяет права и системные зависимости;
+2. определяет новую или существующую установку;
+3. создаёт резервную копию перед обновлением;
+4. синхронизирует исходники, сохраняя `config.py`, базы, `.env`, логи и виртуальное окружение;
+5. устанавливает Python-зависимости;
+6. выполняет миграции БД;
+7. обновляет systemd-службы;
+8. выполняет итоговые health-check и проверку версии Service Worker.
+
+## Настройка
+
+Production-конфигурация создаётся установщиком в `config.py` с правами `0600`. Файл `.env.example` в репозитории — только справочник переменных установщика; приложение не читает dotenv автоматически.
+
+### Основные параметры `config.py`
 
 | Параметр | Назначение |
 |---|---|
-| `SERVICE_NAME` | Отображаемое имя сервиса. |
-| `BOT_TOKEN` | Токен Telegram-бота; хранить только вне публичного репозитория. |
+| `SERVICE_NAME` | Название VPN-сервиса в интерфейсах и сообщениях. |
+| `BOT_TOKEN` | Telegram Bot Token. Хранить только на сервере. |
 | `ADMIN_IDS` | Telegram ID администраторов. |
 | `DATABASE_URL` | PostgreSQL DSN FargoVPN. |
-| `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_POOL_TIMEOUT` | Параметры пула PostgreSQL. |
-| `BASE_URL`, `MASTER_API_URL`, `SUB_BASE_URL` | Адреса web/3x-ui/подписок. |
-| `MASTER_API_TOKEN` | Секрет API 3x-ui. |
-| `PAYMENT_PRICE`, `PAYMENT_PHONE`, `PAYMENT_BANK`, `PAYMENT_RECEIVER` | Реквизиты и цена оплаты. |
-| `RECEIPT_*` | OCR, фильтры чеков и ограничения их обработки. |
-| `WEB_HOST`, `WEB_SOCKET_PATH`, `WEB_SOCKET_GROUP` | Параметры web-сервиса и Unix-сокета. |
-| `WEB_PUBLIC_PREFIX`, `WEB_DOMAIN`, `WEB_TLS_SERVER_NAME` | Публичный путь и доменные настройки. |
-| `WEB_USERNAME`, `WEB_PASSWORD_HASH`, `WEB_SECRET_KEY` | Учётная запись и сессии web-панели. |
-| `WEB_COOKIE_HTTPS_ONLY`, `WEB_SESSION_MAX_AGE_SECONDS` | Безопасность и срок web-сессии. |
-| `CABINET_LINK_TTL_SECONDS`, `CABINET_ALLOW_LEGACY_TOKENS` | Ссылки и совместимость личного кабинета. |
-| `WEB_LOGIN_*` | Лимиты и блокировки входа. |
-| `XUI_DB_PATH`, `XUI_PANEL_URL`, `XUI_CACHE_SECONDS`, `XUI_VERIFY_TLS`, `XUI_REQUEST_TIMEOUT_SECONDS` | Подключение и кэширование 3x-ui. |
-| `XUI_MANAGED_INBOUND_IDS`, `XUI_INBOUND_CACHE_SECONDS` | Список управляемых inbound и его кэш. |
-| `REMINDER_DAYS`, `REMINDER_LOCK_PATH` | Напоминания о подписке. |
-| `USER_EVENT_*` | Срок хранения и очередь журнала сообщений. |
-| `CHAT_MEDIA_*` | Кэш и лимиты медиа сообщений. |
-| `BROADCAST_*` | Рассылки, размер медиа, задержка и stale timeout. |
-| `SUBSCRIPTION_REFRESH_*` | Массовое обновление ссылок подписки. |
-| `PUSH_*` | Web Push, VAPID и лимиты подписок. |
-| `BACKUP_*` | Каталог, интервал, размер частей, lock и состояние backup. |
-| `RESTORE_*` | Lock, журнал и лимиты безопасного восстановления. |
-| `XUI_POSTGRES_DSN`, `XUI_DB_ENV_FILE` | Параметры отдельной БД 3x-ui при необходимости. |
-| `GITHUB_API_BASE_URL`, `GITHUB_API_TOKEN` | GitHub API для канала обновлений. |
-| `GITHUB_REPOSITORY_OWNER`, `GITHUB_REPOSITORY_NAME` | Репозиторий обновлений. |
-| `GITHUB_TARGET_BRANCH`, `GITHUB_RELEASE_*` | Параметры GitHub Release. |
-| `GITHUB_MAIN_SYNC_ENABLED` | Включение синхронизации публичной поверхности. |
-| `UPDATE_DIR`, `UPDATE_CHECK_INTERVAL`, `UPDATE_VERIFY_TLS`, `UPDATE_MAX_ARCHIVE_MB`, `UPDATE_STALE_JOB_SECONDS` | Каталог, проверки и лимиты обновлений. |
+| `BASE_URL` | Базовый URL панели/публичной части. |
+| `MASTER_API_URL` | URL управляющего API 3x-ui. |
+| `MASTER_API_TOKEN` | Токен/учётные данные доступа к 3x-ui API. |
+| `SUB_BASE_URL` | Базовый адрес пользовательских подписок. |
+| `PAYMENT_PRICE` | Стоимость подписки. |
+| `PAYMENT_PHONE` / `PAYMENT_BANK` / `PAYMENT_RECEIVER` | Реквизиты, участвующие в оплате и проверке чеков. |
+| `RECEIPT_OCR_ENABLED` | Включение локального OCR чеков. |
+| `WEB_HOST` / `WEB_SOCKET_PATH` | Локальный web runtime и Unix-socket. |
+| `WEB_PUBLIC_PREFIX` | Публичный prefix панели. |
+| `WEB_USERNAME` | Логин администратора панели. |
+| `WEB_PASSWORD_HASH` | Хэш пароля панели, не сам пароль. |
+| `WEB_SECRET_KEY` | Секрет сессий/куки панели. |
+| `XUI_PANEL_URL` | URL панели 3x-ui. |
+| `XUI_USERNAME` / `XUI_PASSWORD` | Дополнительная legacy-аутентификация 3x-ui, если используется. |
+| `XUI_MANAGED_INBOUND_IDS` | Явный список inbound, если он нужен вместо автоматического выбора. |
+| `PUSH_VAPID_PUBLIC_KEY` | VAPID public key для Web Push. |
+| `PUSH_VAPID_PRIVATE_KEY_PATH` | Путь к приватному VAPID-ключу вне Git. |
+| `GITHUB_REPOSITORY_OWNER` | Владелец GitHub-репозитория обновлений. |
+| `GITHUB_REPOSITORY_NAME` | Имя репозитория, по умолчанию `FargoVPN`. |
+| `GITHUB_API_TOKEN` | GitHub token для публикации релизов; хранится только на сервере. |
+| `GITHUB_RELEASE_TAG_PREFIX` | Префикс тега. Для v5.1 используется `v`, поэтому тег — `v5.1`. |
+| `GITHUB_TARGET_BRANCH` | Публичная ветка; для проекта должна быть `main`. |
 
-Полный список исходных ключей с базовыми значениями находится в `config.example.py`. Реальные секреты и production-ID в README не приводятся.
+После установки заполните Telegram, 3x-ui, публичный URL, оплату и параметры панели. Затем проверьте внешний Nginx и откройте панель по настроенному `WEB_PUBLIC_PREFIX`.
 
+## Обновление
 
-</details>
+### Через веб-панель
 
-## Подключение клиентов
+Откройте **Обновления**, выполните проверку и установите найденный GitHub Release. Источник определяется реальным ответом GitHub API; версия берётся из `VERSION` установленной системы.
 
-В личном кабинете раздел «Как подключиться» формирует deep-link вида `happ://add/...` или `incy://add/...`. В интерфейсе доступны HAPP и INCY для Android, iPhone/iPad и Windows-сценариев. Если deep-link не открывается, ссылку подписки можно скопировать вручную.
+Перед заменой файлов установщик создаёт backup и systemd snapshot. При ошибке выполняется автоматический rollback, а статус задачи сохраняется для панели.
 
-## Пользовательские сценарии
+### Через консоль
 
-1. Пользователь открывает бота и проходит приглашение по 4-значному коду.
-2. После активации открывается кабинет и выдаётся подписка при наличии соответствующего состояния.
-3. Оплата отправляется через Telegram, чек проверяется и обрабатывается панелью.
-4. После подтверждения подписки пользователь получает актуальную ссылку и инструкцию подключения.
+Для установки в стандартный каталог:
 
-## Администратор
-
-В панели доступны разделы пользователей, сообщений, оплат, мониторинга, backup, журналов, настроек, диагностики и обновлений. Для операций с клиентами используется локальная БД FargoVPN и API 3x-ui.
-
-## Backup и восстановление
-
-Полный backup создаётся одной штатной службой `vpn-service-backup.service`, планирование выполняется `vpn-service-backup.timer`. Архив имеет формат `.tar.gz`; крупный файл делится на последовательные части. Restore проверяет состав частей, контрольные суммы и безопасность путей до применения данных.
-
-Режимы восстановления: пользовательская БД или полное состояние системы. Перед полным восстановлением предусмотрены защитный backup и проверка результата.
-
-## Обновление и откат
-
-Канал обновлений использует GitHub Releases. Перед применением проверяются версия, имя архива, размер и SHA-256; установка выполняется фоновым worker-процессом. Для rollback используется сохранённый pre-update архив.
-
-```mermaid
-flowchart TD
-    release["GitHub Release"] --> verify["Проверка версии и SHA-256"]
-    verify --> valid{"Архив корректен?"}
-    valid -->|Нет| stop["Установка не запускается"]
-    valid -->|Да| backup["Снимок перед обновлением"]
-    backup --> worker["Установка и миграции"]
-    worker --> health{"Health-check"}
-    health -->|Успешно| done["Новая версия работает"]
-    health -->|Ошибка| inspect["Журнал и диагностика"]
-    inspect --> rollback["Откат из сохранённого снимка"]
+```bash
+sudo /root/vpn_bot/install.sh --update-existing /root/vpn_bot
 ```
 
-Откат запускается отдельной административной операцией. Публикация доступна назначенной главной панели; обычные панели получают релизы из GitHub.
+Для другой существующей установки подставьте её реальный путь.
 
-## Структура репозитория
+## Откат
 
-| Файл или каталог в полном архиве | Назначение |
-|---|---|
-| `main.py` · `webapp.py` | Telegram-бот и FastAPI-панель |
-| `db.py` · `init_db.py` · `migrations/` | PostgreSQL и миграции |
-| `services/` | 3x-ui, подписки, OCR и медиа |
-| `broadcast_*.py` · `subscription_refresh_*.py` | Рассылки и обновление подписок |
-| `backup.py` · `restore_*.py` | Резервное копирование и восстановление |
-| `update_*.py` · `rollback_worker.py` | Установка версий и откат |
-| `static/` | Стили, JavaScript и иконки |
-| `scripts/` · `*.service` · `*.socket` | Сервисные скрипты и systemd |
-| `tests/` · `requirements-dev.txt` | Регрессионные проверки |
-| `config.example.py` | Шаблон конфигурации |
+В панели **Обновления** доступны:
 
-На главной ветке GitHub штатная публикация оставляет публичную документацию, установщик, версию и полный архив с SHA-256. Исходный код и тесты находятся внутри полного архива.
+- откат к последнему валидному pre-update backup;
+- принудительная установка опубликованной более ранней версии из GitHub Releases.
+
+До замены текущей версии создаётся новый safety backup. Полный rollback включает файлы приложения и соответствующий snapshot systemd в рамках штатного механизма установщика.
+
+## GitHub Releases из панели
+
+Публикация доступна только назначенной главной панели. GitHub token сохраняется в серверном `config.py` и не попадает в `main`.
+
+Для версии `5.1` ожидаемый поток:
+
+```text
+загрузка архива
+    ↓
+проверка VERSION / CHANGELOG / содержимого
+    ↓
+атомарный commit main
+    ↓
+создание или проверка tag v5.1
+    ↓
+GitHub Release
+    ↓
+загрузка versioned + generic assets
+    ↓
+проверка имени / размера / digest / tag SHA
+    ↓
+"Версия 5.1 успешно загружена на GitHub"
+```
+
+Релизные архивы находятся только в **GitHub Release assets**, а не в дереве `main`.
+
+## Структура проекта
+
+```text
+FargoVPN/
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── workflows/ci.yml
+├── docs/
+│   ├── postgresql-migration.md
+│   ├── operations.md
+│   └── screenshots/
+├── migrations/
+├── scripts/
+├── services/
+├── static/
+├── tests/
+├── .env.example
+├── .gitignore
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── README.md
+├── SECURITY.md
+├── VERSION
+├── requirements.txt
+├── requirements-dev.txt
+├── install.sh
+├── main.py
+├── webapp.py
+└── update_manager.py
+```
+
+`app/VERSION` и `static/VERSION` остаются синхронизированными compatibility-маркерами старого release contract; runtime-источник версии — корневой `VERSION`.
+
+## Диагностика и логи
+
+Базовые проверки:
+
+```bash
+sudo systemctl status vpn-service-bot.service
+sudo systemctl status vpn-service-web.socket
+sudo systemctl status vpn-service-web.service
+```
+
+Логи установщика и восстановления:
+
+```text
+/var/log/vpn-service-install.log
+/var/log/vpn-service-restore.log
+```
+
+Лог приложения по умолчанию определяется `APP_LOG_PATH` и в стандартном конфиге указывает на `/var/log/vpn_bot.log`.
+
+Дополнительные команды и operator notes собраны в [`docs/operations.md`](docs/operations.md).
+
+## FAQ
+
+**Почему bootstrap не скачивает архив из `main`?**  Начиная с 5.1 `main` содержит исходники и установочный bootstrap, а release-архивы хранятся только в GitHub Releases. Это уменьшает размер ветки и исключает дублирование бинарного пакета.
+
+**Сохранятся ли настройки при обновлении?**  Да: штатный installer сохраняет `config.py`, runtime data/DB, `.env`, virtualenv и логи, а перед заменой создаёт резервную копию.
+
+**Можно ли удалить GitHub token из `config.py` и продолжить публикацию?**  Нет. Публикация через панель требует GitHub API token с правом записи в выбранный репозиторий.
+
+**Почему `pytest` локально может отличаться от CI?**  Runtime-пакет имеет внешние зависимости; CI устанавливает `requirements-dev.txt` перед запуском тестов. На production-сервере используйте штатный виртуальный environment установщика.
 
 ## Безопасность
 
-Не храните Telegram Bot Token, API-токены 3x-ui, пароли PostgreSQL, VAPID private key и production-конфигурацию в Git. Для ручного восстановления используйте только доверенные архивы. Не подключайте произвольные reverse-proxy правила к панели без проверки маршрутизации и TLS. Рекомендации описаны в [SECURITY.md](./SECURITY.md).
+Подробности: [`SECURITY.md`](SECURITY.md).
 
-## Диагностика и FAQ
+Никогда не коммитьте production `config.py`, `.env`, базы, логи или приватные ключи. Удаление секрета только из текущего `main` не делает его безопасным в истории: сначала перевыпустите секрет, затем очищайте Git history по отдельному плану.
 
-**«Диалог не начат»** — Telegram отклонил сообщение или чат недоступен. В массовой рассылке такой чат фиксируется как недоступный и исключается из следующих запусков до нового входящего сообщения.
+## Изменения
 
-**Push не включается** — проверьте HTTPS, разрешение уведомлений браузера, VAPID-конфигурацию и доступность push endpoint.
+- [CHANGELOG.md](CHANGELOG.md) — история изменений в формате Keep a Changelog.
+- [GitHub Releases](https://github.com/Menshikovivan/FargoVPN/releases) — опубликованные пакеты и SHA-256.
 
-**Версия не меняется после обновления** — проверьте `VERSION`, `app/VERSION`, статус update-worker и `/healthz`.
+## Разработка
 
-**3x-ui недоступна** — панель умеет показывать локальный snapshot; отдельно проверьте URL 3x-ui, TLS и timeout.
+Установите dev-зависимости и запустите проверки:
 
-**Где смотреть логи?** — основной application log: `/var/log/vpn_bot.log`; restore пишет в отдельный журнал, а состояния фоновых задач находятся в `/var/lib/vpn-service`.
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+pytest -q
+```
 
-## English summary
+Для изменений установщика дополнительно выполните:
 
-FargoVPN is a personal-use Telegram VPN subscription platform with a FastAPI admin panel and 3x-ui integration. It provides invitation-gated registration, payments/receipt handling, subscriptions, messaging, broadcasts, Web Push, backup/restore, and GitHub Release based updates.
+```bash
+bash -n install.sh
+find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+python3 -m compileall -q .
+```
 
-## Вклад в проект
+Вклад принимается через Pull Request. См. [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-Для изменений сначала добавляйте regression test, затем проверяйте `compileall`/`pytest` и shell syntax. Production-секреты и персональные данные в PR не добавляются.
+## Дорожная карта
+
+На момент 5.1 публичная дорожная карта с фиксированными сроками не заявлена. Новые задачи и предложения следует оформлять через GitHub Issues/Discussions после включения соответствующих функций репозитория.
+
+Приоритетная release-инженерная задача после 5.1 — сохранить совместимость старых установок и не возвращать артефакты/секреты в `main`.
 
 ## Лицензия
 
-FargoVPN распространяется по условиям `LICENSE` — Personal Use License. Для использования за пределами разрешённых условий требуется отдельное разрешение правообладателя.
-
-## Ответственное использование
-
-Используйте проект только в соответствии с законодательством, правилами провайдера и применимыми условиями сервисов, с которыми он интегрируется.
-
-## Обновление 5.0.5
-
-В панели откройте «Обновления», загрузите `VPN_Service_Platform_5.0.5_FULL.tar.gz` и запустите установку. Версия 5.0.5 выше 5.0.0, поэтому стандартная проверка панели принимает архив без принудительной переустановки.
-
-Установщик создаёт штатную резервную копию и сохраняет конфигурацию существующей установки. Миграции базы выполняются штатным `init_db.py`. Проверки и ограничения тестовой среды описаны в [RELEASE_REPORT_5.0.5.md](./RELEASE_REPORT_5.0.5.md).
-
-Для запуска тестов: `python -m pip install -r requirements-dev.txt`, затем `python -m pytest tests -q`. Поведенческие JavaScript-проверки требуют Node.js, shell-проверки — Bash.
-Релизный asset: `VPN_Service_Platform_5.0.5_FULL.tar.gz`; стандартный tag: `FargoVPN-5.0.5`.
-Для публикации используйте штатную публикацию архива на основной панели. Она обновляет GitHub Release и публичную ветку main, включая bootstrap и SHA-256. Публикация требует GitHub-токен с Contents: write и не выполняется автоматически при локальном тестировании.
-Описание публикации формируется только из раздела 5.0.5 в `CHANGELOG.md`. Старые разделы остаются в файле как история.
-
-### Проверка релиза 5.0.5 и внешний nginx
-
-Установщик 5.0.5 не устанавливает nginx, не изменяет L4/L7-конфигурацию и отключает старую службу `vpn-service-nginx-guard`. При обновлении ранее настроенный URI панели сохраняется. При новой установке владелец внешнего nginx должен подключить отдельный URI FargoVPN к Unix-сокету; готовый блок можно получить без изменения файлов:
-
-```bash
-cd /root/vpn_bot
-.venv/bin/python scripts/print_nginx_location.py
-.venv/bin/python scripts/verify_server.py --public-url https://YOUR_DOMAIN/YOUR_FARGOVPN_PREFIX/
-```
-
-Вставьте выведенный `location` в существующий HTTPS `server`, затем выполните `nginx -t` и только после успешной проверки — `systemctl reload nginx`. Блок не затрагивает 3x-ui, подписки, xHTTP и UDP/Hysteria2. Пути и порты 3x-ui определяются из конфигурации, а не фиксируются на 10443/55443. Для старой панели можно сохранить логин/пароль cookie-сессии в настройках 3x-ui; Bearer остаётся основным способом входа.
-
-Полный отчёт и границы проверки: `RELEASE_REPORT_5.0.5.md`; перечень маршрутов и callback — `DIFF_INVENTORY_4.9.3_5.0.4.json`. `verify_server.py` выполняет чтение и не запускает рассылку, оплату, восстановление, публикацию или перезапуск.
-
-Тесты интерфейса используют DOM с изолированными ответами API. Для их запуска дополнительно установите `jsdom@26` во временное окружение и задайте `FARGOVPN_JSDOM_PATH` (путь к модулю); без него эта проверка пропускается. Реальный Web Push, Safari/iOS, Telegram, PostgreSQL и сетевые VPN-протоколы требуют проверки на целевом сервере.
-
-Telegram получает обычный `tar.gz`, разделённый на две бинарные части для архивов до удвоенного лимита части. Для больших архивов частей больше из-за ограничения Telegram; части нужно соединить в исходном порядке перед распаковкой. Шифрование age не применяется.
-
-## Проверки 5.0.5
-
-Локальные тесты из распакованного пакета, без боевого config.py и без отправки сообщений:
-
-```bash
-python3 -m venv .qa-venv
-.qa-venv/bin/pip install -r requirements-dev.txt
-npm install --prefix .qa-js jsdom@26
-.qa-venv/bin/python scripts/run_checks.py
-```
-
-Без Node/jsdom нельзя подтвердить исполнение UI. `--without-dom` явно запускает только частичную проверку. Проверки сервера: `.venv/bin/python scripts/verify_server.py --public-url 'https://example.org/YOUR_PANEL_PREFIX/'`.
-
-Полный отчёт и ограничения: `RELEASE_REPORT_5.0.5.md`. Проверка ошибок/пустого журнала не означает доставку Push или Telegram реальному адресату. Настройки и существующая конфигурация nginx сохраняются.
-
-Публикуйте каждое изменение с новой версией. GitHub-тег проверяется против коммита выпуска; уже существующий тег другого коммита автоматически не переписывается. В случае частичного сбоя main/tag могут уже существовать: интерфейс должен показывать ошибку, проверьте GitHub перед повторной публикацией.
-
-## Бэкапы 5.0.5
-
-Архив до **45 000 000 байт включительно** отправляется одним исходным `.tar.gz`. Только большие архивы делятся: две части, если они укладываются в установленный лимит, либо больше для крупных архивов. Старые `.part001/.part002` по-прежнему восстанавливаются после соединения.
-
-Для проверки своей выгрузки подготовьте защищённую папку вне исходников с `fargovpn.sql` и `xui.db`, извлечёнными из бэкапа. Не помещайте конфиг/ключи/пользователей в публичный архив. Офлайн-тест читает COPY-данные, создаёт отдельную SQLite-модель и чувствительную HTML-разметку только в указанной папке; это не настоящее восстановление PostgreSQL.
-
-```bash
-.qa-venv/bin/python tests/qa/run_backup_data.py /ABSOLUTE/PRIVATE_TEST_DIR
-FARGOVPN_JSDOM_PATH="$PWD/.qa-js/node_modules/jsdom" node tests/qa/real_data_dom.cjs "$PWD" /ABSOLUTE/PRIVATE_TEST_DIR/rendered
-```
-
-Сеть в этих тестах отключена; Push/Telegram/оплата не отправляются. Папку с тестовыми данными не публикуйте.
+Проект распространяется по `FARGOVPN PERSONAL USE LICENSE`, который находится в [`LICENSE`](LICENSE). Это ограничительная лицензия для личного некоммерческого использования; она **не является стандартной OSI open-source лицензией**. Для коммерческого использования, хостинга третьих лиц или распространения требуется отдельное письменное разрешение правообладателя.

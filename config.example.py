@@ -2,8 +2,8 @@
 import aiohttp
 
 SERVICE_NAME = "MyVPN"
-BOT_TOKEN = "123456:telegram-bot-token"
-ADMIN_IDS = [123456789]
+BOT_TOKEN = ""
+ADMIN_IDS = []
 SUBSCRIPTION_DAYS = 30
 BOT_WELCOME_TEXT = ""  # optional; {service} is replaced with SERVICE_NAME
 BOT_SUPPORT_PROMPT = ""
@@ -22,12 +22,12 @@ SLOW_OPERATION_SECONDS = 1.0
 BACKUP_DATABASE_TIMEOUT_SECONDS = 300
 BASE_URL = "https://panel.example.com/"
 MASTER_API_URL = BASE_URL
-MASTER_API_TOKEN = "3x-ui-api-token"
+MASTER_API_TOKEN = ""
 SUB_BASE_URL = "https://panel.example.com/sub/"
 PAYMENT_PRICE = 150
-PAYMENT_PHONE = "+79990000000"
-PAYMENT_BANK = "Банк"
-PAYMENT_RECEIVER = "Получатель"
+PAYMENT_PHONE = ""
+PAYMENT_BANK = ""
+PAYMENT_RECEIVER = ""
 
 # Local receipt OCR. PAYMENT_PHONE and PAYMENT_RECEIVER are the expected
 # recipient details. Automatic approval requires all checks to pass.
@@ -67,8 +67,8 @@ WEB_PUBLIC_PREFIX = "/fargovpn-admin-example"
 WEB_DOMAIN = ""
 WEB_TLS_SERVER_NAME = ""
 WEB_USERNAME = "admin"
-WEB_PASSWORD_HASH = 'pbkdf2_sha256$260000$a7a7b280d05f7079c7af6f09f6cf41d1$aa12d0b0cfe258020d16d7dc8fb57f166f27908aacddce9689de43908c249f6d'
-WEB_SECRET_KEY = "replace-with-a-random-secret"
+WEB_PASSWORD_HASH = ""
+WEB_SECRET_KEY = ""
 WEB_COOKIE_HTTPS_ONLY = True
 WEB_SESSION_MAX_AGE_SECONDS = 28800
 CABINET_LINK_TTL_SECONDS = 86400
@@ -165,13 +165,15 @@ GITHUB_API_TOKEN = ""
 GITHUB_REPOSITORY_OWNER = ""
 GITHUB_REPOSITORY_NAME = "FargoVPN"
 GITHUB_TARGET_BRANCH = "main"
-GITHUB_RELEASE_TAG_PREFIX = "FargoVPN-"
+GITHUB_RELEASE_TAG_PREFIX = "v"
 GITHUB_RELEASE_NAME_TEMPLATE = "FargoVPN {version}"
 GITHUB_RELEASE_ASSET_NAME = "VPN_Service_Platform_{version}_FULL.tar.gz"
 GITHUB_RELEASE_MAKE_LATEST = True
 GITHUB_RELEASE_DRAFT = False
 GITHUB_RELEASE_PRERELEASE = False
 GITHUB_MAIN_SYNC_ENABLED = True
+GITHUB_REPOSITORY_DESCRIPTION = "Telegram-бот и веб-панель для управления продажей VPN-подписок с интеграцией 3x-ui."
+GITHUB_REPOSITORY_TOPICS = ["fargovpn", "telegram-bot", "vpn", "3x-ui", "xray", "python", "fastapi"]
 UPDATE_CHECK_INTERVAL = 60
 UPDATE_VERIFY_TLS = True
 UPDATE_MAX_ARCHIVE_MB = 1024

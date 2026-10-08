@@ -10,6 +10,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import json
+import re
 
 
 def main():
@@ -34,6 +35,7 @@ def main():
     for path in [root/'service-worker.js',* (root/'static').glob('*.js')]:subprocess.run([node,'--check',str(path)],check=True)
     copies=[(root/name).read_text().strip() for name in ['VERSION','app/VERSION','static/VERSION']]
     if len(set(copies))!=1:raise RuntimeError('Version copies differ')
+    if not re.fullmatch(r'\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?', copies[0]): raise RuntimeError('Invalid VERSION')
     with tempfile.TemporaryDirectory(prefix='fargovpn-qa-') as temporary:
         result_file=Path(temporary)/'results.xml'
         result=subprocess.call([sys.executable,'-m','pytest','-q',str(root/'tests'),'--basetemp',str(Path(temporary)/'tests'),'--junitxml',str(result_file)],env=env)

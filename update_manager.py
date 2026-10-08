@@ -855,6 +855,10 @@ def api_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         "github_main_synced": bool(metadata.get("github_main_synced", False)),
         "github_main_commit_url": str(metadata.get("github_main_commit_url") or ""),
         "github_main_commit_sha": str(metadata.get("github_main_commit_sha") or ""),
+        "github_tag": str(metadata.get("github_tag") or ""),
+        "github_release_url": str(metadata.get("github_release_url") or ""),
+        "github_release_verified": bool(metadata.get("github_release_verified", False)),
+        "github_release_assets": list(metadata.get("github_release_assets") or []),
     }
 
 
@@ -993,10 +997,118 @@ def github_repo_url() -> str:
     return f"https://github.com/{github_owner()}/{github_repo()}"
 
 
+def github_repository_topics() -> list[str]:
+    configured = getattr(config, "GITHUB_REPOSITORY_TOPICS", None)
+    if isinstance(configured, (list, tuple)):
+        topics = [str(item).strip().lower() for item in configured if str(item).strip()]
+    else:
+        topics = ["fargovpn", "telegram-bot", "vpn", "3x-ui", "xray", "python", "fastapi"]
+    result: list[str] = []
+    seen: set[str] = set()
+    for topic in topics:
+        topic = re.sub(r"[^a-z0-9._-]+", "-", topic).strip("-._")
+        if not topic or topic in seen:
+            continue
+        seen.add(topic)
+        result.append(topic[:50])
+    return result[:20]
+
+
+def github_repository_description() -> str:
+    return str(getattr(
+        config,
+        "GITHUB_REPOSITORY_DESCRIPTION",
+        "Telegram-бот и веб-панель для управления продажей VPN-подписок с интеграцией 3x-ui.",
+    ) or "Telegram-бот и веб-панель для управления продажей VPN-подписок с интеграцией 3x-ui.").strip()[:500]
+
+
+def _github_configure_repository() -> dict[str, Any]:
+    """Apply safe repository metadata without making Contents-only tokens unusable."""
+    owner = quote(github_owner(), safe="")
+    repo = quote(github_repo(), safe="")
+    base = f"/repos/{owner}/{repo}"
+    warnings: list[str] = []
+    response = github_request("PATCH", base, json={
+        "description": github_repository_description(),
+        "default_branch": "main",
+        "has_issues": True,
+        "has_discussions": True,
+        "delete_branch_on_merge": True,
+    })
+    if response.status_code >= 400:
+        warnings.append(f"repository settings HTTP {response.status_code}: {github_json_error(response)}")
+        payload: dict[str, Any] = {}
+    else:
+        payload = response.json() if isinstance(response.json(), dict) else {}
+    topics = github_repository_topics()
+    topics_response = github_request("PUT", base + "/topics", json={"names": topics})
+    if topics_response.status_code >= 400:
+        warnings.append(f"topics HTTP {topics_response.status_code}: {github_json_error(topics_response)}")
+    return {
+        "repository": f"{github_owner()}/{github_repo()}",
+        "default_branch": str(payload.get("default_branch") or ""),
+        "topics": topics,
+        "issues": bool(payload.get("has_issues")),
+        "discussions": bool(payload.get("has_discussions")),
+        "configured": not warnings,
+        "warnings": warnings,
+    }
+
+
+def _github_create_backup_ref(base_sha: str, version: str) -> str:
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_version = re.sub(r"[^0-9A-Za-z._-]", "-", str(version or "unknown"))
+    ref = f"refs/heads/backup/before-v{safe_version}-{suffix}"
+    owner = quote(github_owner(), safe="")
+    repo = quote(github_repo(), safe="")
+    response = github_request("POST", f"/repos/{owner}/{repo}/git/refs", json={"ref": ref, "sha": base_sha})
+    if response.status_code >= 400:
+        raise UpdateError(f"Не удалось создать backup-ветку GitHub перед публикацией: HTTP {response.status_code}: {github_json_error(response)}")
+    return ref.removeprefix("refs/heads/")
+
+
+def _github_delete_ref(branch: str) -> None:
+    owner = quote(github_owner(), safe="")
+    repo = quote(github_repo(), safe="")
+    response = github_request("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{quote(branch, safe='')}")
+    if response.status_code not in {204, 404}:
+        raise UpdateError(f"Не удалось удалить временную backup-ветку GitHub {branch}: HTTP {response.status_code}: {github_json_error(response)}")
+
+
+def _github_restore_main(base_sha: str, failed_sha: str) -> str:
+    """Rollback main content without a force-push by creating a reverse commit."""
+    owner = quote(github_owner(), safe="")
+    repo = quote(github_repo(), safe="")
+    base_commit = github_request("GET", f"/repos/{owner}/{repo}/git/commits/{quote(base_sha, safe='')}")
+    if base_commit.status_code >= 400:
+        raise UpdateError(f"Не удалось получить исходное дерево main для rollback: HTTP {base_commit.status_code}: {github_json_error(base_commit)}")
+    base_tree = str(((base_commit.json().get("tree") or {}).get("sha")) or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
+        raise UpdateError("GitHub не вернул корректное дерево исходного main для rollback")
+    rollback_commit = github_request(
+        "POST",
+        f"/repos/{owner}/{repo}/git/commits",
+        json={"message": "Rollback failed FargoVPN release", "tree": base_tree, "parents": [failed_sha]},
+    )
+    if rollback_commit.status_code >= 400:
+        raise UpdateError(f"Не удалось создать rollback commit: HTTP {rollback_commit.status_code}: {github_json_error(rollback_commit)}")
+    rollback_sha = str(rollback_commit.json().get("sha") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", rollback_sha):
+        raise UpdateError("GitHub вернул некорректный rollback commit SHA")
+    current = github_request("GET", f"/repos/{owner}/{repo}/git/ref/heads/main")
+    current_sha = str(((current.json().get("object") or {}).get("sha")) or "") if current.status_code < 400 else ""
+    if current_sha != failed_sha:
+        raise UpdateError("Rollback остановлен: ветка main уже изменилась после неудачной публикации")
+    update_ref = github_request("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/main", json={"sha": rollback_sha, "force": False})
+    if update_ref.status_code >= 400:
+        raise UpdateError(f"Не удалось вернуть main к исходному содержимому: HTTP {update_ref.status_code}: {github_json_error(update_ref)}")
+    return rollback_sha
+
+
 def github_release_tag(version: str) -> str:
-    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "FargoVPN-") or "FargoVPN-").strip()
+    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "v") or "v").strip()
     if not prefix:
-        prefix = "FargoVPN-"
+        prefix = "v"
     return f"{prefix}{version}"
 
 
@@ -1109,7 +1221,7 @@ def github_latest_release() -> dict[str, Any]:
     if not isinstance(asset, dict):
         raise UpdateError("Последний GitHub Release не содержит .tar.gz архива")
     tag = str(payload.get("tag_name") or "").strip()
-    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "FargoVPN-") or "FargoVPN-").strip()
+    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "v") or "v").strip()
     version = tag[len(prefix):] if prefix and tag.startswith(prefix) else ""
     if not version:
         candidate = str(payload.get("name") or "").replace("FargoVPN", "", 1).strip(" -v")
@@ -1152,7 +1264,7 @@ def _github_release_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise UpdateError("GitHub вернул некорректные данные релиза")
     tag = str(payload.get("tag_name") or "").strip()
-    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "FargoVPN-") or "FargoVPN-").strip()
+    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "v") or "v").strip()
     version = tag[len(prefix):] if prefix and tag.startswith(prefix) else ""
     if not version:
         version = str(payload.get("name") or "").replace("FargoVPN", "", 1).strip(" -v")
@@ -1317,13 +1429,15 @@ def github_install_command() -> str:
 def _github_main_bootstrap() -> str:
     """Generate the public one-command bootstrap installer committed to main."""
     repo_raw = f"https://raw.githubusercontent.com/{github_owner()}/{github_repo()}/main"
+    release_base = f"https://github.com/{github_owner()}/{github_repo()}/releases/latest/download"
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 
 REPO_RAW="{repo_raw}"
+RELEASE_BASE="{release_base}"
 ARCHIVE_NAME="FargoVPN_FULL.tar.gz"
-ARCHIVE_URL="${{FARGOVPN_ARCHIVE_URL:-$REPO_RAW/$ARCHIVE_NAME}}"
-CHECKSUM_URL="${{FARGOVPN_CHECKSUM_URL:-$REPO_RAW/$ARCHIVE_NAME.sha256}}"
+ARCHIVE_URL="${{FARGOVPN_ARCHIVE_URL:-$RELEASE_BASE/$ARCHIVE_NAME}}"
+CHECKSUM_URL="${{FARGOVPN_CHECKSUM_URL:-$RELEASE_BASE/$ARCHIVE_NAME.sha256}}"
 TMP_BASE="${{FARGOVPN_BOOTSTRAP_TMPDIR:-/var/tmp}}"
 
 if [[ ${{EUID:-$(id -u)}} -ne 0 ]]; then
@@ -1462,13 +1576,11 @@ def _github_main_public_files(archive_root: Path, archive_path: Path, version: s
     # main/install.sh is always the generated bootstrap, never the internal
     # full installer, so a one-line public installation command remains stable.
     files["install.sh"] = _github_main_bootstrap().encode("utf-8")
-    files["FargoVPN_FULL.tar.gz"] = archive_path.read_bytes()
-    files["FargoVPN_FULL.tar.gz.sha256"] = f"{checksum}  FargoVPN_FULL.tar.gz\n".encode("utf-8")
     return files
 
 
 def _github_main_sync(source_archive: Path, version: str, checksum: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """Replace public main with one atomic commit before creating the Release/tag."""
+    """Replace public main with one commit and keep a temporary backup ref."""
     branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
     if branch != "main":
         raise UpdateError("Автосинхронизация публичного main требует GITHUB_TARGET_BRANCH=main")
@@ -1490,54 +1602,61 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise UpdateError(f"GitHub вернул некорректный SHA ветки {branch}")
 
-    entries: list[dict[str, Any]] = []
-    for path, data in sorted(public_files.items()):
-        blob = github_request(
-            "POST",
-            f"/repos/{owner}/{repo}/git/blobs",
-            json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
-        )
-        if blob.status_code >= 400:
-            raise UpdateError(f"Не удалось создать Git blob для {path}: HTTP {blob.status_code}: {github_json_error(blob)}")
-        blob_sha = str((blob.json() or {}).get("sha") or "").strip()
-        if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
-            raise UpdateError(f"GitHub вернул некорректный blob SHA для {path}")
-        entries.append({"path": path, "mode": "100755" if path.endswith(".sh") else "100644", "type": "blob", "sha": blob_sha})
-        if progress:
-            progress(path)
+    backup_ref = _github_create_backup_ref(base_sha, version)
+    applied = False
+    try:
+        entries: list[dict[str, Any]] = []
+        for path, data in sorted(public_files.items()):
+            blob = github_request("POST", f"/repos/{owner}/{repo}/git/blobs", json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"})
+            if blob.status_code >= 400:
+                raise UpdateError(f"Не удалось создать Git blob для {path}: HTTP {blob.status_code}: {github_json_error(blob)}")
+            blob_sha = str((blob.json() or {}).get("sha") or "").strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
+                raise UpdateError(f"GitHub вернул некорректный blob SHA для {path}")
+            entries.append({"path": path, "mode": "100755" if path.endswith(".sh") else "100644", "type": "blob", "sha": blob_sha})
+            if progress:
+                progress(path)
 
-    tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"tree": entries})
-    if tree.status_code >= 400:
-        raise UpdateError(f"Не удалось собрать дерево main: HTTP {tree.status_code}: {github_json_error(tree)}")
-    tree_sha = str((tree.json() or {}).get("sha") or "").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
-        raise UpdateError("GitHub вернул некорректный SHA дерева main")
+        tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"tree": entries})
+        if tree.status_code >= 400:
+            raise UpdateError(f"Не удалось собрать дерево main: HTTP {tree.status_code}: {github_json_error(tree)}")
+        tree_sha = str((tree.json() or {}).get("sha") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+            raise UpdateError("GitHub вернул некорректный SHA дерева main")
 
-    commit = github_request(
-        "POST",
-        f"/repos/{owner}/{repo}/git/commits",
-        json={"message": f"Release {version}", "tree": tree_sha, "parents": [base_sha]},
-    )
-    if commit.status_code >= 400:
-        raise UpdateError(f"Не удалось создать commit main: HTTP {commit.status_code}: {github_json_error(commit)}")
-    commit_payload = commit.json()
-    commit_sha = str(commit_payload.get("sha") or "").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
-        raise UpdateError("GitHub вернул некорректный SHA commit main")
+        commit = github_request("POST", f"/repos/{owner}/{repo}/git/commits", json={"message": f"Release {version}", "tree": tree_sha, "parents": [base_sha]})
+        if commit.status_code >= 400:
+            raise UpdateError(f"Не удалось создать commit main: HTTP {commit.status_code}: {github_json_error(commit)}")
+        commit_payload = commit.json()
+        commit_sha = str(commit_payload.get("sha") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+            raise UpdateError("GitHub вернул некорректный SHA commit main")
 
-    latest_ref = github_request("GET", ref_path)
-    if latest_ref.status_code >= 400:
-        raise UpdateError(f"Не удалось повторно проверить ветку {branch}: HTTP {latest_ref.status_code}: {github_json_error(latest_ref)}")
-    latest_sha = str(((latest_ref.json().get("object") or {}).get("sha")) or "").strip()
-    if latest_sha != base_sha:
-        raise UpdateError("Ветка main изменилась во время публикации; новый commit не применён")
+        latest_ref = github_request("GET", ref_path)
+        if latest_ref.status_code >= 400:
+            raise UpdateError(f"Не удалось повторно проверить ветку {branch}: HTTP {latest_ref.status_code}: {github_json_error(latest_ref)}")
+        latest_sha = str(((latest_ref.json().get("object") or {}).get("sha")) or "").strip()
+        if latest_sha != base_sha:
+            raise UpdateError("Ветка main изменилась во время публикации; новый commit не применён")
 
-    update_ref = github_request("PATCH", update_ref_path, json={"sha": commit_sha, "force": False})
-    if update_ref.status_code >= 400:
-        raise UpdateError(f"Не удалось обновить ветку {branch}: HTTP {update_ref.status_code}: {github_json_error(update_ref)}")
-    if str((update_ref.json().get("object") or {}).get("sha") or "") != commit_sha:
-        raise UpdateError("GitHub не подтвердил SHA опубликованного commit main")
-    return {"enabled": True, "synced": True, "branch": branch, "commit_sha": commit_sha, "commit_url": str(commit_payload.get("html_url") or f"https://github.com/{github_owner()}/{github_repo()}/commit/{commit_sha}"), "files": sorted(public_files)}
+        update_ref = github_request("PATCH", update_ref_path, json={"sha": commit_sha, "force": False})
+        if update_ref.status_code >= 400:
+            raise UpdateError(f"Не удалось обновить ветку {branch}: HTTP {update_ref.status_code}: {github_json_error(update_ref)}")
+        applied = True
+        if str((update_ref.json().get("object") or {}).get("sha") or "") != commit_sha:
+            raise UpdateError("GitHub не подтвердил SHA опубликованного commit main")
+        return {"enabled": True, "synced": True, "branch": branch, "commit_sha": commit_sha, "base_sha": base_sha, "backup_ref": backup_ref, "commit_url": str(commit_payload.get("html_url") or f"https://github.com/{github_owner()}/{github_repo()}/commit/{commit_sha}"), "files": sorted(public_files)}
+    except Exception as error:
+        if applied:
+            try:
+                _github_restore_main(base_sha, commit_sha)
+            except Exception as rollback_error:
+                raise UpdateError(f"Ошибка публикации main: {error}; автоматический rollback main не завершился: {rollback_error}") from rollback_error
+        try:
+            _github_delete_ref(backup_ref)
+        except Exception:
+            LOGGER.warning("Не удалось удалить backup-ветку GitHub %s после сбоя синхронизации main", backup_ref, exc_info=True)
+        raise
 
 
 def _release_tag_sha(tag: str) -> str | None:
@@ -1578,6 +1697,36 @@ def _prepare_release_tag(tag: str, commit_sha: str) -> None:
     _verify_release_tag(tag, commit_sha)
 
 
+def _verify_published_release(release_id: int, tag: str, commit_sha: str, expected_assets: list[str], expected_archive_size: int, expected_checksum: str) -> dict[str, Any]:
+    """Verify the final GitHub Release and all uploaded assets through the API."""
+    owner = quote(github_owner(), safe="")
+    repo = quote(github_repo(), safe="")
+    response = github_request("GET", f"/repos/{owner}/{repo}/releases/{release_id}")
+    if response.status_code >= 400:
+        raise UpdateError(f"Не удалось подтвердить GitHub Release: HTTP {response.status_code}: {github_json_error(response)}")
+    payload = response.json()
+    if str(payload.get("tag_name") or "") != tag:
+        raise UpdateError("GitHub Release вернул другой tag")
+    assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
+    by_name = {str(item.get("name") or ""): item for item in assets if isinstance(item, dict)}
+    missing = [name for name in expected_assets if name not in by_name]
+    if missing:
+        raise UpdateError("GitHub Release не содержит ожидаемые assets: " + ", ".join(missing))
+    archive_item = by_name.get(expected_assets[0], {})
+    if int(archive_item.get("size") or 0) != int(expected_archive_size):
+        raise UpdateError("GitHub Release подтвердил неверный размер versioned archive")
+    digest = str(archive_item.get("digest") or "").lower()
+    if digest and digest != "sha256:" + expected_checksum.lower():
+        raise UpdateError("GitHub Release вернул несовпадающий SHA-256 versioned archive")
+    return {
+        "release_id": int(payload.get("id") or release_id),
+        "release_url": str(payload.get("html_url") or ""),
+        "tag": tag,
+        "commit_sha": commit_sha,
+        "assets": sorted(by_name),
+    }
+
+
 def publish_update(source: Path, original_name: str = "update.tar.gz") -> dict[str, Any]:
     if not _PUBLISH_LOCK.acquire(blocking=False):
         raise UpdateError("Другая публикация GitHub уже выполняется")
@@ -1614,131 +1763,145 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
     release_name = github_release_name(version)
     body = github_notes(changelog, version, checksum, target.stat().st_size)
     endpoint = f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/tags/{quote(tag, safe='')}"
-    # The Release tag must target the new code, not the previous head of main.
+
+    if _release_tag_sha(tag):
+        raise UpdateError(f"Тег {tag} уже существует. Публикация остановлена; версия релиза должна быть новой.")
+
+    repo_settings = _github_configure_repository()
     main_sync = _github_main_sync(target, version, checksum)
     if not main_sync.get("synced") or not main_sync.get("commit_sha"):
         raise UpdateError("GitHub не подтвердил коммит main; релиз не создавался")
-    _prepare_release_tag(tag, str(main_sync["commit_sha"]))
-    existing = github_request("GET", endpoint)
-    draft = bool(getattr(config, "GITHUB_RELEASE_DRAFT", False))
-    prerelease = bool(getattr(config, "GITHUB_RELEASE_PRERELEASE", False))
-    make_latest = bool(getattr(config, "GITHUB_RELEASE_MAKE_LATEST", True)) and not draft and not prerelease
-    payload = {
-        "tag_name": tag,
-        "target_commitish": str(main_sync["commit_sha"]),
-        "name": release_name,
-        "body": body,
-        "draft": draft,
-        "prerelease": prerelease,
-        "make_latest": "true" if make_latest else "false",
-    }
-    if existing.status_code == 200:
-        release = existing.json()
-        release_id = int(release.get("id") or 0)
-        if release.get("draft") and not payload["draft"]:
-            payload["draft"] = False
-        response = github_request("PATCH", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/{release_id}", json=payload)
-        if response.status_code >= 400:
-            raise UpdateError(f"Не удалось обновить GitHub Release: HTTP {response.status_code}: {github_json_error(response)}")
-        release = response.json()
-        for old_asset in (release.get("assets") or []):
-            if str(old_asset.get("name") or "") == asset_name:
-                delete_response = github_request("DELETE", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/assets/{int(old_asset.get('id') or 0)}")
-                if delete_response.status_code not in {204, 404}:
-                    raise UpdateError(f"Не удалось заменить старый asset GitHub: HTTP {delete_response.status_code}: {github_json_error(delete_response)}")
-    elif existing.status_code == 404:
-        response = github_request("POST", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases", json=payload)
-        if response.status_code >= 400:
-            raise UpdateError(f"Не удалось создать GitHub Release: HTTP {response.status_code}: {github_json_error(response)}")
-        release = response.json()
-        release_id = int(release.get("id") or 0)
-    else:
-        raise UpdateError(f"GitHub вернул HTTP {existing.status_code}: {github_json_error(existing)}")
-    upload_url = str(release.get("upload_url") or "").replace("{?name,label}", "")
-    if not upload_url:
-        raise UpdateError("GitHub не вернул upload_url для Release")
-    upload_url = upload_url.split("{", 1)[0].rstrip("?")
-    payload_bytes = target.read_bytes()
-    generic_asset = "FargoVPN_FULL.tar.gz"
-    checksum_line = f"{checksum}  {asset_name}\n"
-    generic_checksum_line = f"{checksum}  {generic_asset}\n"
-    assets_payloads = [
-        (asset_name, payload_bytes, "application/gzip"),
-        (generic_asset, payload_bytes, "application/gzip"),
-        (f"{asset_name}.sha256", checksum_line.encode("utf-8"), "text/plain; charset=utf-8"),
-        (f"{generic_asset}.sha256", generic_checksum_line.encode("utf-8"), "text/plain; charset=utf-8"),
-    ]
-    existing_assets = {
-        str(item.get("name") or ""): int(item.get("id") or 0)
-        for item in (release.get("assets") or [])
-        if isinstance(item, dict)
-    }
-    for old_name in {name for name, _, _ in assets_payloads}:
-        old_id = existing_assets.get(old_name, 0)
-        if not old_id:
-            continue
-        delete_response = github_request(
-            "DELETE",
-            f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/assets/{old_id}",
-        )
-        if delete_response.status_code not in {204, 404}:
-            raise UpdateError(f"Не удалось заменить старый asset GitHub {old_name}: HTTP {delete_response.status_code}: {github_json_error(delete_response)}")
 
-    uploaded_assets: list[dict[str, Any]] = []
-    for name, data, content_type in assets_payloads:
-        headers = {**github_headers(), "Content-Type": content_type, "Content-Length": str(len(data))}
+    release_id = 0
+    release: dict[str, Any] = {}
+    try:
+        _prepare_release_tag(tag, str(main_sync["commit_sha"]))
+        existing = github_request("GET", endpoint)
+        draft = bool(getattr(config, "GITHUB_RELEASE_DRAFT", False))
+        prerelease = bool(getattr(config, "GITHUB_RELEASE_PRERELEASE", False))
+        make_latest = bool(getattr(config, "GITHUB_RELEASE_MAKE_LATEST", True)) and not draft and not prerelease
+        payload = {
+            "tag_name": tag,
+            "target_commitish": str(main_sync["commit_sha"]),
+            "name": release_name,
+            "body": body,
+            "draft": draft,
+            "prerelease": prerelease,
+            "make_latest": "true" if make_latest else "false",
+        }
+        if existing.status_code == 404:
+            response = github_request("POST", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases", json=payload)
+            if response.status_code >= 400:
+                raise UpdateError(f"Не удалось создать GitHub Release: HTTP {response.status_code}: {github_json_error(response)}")
+            release = response.json()
+            release_id = int(release.get("id") or 0)
+        elif existing.status_code == 200:
+            raise UpdateError(f"GitHub Release для {tag} уже существует; версия должна публиковаться один раз")
+        else:
+            raise UpdateError(f"GitHub вернул HTTP {existing.status_code}: {github_json_error(existing)}")
+
+        upload_url = str(release.get("upload_url") or "").replace("{?name,label}", "")
+        if not upload_url:
+            raise UpdateError("GitHub не вернул upload_url для Release")
+        upload_url = upload_url.split("{", 1)[0].rstrip("?")
+        payload_bytes = target.read_bytes()
+        generic_asset = "FargoVPN_FULL.tar.gz"
+        checksum_line = f"{checksum}  {asset_name}\n"
+        generic_checksum_line = f"{checksum}  {generic_asset}\n"
+        assets_payloads = [
+            (asset_name, payload_bytes, "application/gzip"),
+            (generic_asset, payload_bytes, "application/gzip"),
+            (f"{asset_name}.sha256", checksum_line.encode("utf-8"), "text/plain; charset=utf-8"),
+            (f"{generic_asset}.sha256", generic_checksum_line.encode("utf-8"), "text/plain; charset=utf-8"),
+        ]
+        uploaded_assets: list[dict[str, Any]] = []
+        for name, data, content_type in assets_payloads:
+            headers = {**github_headers(), "Content-Type": content_type, "Content-Length": str(len(data))}
+            try:
+                upload = httpx.post(upload_url, params={"name": name}, headers=headers, content=data, timeout=600.0, follow_redirects=False)
+            except httpx.RequestError as error:
+                raise UpdateError(f"Не удалось подключиться к GitHub при загрузке asset {name}: {error}") from error
+            if upload.status_code >= 400:
+                raise UpdateError(f"Не удалось загрузить asset {name} в GitHub Release: HTTP {upload.status_code}: {github_json_error(upload)}")
+            uploaded = upload.json()
+            if (str(uploaded.get("name") or "") != name or int(uploaded.get("size") or 0) != len(data) or str(uploaded.get("state") or "") != "uploaded"):
+                raise UpdateError(f"GitHub не подтвердил размер/состояние asset {name}")
+            digest = str(uploaded.get("digest") or "")
+            if digest and digest != "sha256:" + hashlib.sha256(data).hexdigest():
+                raise UpdateError(f"GitHub вернул несовпадающий digest asset {name}")
+            uploaded_assets.append(uploaded)
+
+        asset = next(item for item in uploaded_assets if str(item.get("name") or "") == asset_name)
+        _verify_release_tag(tag, str(main_sync["commit_sha"]))
+        verified_release = _verify_published_release(release_id, tag, str(main_sync["commit_sha"]), [name for name, _, _ in assets_payloads], target.stat().st_size, checksum)
+
+        if main_sync.get("backup_ref"):
+            try:
+                _github_delete_ref(str(main_sync["backup_ref"]))
+            except Exception:
+                LOGGER.warning("Не удалось удалить временную backup-ветку GitHub %s после успешного релиза", main_sync.get("backup_ref"), exc_info=True)
+
+        metadata = {
+            "version": version,
+            "filename": asset_name,
+            "original_filename": Path(original_name).name,
+            "size": target.stat().st_size,
+            "sha256": checksum,
+            "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "path": str(target),
+            "source": "github",
+            "changelog": changelog,
+            "github_release_id": release_id,
+            "github_tag": tag,
+            "github_release_url": str(release.get("html_url") or ""),
+            "github_asset_url": str(asset.get("browser_download_url") or ""),
+            "github_main_synced": True,
+            "github_main_branch": str(main_sync.get("branch") or "main"),
+            "github_main_commit_sha": str(main_sync.get("commit_sha") or ""),
+            "github_main_commit_url": str(main_sync.get("commit_url") or ""),
+            "github_main_files": list(main_sync.get("files") or []),
+            "github_repository": repo_settings.get("repository", ""),
+            "github_repository_topics": list(repo_settings.get("topics") or []),
+            "github_repository_configured": bool(repo_settings.get("configured")),
+            "github_repository_warnings": list(repo_settings.get("warnings") or []),
+            "github_release_assets": list(verified_release.get("assets") or []),
+            "github_release_verified": True,
+        }
+        temp_meta = _latest_path().with_suffix(".tmp")
+        temp_meta.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.chmod(temp_meta, 0o600)
+        temp_meta.replace(_latest_path())
+        invalidate_update_cache()
+        return metadata
+    except Exception as error:
+        cleanup_errors: list[str] = []
+        if release_id:
+            try:
+                delete_release = github_request("DELETE", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/{release_id}")
+                if delete_release.status_code not in {204, 404}:
+                    cleanup_errors.append(f"release delete HTTP {delete_release.status_code}: {github_json_error(delete_release)}")
+            except Exception as cleanup_error:
+                cleanup_errors.append(f"release delete: {cleanup_error}")
         try:
-            upload = httpx.post(
-                upload_url, params={"name": name}, headers=headers, content=data, timeout=600.0, follow_redirects=False
-            )
-        except httpx.RequestError as error:
-            raise UpdateError(f"Не удалось подключиться к GitHub при загрузке asset {name}: {error}") from error
-        if upload.status_code == 405:
-            canonical = f"https://uploads.github.com/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/{int(release.get('id') or 0)}/assets"
-            if upload_url.rstrip("/") != canonical.rstrip("/"):
-                upload = httpx.post(
-                    canonical, params={"name": name}, headers=headers, content=data, timeout=600.0, follow_redirects=False
-                )
-        if upload.status_code >= 400:
-            raise UpdateError(f"Не удалось загрузить asset {name} в GitHub Release: HTTP {upload.status_code}: {github_json_error(upload)}")
-        uploaded = upload.json()
-        if (str(uploaded.get("name") or "") != name or int(uploaded.get("size") or 0) != len(data)
-                or str(uploaded.get("state") or "") != "uploaded"):
-            raise UpdateError(f"GitHub не подтвердил размер/состояние asset {name}")
-        digest = str(uploaded.get("digest") or "")
-        if digest and digest != "sha256:" + hashlib.sha256(data).hexdigest():
-            raise UpdateError(f"GitHub вернул несовпадающий digest asset {name}")
-        uploaded_assets.append(uploaded)
-    asset = next((item for item in uploaded_assets if str(item.get("name") or "") == asset_name), uploaded_assets[0] if uploaded_assets else {})
-    _verify_release_tag(tag, str(main_sync['commit_sha']))
-    metadata = {
-        "version": version,
-        "filename": asset_name,
-        "original_filename": Path(original_name).name,
-        "size": target.stat().st_size,
-        "sha256": checksum,
-        "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "path": str(target),
-        "source": "github",
-        "changelog": changelog,
-        "github_release_id": int(release.get("id") or 0),
-        "github_tag": tag,
-        "github_release_url": str(release.get("html_url") or ""),
-        "github_asset_url": str(asset.get("browser_download_url") or ""),
-        "github_main_synced": bool(main_sync.get("synced")),
-        "github_main_branch": str(main_sync.get("branch") or ""),
-        "github_main_commit_sha": str(main_sync.get("commit_sha") or ""),
-        "github_main_commit_url": str(main_sync.get("commit_url") or ""),
-        "github_main_files": list(main_sync.get("files") or []),
-        "github_release_assets": [str(item.get("name") or "") for item in uploaded_assets],
-    }
-    root.mkdir(parents=True, exist_ok=True)
-    temp_meta = _latest_path().with_suffix(".tmp")
-    temp_meta.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(temp_meta, 0o600)
-    temp_meta.replace(_latest_path())
-    invalidate_update_cache()
-    return metadata
+            if _release_tag_sha(tag):
+                delete_tag = github_request("DELETE", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/git/refs/tags/{quote(tag, safe='')}")
+                if delete_tag.status_code not in {204, 404}:
+                    cleanup_errors.append(f"tag delete HTTP {delete_tag.status_code}: {github_json_error(delete_tag)}")
+        except Exception as cleanup_error:
+            cleanup_errors.append(f"tag delete: {cleanup_error}")
+        try:
+            if main_sync.get("commit_sha") and main_sync.get("base_sha"):
+                _github_restore_main(str(main_sync["base_sha"]), str(main_sync["commit_sha"]))
+        except Exception as rollback_error:
+            cleanup_errors.append(f"main rollback: {rollback_error}")
+        try:
+            if main_sync.get("backup_ref"):
+                _github_delete_ref(str(main_sync["backup_ref"]))
+        except Exception as cleanup_error:
+            cleanup_errors.append(f"backup ref delete: {cleanup_error}")
+        if cleanup_errors:
+            raise UpdateError(f"Публикация версии {version} не удалась: {error}; cleanup/rollback: {'; '.join(cleanup_errors)}") from error
+        raise
 
 
 def _path_inside_update_dir(path: Path) -> bool:

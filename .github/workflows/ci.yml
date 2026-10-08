@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install.sh
+          find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+      - name: Validate Python syntax
+        run: python -m compileall -q .
+
+      - name: Check forbidden tracked files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(\.env$|config\.py$|.*\.(db|sqlite|sqlite3|log|pyc|pem|key|p12|pfx|tar|tar\.gz|zip)$|\.idea/|\.vscode/|__pycache__/|node_modules/)' ; then
+            echo 'Forbidden runtime, secret or generated files are tracked.' >&2
+            exit 1
+          fi
+
+      - name: Check high-confidence secret patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git grep -nE '([0-9]{8,12}:[A-Za-z0-9_-]{30,})|(gh[pousr]_[A-Za-z0-9]{20,})|(github_pat_[A-Za-z0-9_]{20,})|(BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY)' -- . ':!tests/**' ; then
+            echo 'High-confidence credential material detected.' >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: pytest -q

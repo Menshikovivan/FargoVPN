@@ -1,49 +1,87 @@
+# -----------------------------------------------------------------------------
 # Local configuration and secrets
+# -----------------------------------------------------------------------------
 config.py
 config.py.before_*
 config.py.corrupt.*
-*.env
 .env
 .env.*
 !.env.example
+*.secret
+secrets/
 
-# Python environments/cache
+# Private keys, certificates and credentials
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+
+# -----------------------------------------------------------------------------
+# Python / test / tooling caches
+# -----------------------------------------------------------------------------
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+*.pyo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
-pytest-of-root/
+.coverage.*
 htmlcov/
+pytest-of-root/
 
-# Editor/OS artifacts
-.DS_Store
-*.orig
-*.bak
-*~
-*.swp
-*.swo
-
-# Runtime data, logs and generated state
+# -----------------------------------------------------------------------------
+# Runtime data, databases and logs
+# -----------------------------------------------------------------------------
 data/
+*.db
+*.sqlite
+*.sqlite3
 *.log
 *.pid
 *.sock
 *.tmp
+*.dump
+backups/
+backup/
 
-# Local backups/release artifacts
+# -----------------------------------------------------------------------------
+# IDE / OS
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+
+# -----------------------------------------------------------------------------
+# Local release / audit artifacts
+# -----------------------------------------------------------------------------
 *.tar
 *.tar.gz
+*.tgz
 *.zip
-backup/
-backups/
+RELEASE_NOTES_*.md
 INSTALLED_CHANGELOG.md
 INSTALLED_CHANGELOG_VERSION
-RELEASE_NOTES_*.md
 POST_SUCCESS_AUDIT_*.md
+PANEL_*_AUDIT*.csv
+AUDIT_*.*
+DIFF_INVENTORY_*.json
+TEST_REPORT_*.md
+RELEASE_REPORT_*.md
+COMMANDS_*.md
+work/
+release-work/
 
-# Public GitHub bootstrap asset (intentionally tracked)
-!FargoVPN_FULL.tar.gz
-!FargoVPN_FULL.tar.gz.sha256
+# Local editor / packaging metadata
+.DS_Store

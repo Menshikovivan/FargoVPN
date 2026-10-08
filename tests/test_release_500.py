@@ -14,7 +14,7 @@ def load_update_module():
     spec=importlib.util.spec_from_file_location("um500", ROOT/"update_manager.py"); mod=importlib.util.module_from_spec(spec); assert spec.loader; spec.loader.exec_module(mod); return mod
 
 def test_versions():
-    assert read("VERSION").strip()=="5.0.5"; assert read("app/VERSION").strip()=="5.0.5"; assert read("static/VERSION").strip()=="5.0.5"; assert read("README.md").startswith("# FargoVPN 5.0.5")
+    assert read("VERSION").strip()=="5.1"; assert read("app/VERSION").strip()=="5.1"; assert read("static/VERSION").strip()=="5.1"; assert read("README.md").startswith("# FargoVPN") and "Текущая версия: `5.1`" in read("README.md")
 
 def test_no_legacy_profile():
     files=[p for p in ROOT.rglob("*") if p.is_file() and "__pycache__" not in p.parts and ".pytest_cache" not in p.parts and p.suffix not in {".db", ".sqlite", ".sqlite3", ".log", ".pyc", ".tar", ".gz"}]

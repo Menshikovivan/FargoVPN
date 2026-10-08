@@ -80,7 +80,7 @@ for session_user, configured_user, expected in (
         assert heading in response.text
     response = client.get("/api/diagnostics")
     assert response.status_code == 200
-    assert response.json()["version"] == "5.0.4"
+    assert response.json()["version"] == (ROOT / "VERSION").read_text().strip()
     response = client.get("/api/updates/releases")
     assert response.status_code == (200 if expected else 403), response.text
     response = client.post("/updates/config", headers={"x-csrf-token": "test-csrf"})
