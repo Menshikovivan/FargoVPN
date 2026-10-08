@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast, os, re, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 
+from security_policy import PANEL_CONTENT_SECURITY_POLICY
+
 """Compatibility bridge for a pre-existing external Nginx/L4 deployment.
 
 This module does not install, enable, start or otherwise provision Nginx.
@@ -185,6 +187,11 @@ def block(p, socket_path):
     location ^~ {p}/ {{
         client_max_body_size {upload_mb}m;
         proxy_pass http://unix:{socket_path}:/;
+        # The parent virtual host supplies a strict CSP which blocks FargoVPN's
+        # page-specific inline controllers. Hide it and emit exactly one policy
+        # matching the application, so browser behaviour is deterministic.
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "{csp}" always;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -201,7 +208,7 @@ def block(p, socket_path):
         # Keep nginx transparent to Location and Set-Cookie Path.
         proxy_intercept_errors off;
     }}
-{B}""".format(A=A,B=B,p=p,socket_path=socket_path,upload_mb=upload_mb)
+{B}""".format(A=A,B=B,p=p,socket_path=socket_path,upload_mb=upload_mb,csp=PANEL_CONTENT_SECURITY_POLICY)
 
 def _strip_location_blocks(text: str, predicate) -> str:
     lines = text.splitlines(True)

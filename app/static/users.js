@@ -3,7 +3,7 @@ const search=f.querySelector('#user-filter-search'),status=f.querySelector('[dat
 const list=document.querySelector('.user-list'),pager=document.querySelector('[data-user-pagination]');
 if(!list||!pager)return;const previous=pager.querySelector('[data-page-prev]'),next=pager.querySelector('[data-page-next]'),pageLabel=pager.querySelector('[data-page-label]');
 const all=Array.from(document.querySelectorAll('.user-row')),pageSize=50;
-const initialParams=new URLSearchParams(location.search),fromDay=initialParams.get('registered_from')||'',toDay=initialParams.get('registered_to')||'';
+const initialParams=new URLSearchParams(location.search);let fromDay=initialParams.get('registered_from')||'',toDay=initialParams.get('registered_to')||'';
 let currentPage=Number(pager.dataset.initialPage)||1;
 const norm=v=>String(v??'').trim().toLocaleLowerCase('ru-RU');
 const apply=()=>{
@@ -41,4 +41,4 @@ const apply=()=>{
 const reset=()=>{currentPage=1;apply();};let timer=0;search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(reset,120);});
 [status,sort,order].forEach(el=>el.addEventListener('change',reset));
 previous.addEventListener('click',()=>{currentPage--;apply();});next.addEventListener('click',()=>{currentPage++;apply();});
-window.addEventListener('popstate',()=>location.reload());apply();})();
+window.addEventListener('popstate',()=>{const params=new URLSearchParams(location.search);search.value=params.get('q')||'';status.value=params.get('status')||'all';sort.value=params.get('sort')||'remaining';order.value=params.get('order')||'asc';fromDay=params.get('registered_from')||'';toDay=params.get('registered_to')||'';currentPage=Number(params.get('page_number')||1)||1;apply();});apply();})();

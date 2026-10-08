@@ -52,6 +52,7 @@ def _runtime_unit(
     *,
     description: str,
     working_directory: Path,
+    output_path: Path | None = None,
 ) -> str:
     service = _service_name(unit)
     runtime_path = Path("/run/systemd/system") / service
@@ -72,7 +73,8 @@ def _runtime_unit(
         "Environment=TZ=Asia/Almaty\n"
         f"WorkingDirectory={workdir}\n"
         f"ExecStart={exec_start}\n"
-        "Nice=10\n"
+        + (f"StandardOutput=append:{_quote_unit_arg(str(output_path))}\nStandardError=append:{_quote_unit_arg(str(output_path))}\n" if output_path else "")
+        + "Nice=10\n"
         "IOSchedulingClass=best-effort\n"
         "TimeoutStartSec=infinity\n",
         encoding="utf-8",
@@ -103,6 +105,7 @@ def launch_detached(
     *,
     description: str,
     working_directory: str | Path,
+    output_path: str | Path | None = None,
 ) -> str:
     """Запустить команду отдельной systemd-службой и вернуть способ запуска."""
     unit = str(unit or "").strip()
@@ -117,6 +120,15 @@ def launch_detached(
         raise DetachedJobError("systemd не запущен; безопасный фоновый запуск недоступен")
 
     workdir = Path(working_directory).resolve()
+    output_file = Path(output_path).resolve() if output_path else None
+    if output_file:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        if output_file.exists() and output_file.is_symlink():
+            raise DetachedJobError("Нельзя писать журнал фоновой задачи через символическую ссылку")
+        try:
+            os.chmod(output_file, 0o600)
+        except OSError:
+            pass
     errors: list[str] = []
     systemd_run = shutil.which("systemd-run")
     if systemd_run:
@@ -136,6 +148,7 @@ def launch_detached(
                 "--property=Group=root",
                 "--property=Environment=PYTHONUNBUFFERED=1",
                 "--property=Environment=TZ=Asia/Almaty",
+                *([f"--property=StandardOutput=append:{output_file}", f"--property=StandardError=append:{output_file}"] if output_file else []),
                 *map(str, command),
             ],
             [
@@ -144,6 +157,7 @@ def launch_detached(
                 "--quiet",
                 "--no-block",
                 "--property=Type=oneshot",
+                *([f"--property=StandardOutput=append:{output_file}", f"--property=StandardError=append:{output_file}"] if output_file else []),
                 *map(str, command),
             ],
         )
@@ -167,6 +181,7 @@ def launch_detached(
             [str(value) for value in command],
             description=description,
             working_directory=workdir,
+            output_path=output_file,
         )
     except Exception as error:
         errors.append(str(error))

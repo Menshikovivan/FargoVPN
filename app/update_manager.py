@@ -1214,21 +1214,62 @@ def github_validate_configuration() -> dict[str, Any]:
     token = github_token()
     if not token:
         raise UpdateError("GitHub Personal Access Token не настроен")
+    owner = github_owner()
+    repo_name = github_repo()
+    target_branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
+
     user = github_request("GET", "/user")
+    if user.status_code == 401:
+        raise UpdateError("GitHub не принял токен: HTTP 401 (токен недействителен или отозван)")
+    if user.status_code == 403:
+        raise UpdateError("GitHub: доступ к API запрещён (HTTP 403). Проверьте токен и лимиты API")
     if user.status_code >= 400:
-        raise UpdateError(f"GitHub не принял токен: HTTP {user.status_code}: {github_json_error(user)}")
-    repo = github_request("GET", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}")
+        raise UpdateError(f"GitHub: не удалось проверить токен: HTTP {user.status_code}: {github_json_error(user)}")
+    try:
+        user_payload = user.json() if isinstance(user.json(), dict) else {}
+    except Exception:
+        user_payload = {}
+
+    repo = github_request("GET", f"/repos/{quote(owner, safe='')}/{quote(repo_name, safe='')}")
+    if repo.status_code == 401:
+        raise UpdateError("GitHub: токен не принят при проверке репозитория (HTTP 401)")
+    if repo.status_code == 403:
+        raise UpdateError("GitHub: GitHub запретил доступ к репозиторию (HTTP 403)")
+    if repo.status_code == 404:
+        raise UpdateError(f"Репозиторий GitHub недоступен: HTTP 404 ({owner}/{repo_name} не найден или недоступен токену)")
     if repo.status_code >= 400:
-        raise UpdateError(f"Репозиторий GitHub недоступен: HTTP {repo.status_code}: {github_json_error(repo)}")
-    payload = repo.json()
+        raise UpdateError(f"GitHub: ошибка чтения репозитория: HTTP {repo.status_code}: {github_json_error(repo)}")
+    try:
+        payload = repo.json() if isinstance(repo.json(), dict) else {}
+    except Exception:
+        payload = {}
     permissions = payload.get("permissions") if isinstance(payload.get("permissions"), dict) else {}
-    if permissions.get("push") is False:
-        raise UpdateError("GitHub токен не имеет права записи в выбранный репозиторий")
+    can_write = any(permissions.get(key) is True for key in ("push", "maintain", "admin"))
+    if not can_write:
+        raise UpdateError("GitHub: токен не имеет права записи в выбранный репозиторий (push/maintain/admin=false)")
+
+    branch = github_request("GET", f"/repos/{quote(owner, safe='')}/{quote(repo_name, safe='')}/git/ref/heads/{quote(target_branch, safe='')}")
+    if branch.status_code == 401:
+        raise UpdateError("GitHub: токен не принят при проверке ветки (HTTP 401)")
+    if branch.status_code == 403:
+        raise UpdateError("GitHub: нет доступа к ветке репозитория (HTTP 403)")
+    if branch.status_code == 404:
+        raise UpdateError(f"GitHub: ветка {target_branch} не существует в {owner}/{repo_name} (HTTP 404)")
+    if branch.status_code >= 400:
+        raise UpdateError(f"GitHub: не удалось проверить ветку {target_branch}: HTTP {branch.status_code}: {github_json_error(branch)}")
+    try:
+        branch_payload = branch.json() if isinstance(branch.json(), dict) else {}
+    except Exception:
+        branch_payload = {}
+
     return {
-        "login": str((user.json() or {}).get("login") or ""),
-        "repository": str(payload.get("full_name") or f"{github_owner()}/{github_repo()}"),
+        "login": str(user_payload.get("login") or ""),
+        "repository": str(payload.get("full_name") or f"{owner}/{repo_name}"),
         "private": bool(payload.get("private")),
         "default_branch": str(payload.get("default_branch") or "main"),
+        "target_branch": target_branch,
+        "target_branch_sha": str(((branch_payload.get("object") or {}).get("sha")) or ""),
+        "can_write": True,
         "html_url": str(payload.get("html_url") or github_repo_url()),
     }
 
@@ -1849,16 +1890,26 @@ def _verify_published_release(release_id: int, tag: str, commit_sha: str, expect
     digest = str(archive_item.get("digest") or "").lower()
     if digest and digest != "sha256:" + expected_checksum.lower():
         raise UpdateError("GitHub Release вернул несовпадающий SHA-256 versioned archive")
+    target_branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
+    head = github_request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{quote(target_branch, safe='')}")
+    if head.status_code >= 400:
+        raise UpdateError(f"Не удалось повторно подтвердить ветку {target_branch}: HTTP {head.status_code}: {github_json_error(head)}")
+    head_payload = head.json() if isinstance(head.json(), dict) else {}
+    actual_head_sha = str(((head_payload.get("object") or {}).get("sha")) or "")
+    if actual_head_sha != commit_sha:
+        raise UpdateError(f"GitHub ветка {target_branch} указывает на другой коммит после публикации: {actual_head_sha or 'отсутствует'} != {commit_sha}")
     return {
         "release_id": int(payload.get("id") or release_id),
         "release_url": str(payload.get("html_url") or ""),
         "tag": tag,
         "commit_sha": commit_sha,
+        "branch": target_branch,
+        "branch_sha": actual_head_sha,
         "assets": sorted(by_name),
     }
 
 
-PUBLISH_BUSY_STATES = {"queued", "validating", "syncing-main", "creating-release", "uploading-assets", "verifying", "completed", "failed"}
+PUBLISH_BUSY_STATES = {"queued", "validating", "syncing-main", "creating-release", "uploading-assets", "verifying"}
 
 def publish_status_path() -> Path:
     return update_dir() / "publish" / "status.json"
@@ -1875,6 +1926,65 @@ def _publish_status_is_fresh(status: dict[str, Any] | None = None) -> bool:
         return (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds() <= max(900, int(getattr(config, "UPDATE_STALE_JOB_SECONDS", 7200)))
     except (TypeError, ValueError):
         return False
+
+def publish_log_path() -> Path:
+    return update_dir() / "publish" / "publish.log"
+
+
+def _redact_publish_log(text: str) -> str:
+    value = str(text or "")
+    token = github_token()
+    if token:
+        value = value.replace(token, "[GITHUB_TOKEN_REDACTED]")
+    value = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s]+", r"\1[REDACTED]", value)
+    return value[:8000]
+
+
+def publish_log_tail(limit: int = 200) -> str:
+    try:
+        from log_reader import tail_lines
+        return "".join(tail_lines(publish_log_path(), max(20, min(int(limit), 2000)), 2*1024*1024)[0])
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        return f"Журнал публикации недоступен: {type(exc).__name__}: {exc}"
+
+
+def publish_history_dir() -> Path:
+    return update_dir() / "publish" / "history"
+
+
+def write_publish_history_snapshot(data: dict[str, Any]) -> None:
+    job_id = str(data.get("job_id") or "").strip()
+    if not job_id:
+        return
+    path = publish_history_dir() / f"{re.sub(r'[^0-9A-Za-z._-]', '_', job_id)[:120]}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    os.chmod(temp, 0o600)
+    temp.replace(path)
+
+
+def publish_history(limit: int = 20) -> list[dict[str, Any]]:
+    rows=[]
+    for path in sorted(publish_history_dir().glob("*.json"), key=lambda p:p.stat().st_mtime, reverse=True)[:max(1,min(int(limit),50))]:
+        try:
+            data=json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data,dict): rows.append(data)
+        except Exception:
+            continue
+    return rows
+
+
+def append_publish_log(job_id: str, message: str, level: str = "INFO") -> None:
+    path = publish_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} [{level}] [{job_id}] {_redact_publish_log(message)}\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+    os.chmod(path, 0o600)
+
 
 def write_publish_status(state: str, **details: Any) -> None:
     path = publish_status_path()
@@ -1909,6 +2019,11 @@ def write_publish_status(state: str, **details: Any) -> None:
             temp.replace(path)
         finally:
             temp.unlink(missing_ok=True)
+    job_id = str(details.get("job_id") or data.get("job_id") or "unknown")
+    msg = str(details.get("message") or state)
+    append_publish_log(job_id, msg, "ERROR" if state == "failed" else "INFO")
+    if state in {"completed", "failed", "cancelled"}:
+        write_publish_history_snapshot(data)
 
 def read_publish_status() -> dict[str, Any]:
     try:
@@ -1916,9 +2031,155 @@ def read_publish_status() -> dict[str, Any]:
     except Exception:
         return {}
 
+def _publish_worker_unit_state(status: dict[str, Any]) -> str | None:
+    """Return ActiveState for the recorded systemd worker, or None if unavailable."""
+    unit = str(status.get("unit") or "").strip()
+    if not unit:
+        return None
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "--property=ActiveState", "--value", unit],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    state = (result.stdout or "").strip().lower()
+    return state or None
+
+
+def _publish_worker_process_alive(job_id: str) -> bool:
+    """Return whether the publish worker for job_id is still running.
+
+    Legacy persisted jobs created before the worker systemd unit was recorded do
+    not have ``unit`` in status.json. In that case process-level inspection is
+    the only safe way to distinguish an active worker from abandoned state.
+    """
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return False
+    marker = f"publish_worker.py --job-id {job_id}"
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    current_pid = str(os.getpid())
+    for line in (result.stdout or "").splitlines():
+        value = line.strip()
+        if not value or value.startswith(current_pid + " "):
+            continue
+        if marker in value and "publish_worker.py" in value:
+            return True
+    return False
+
+
+def _publish_status_age_seconds(status: dict[str, Any]) -> float | None:
+    updated = str(status.get("updated_at") or "").strip()
+    if not updated:
+        return None
+    try:
+        stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _reconcile_dead_publish_worker(status: dict[str, Any]) -> bool:
+    """Mark persisted busy publication failed when its real worker is gone."""
+    state = str(status.get("state") or "")
+    if state not in PUBLISH_BUSY_STATES:
+        return False
+    age = _publish_status_age_seconds(status)
+    grace = 30.0 if state == "queued" else 0.0
+    unit = str(status.get("unit") or "").strip()
+    unit_state = _publish_worker_unit_state(status) if unit else None
+
+    if unit_state in {"active", "activating", "deactivating", "reload"}:
+        return False
+
+    # During the short hand-off from the HTTP request to the detached worker,
+    # status.json may temporarily have no unit and the worker may not yet be
+    # visible to systemd. Never clear such a just-created job.
+    if age is not None and age < grace:
+        return False
+
+    job_id = str(status.get("job_id") or "").strip()
+    if _publish_worker_process_alive(job_id):
+        return False
+
+    if not unit and age is None:
+        return False
+
+    worker_ref = unit or f"job {job_id or 'unknown'}"
+    reason = (
+        f"Фоновый worker публикации {worker_ref} больше не активен; "
+        "состояние публикации восстановлено после остановки/перезапуска сервиса"
+    )
+    write_publish_status(
+        "failed",
+        job_id=str(status.get("job_id") or ""),
+        version=str(status.get("version") or ""),
+        progress=int(status.get("progress") or 1),
+        phase="reconcile",
+        message="Предыдущая публикация завершилась аварийно",
+        error=reason,
+        finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    return True
+
+
 def publish_job_busy(status: dict[str, Any] | None = None) -> bool:
     current = status if isinstance(status, dict) else read_publish_status()
-    return str(current.get("state") or "") in {"queued", "validating", "syncing-main", "creating-release", "uploading-assets", "verifying"} and _publish_status_is_fresh(current)
+    if str(current.get("state") or "") not in PUBLISH_BUSY_STATES:
+        return False
+    if _reconcile_dead_publish_worker(current):
+        return False
+    job_id = str(current.get("job_id") or "").strip()
+    if job_id and _publish_worker_process_alive(job_id):
+        return True
+    if _publish_status_is_fresh(current):
+        return True
+    # Legacy/stale status from releases before 5.1.16 must not block forever.
+    age = _publish_status_age_seconds(current)
+    stale_after = max(300, int(getattr(config, "PUBLISH_STALE_JOB_SECONDS", 1800)))
+    if age is not None and age > stale_after:
+        write_publish_status(
+            "failed",
+            job_id=str(current.get("job_id") or ""),
+            version=str(current.get("version") or ""),
+            progress=int(current.get("progress") or 1),
+            phase="stale",
+            message="Зависшее состояние публикации очищено автоматически",
+            error=f"Публикация не обновляла состояние {int(age)} с",
+            finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+        return False
+    return False
+
+def publish_cancel_path(job_id: str) -> Path:
+    safe = re.sub(r"[^0-9A-Za-z._-]", "_", str(job_id))[:120]
+    return update_dir() / "publish" / "cancel" / f"{safe}.cancel"
+
+
+def request_publish_cancel(job_id: str) -> None:
+    path = publish_cancel_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def publish_cancel_requested(job_id: str) -> bool:
+    return publish_cancel_path(job_id).exists()
+
+
+def clear_publish_cancel(job_id: str) -> None:
+    publish_cancel_path(job_id).unlink(missing_ok=True)
 
 def publish_job_manifest_path(job_id: str) -> Path:
     safe = re.sub(r"[^0-9A-Za-z._-]", "_", str(job_id))[:120]
@@ -1946,6 +2207,10 @@ def read_publish_job_manifest(job_id: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 def start_publish_job(source: Path, original_name: str, actor: str = "web") -> dict[str, Any]:
+    # Reject duplicate publishers before reading/parsing a potentially large archive.
+    # A repeated click must return immediately and must never start another worker.
+    if publish_job_busy():
+        raise UpdateError("Другая публикация GitHub уже выполняется")
     info = inspect_archive(source)
     if not github_token():
         raise UpdateError("GitHub не настроен: откройте «Настройки GitHub» и сохраните Personal Access Token")
@@ -1959,10 +2224,9 @@ def start_publish_job(source: Path, original_name: str, actor: str = "web") -> d
         raise UpdateError("GitHub: включите синхронизацию main в «Настройках GitHub»")
     if publish_job_busy():
         raise UpdateError("Другая публикация GitHub уже выполняется")
-    # Fail before queueing if the token cannot read the repository or lacks push access.
-    # This makes configuration problems visible in the upload response instead of
-    # producing a background job that can only fail later.
-    github_validate_configuration()
+    # Network/API validation intentionally runs inside publish_worker.py. The HTTP upload
+    # endpoint must return immediately after persisting the job; remote GitHub failures are
+    # reported by the durable worker status/log instead of blocking the browser request.
     root = update_dir() / "publish" / "pending"
     root.mkdir(parents=True, exist_ok=True)
     job_id = f"pub-{int(time.time())}-{secrets.token_hex(4)}"
@@ -2635,22 +2899,13 @@ def launch_update(package_root: Path, version: str) -> str:
 def _main() -> int:
     parser = RussianArgumentParser(description="Инструменты проверки пакетов обновления VPN Service")
     parser.add_argument("--verify", metavar="АРХИВ", help="проверить архив релиза без установки")
-    parser.add_argument("--sync-main-directory", metavar="DIR", help="синхронизировать public main из установленного runtime-каталога")
-    parser.add_argument("--version", metavar="VERSION", help="версия для --sync-main-directory")
     parser.add_argument("--json", action="store_true", help="вывести результат в формате JSON")
     args = parser.parse_args()
     if args.verify:
         result = inspect_archive(Path(args.verify))
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else f"OK {result['version']} {result['sha256']}")
         return 0
-    if args.sync_main_directory:
-        version = str(args.version or current_version()).strip()
-        if not github_main_sync_enabled() or not github_token():
-            result = {"synced": False, "skipped": True, "reason": "GitHub publisher disabled or token missing"}
-        else:
-            result = _github_main_sync_directory(Path(args.sync_main_directory), version)
-        print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else str(result))
-        return 0
+
     parser.print_help()
     return 0
 

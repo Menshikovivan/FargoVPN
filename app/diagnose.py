@@ -104,6 +104,26 @@ def collect(root, base_url='', output_dir=None):
                         except Exception:invalid+=1
                     record('push subscription format','PASS' if invalid==0 else 'FAIL',f'total={total} invalid={invalid}')
     except Exception as e: record('database read-only','FAIL',type(e).__name__+'; connection/configuration unavailable')
+    # GitHub is diagnostic-only here: GET requests only, never POST/PATCH/PUT/DELETE.
+    owner = str(cfg.get('GITHUB_REPOSITORY_OWNER','') or '').strip()
+    repo = str(cfg.get('GITHUB_REPOSITORY_NAME','FargoVPN') or 'FargoVPN').strip()
+    token = str(cfg.get('GITHUB_API_TOKEN','') or '').strip()
+    api_base = str(cfg.get('GITHUB_API_BASE_URL','https://api.github.com') or 'https://api.github.com').rstrip('/')
+    if owner and repo and token:
+        try:
+            headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':'2022-11-28'}
+            req=urllib.request.Request(api_base+'/user',headers=headers,method='GET')
+            with urllib.request.urlopen(req,timeout=10) as resp: user=json.loads(resp.read(512*1024))
+            req=urllib.request.Request(api_base+'/repos/'+urllib.parse.quote(owner,safe='')+'/'+urllib.parse.quote(repo,safe=''),headers=headers,method='GET')
+            with urllib.request.urlopen(req,timeout=10) as resp: repository=json.loads(resp.read(512*1024))
+            record('GitHub read-only access','PASS',f"login={user.get('login','—')} repo={repository.get('full_name','—')} private={repository.get('private','—')}; GET only")
+        except urllib.error.HTTPError as e:
+            record('GitHub read-only access','FAIL',f'HTTP {e.code}; GET only')
+        except Exception as e:
+            record('GitHub read-only access','FAIL',type(e).__name__+'; GET only')
+    else:
+        record('GitHub read-only access','SKIP','owner/repository/token are not configured; no write request attempted')
+
     if base_url:
         for path in ['/health','/login','/service-worker.js','/manifest.webmanifest','/static/panel.js','/static/panel.css']:
             try:
@@ -158,11 +178,28 @@ def collect(root, base_url='', output_dir=None):
         except OSError: continue
     raise RuntimeError('No writable report directory')
 
+
+def effective_nginx_contract(stream=None) -> None:
+    import sys as _sys
+    out = stream or _sys.stdout
+    print("\n[READ-ONLY] EFFECTIVE NGINX CSP CONTRACT", file=out)
+    try:
+        proc=subprocess.run(["nginx","-T"],capture_output=True,text=True,timeout=15)
+        dump=(proc.stdout or "")+(proc.stderr or "")
+        has_hide="proxy_hide_header Content-Security-Policy" in dump
+        has_csp=bool(re.search(r"add_header\s+Content-Security-Policy[^;]*unsafe-inline",dump))
+        print(f"managed_csp_hide={has_hide} csp_unsafe_inline={has_csp}", file=out)
+        print("[PASS] nginx FargoVPN CSP contract" if has_hide and has_csp else "[FAIL] nginx FargoVPN CSP contract", file=out)
+    except Exception as exc:
+        print(f"[SKIP] nginx contract: {redact(str(exc))}", file=out)
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--app-dir',default=str(pathlib.Path(__file__).resolve().parent));p.add_argument('--url',default='');p.add_argument('--output-dir');p.add_argument('--json',action='store_true');p.add_argument('--cookie-file',type=pathlib.Path);a=p.parse_args()
+    # JSON mode is consumed by diagnostic_jobs.py; stdout must contain exactly one JSON document.
+    effective_nginx_contract(stream=sys.stderr if a.json else sys.stdout)
     if a.cookie_file:os.environ['FARGOVPN_DIAG_COOKIE']=a.cookie_file.read_text().strip()
     r=collect(a.app_dir,a.url,a.output_dir)
-    if a.json: print(json.dumps(r))
+    if a.json: print(json.dumps(r, ensure_ascii=False))
     else:
         for c in r['checks']: print(c['status'],c['name'])
         print('LOG_FILE='+r['path'])

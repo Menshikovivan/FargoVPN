@@ -1,8 +1,8 @@
 import sys,importlib.util,logging,json,re
 from pathlib import Path
 from unittest.mock import patch
-root=Path(sys.argv[1]).resolve();sys.path.insert(0,str(root));sys.path.insert(0,str(root.parent/'testdeps'))
-spec=importlib.util.spec_from_file_location('config',root/'config.example.py');config=importlib.util.module_from_spec(spec);sys.modules['config']=config;spec.loader.exec_module(config)
+root=Path(sys.argv[1]).resolve();sys.path.insert(0,str(root/'app'));sys.path.insert(0,str(root));sys.path.insert(0,str(root.parent/'testdeps'))
+spec=importlib.util.spec_from_file_location('config',root/'app'/'config.example.py');config=importlib.util.module_from_spec(spec);sys.modules['config']=config;spec.loader.exec_module(config)
 config.BOT_TOKEN='';config.MASTER_API_TOKEN='test-only';config.WEB_PUBLIC_PREFIX='/qa-panel';config.DB_PATH='unused';config.WEB_USERNAME='admin'
 import psutil
 from types import SimpleNamespace as NS
@@ -23,12 +23,21 @@ class Cursor:
  def __enter__(self):return self
  def __exit__(self,*args):pass
  def commit(self):pass
+ def close(self):pass
+ def rollback(self):pass
 w.database=lambda:Cursor()
 w.database_adapter.connect=lambda *a,**kw:Cursor()
 w.user_events.conversation_users=lambda **kw:[]
 w.user_events.count_events=lambda **kw:0
 w.user_events.list_events=lambda **kw:[]
 w.user_events.all_events=lambda **kw:[]
+w.user_events.mark_conversation_opened=lambda *a,**kw: None
+w.user_events.mark_messages_read=lambda *a,**kw: None
+w.get_user=lambda tg_id: {**users[0], 'tg_id': int(tg_id), 'referred_by_tg_id': 0, 'identity_source': 'qa', 'notes': ''}
+w.referral_rewards.referral_stats=lambda *a,**kw: {'invited':0,'paid':0,'rewards':0,'days':0}
+w.fetch_client_extra_sync=lambda *a,**kw: {'traffic':{},'ips':[],'error':''}
+w.get_client_record_sync=lambda *a,**kw: {'client':{}}
+w.registration_access.authorize_admin_user_sync=lambda *a,**kw: None
 w._read_service_logs=lambda *a:'test log'
 w.read_live_state=lambda:{}
 w.restore_manager.read_restore_state=lambda:{}
@@ -40,8 +49,8 @@ w.platform_diagnostics.storage_report=lambda *a,**kw:{'healthy':True}
 w.platform_diagnostics.config_permissions_report=lambda:{'healthy':True}
 config.BACKUP_DIR=str(Path(sys.argv[2]).parent/'backup')
 from starlette.requests import Request
-out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
-for name,fn,kw in [('dashboard',w.dashboard,{}),('settings',w.settings,{}),('users',w.users_page,{'q':'User 1','status':'active'}),('monitoring',w.monitoring,{}),('updates',w.updates_page,{}),('messages',w.messages_page,{}),('broadcast',w.broadcast_page,{}),('payments',w.payments,{}),('backups',w.backups,{}),('logs',w.logs,{}),('audit',w.audit_page,{}),('reminders',w.reminders_page,{}),('diagnostics',w.diagnostics,{}),('subscription-tools',w.subscription_tools_page,{})]:
+out=Path(sys.argv[2]);out.mkdir(parents=True,exist_ok=True)
+for name,fn,kw in [('login',w.login_page,{}),('dashboard',w.dashboard,{}),('settings',w.settings,{}),('users',w.users_page,{'q':'User 1','status':'active'}),('user-detail',w.user_detail_page,{'tg_id':1}),('new-user',w.new_user_page,{}),('monitoring',w.monitoring,{}),('updates',w.updates_page,{}),('messages',w.messages_page,{}),('broadcast',w.broadcast_page,{}),('payments',w.payments,{}),('backups',w.backups,{}),('logs',w.logs,{}),('audit',w.audit_page,{}),('reminders',w.reminders_page,{}),('diagnostics',w.diagnostics,{}),('subscription-tools',w.subscription_tools_page,{})]:
  req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications' if name=='settings' else b'','headers':[],'session':{'auth':True,'user':'admin','csrf_token':'csrf'},'scheme':'https','server':('panel.example.test',443)})
  try:text=fn(req,**kw)
  except Exception as e:raise RuntimeError(f'{name}: {e}') from e

@@ -35,7 +35,16 @@ def start(root,owner,url="",cookie=""):
         try:
             result=subprocess.run([sys.executable,str(pathlib.Path(root)/'diagnose.py'),'--app-dir',str(root),'--output-dir',str(folder()),'--json',*(['--url',url] if url else [])],env={**os.environ,'FARGOVPN_DIAG_COOKIE':cookie},capture_output=True,text=True,encoding='utf8',timeout=210)
             if result.returncode:raise RuntimeError('Сборщик завершился с кодом '+str(result.returncode))
-            report=json.loads(result.stdout);path=pathlib.Path(report['path']).resolve()
+            raw=result.stdout.strip()
+            try:
+                report=json.loads(raw)
+            except json.JSONDecodeError as first_error:
+                # Keep the worker tolerant of accidental diagnostic noise, but only accept a complete JSON object.
+                start=raw.find('{')
+                if start < 0: raise first_error
+                try: report=json.JSONDecoder().raw_decode(raw[start:])[0]
+                except json.JSONDecodeError: raise first_error
+            path=pathlib.Path(report['path']).resolve()
             if path.parent!=folder().resolve() or not path.name.startswith('fargovpn_diag_'):raise RuntimeError('Invalid report path')
             state.update(state='completed',path=str(path),checks=report['checks'])
         except subprocess.TimeoutExpired:state.update(state='failed',error='Превышен таймаут 210 секунд')

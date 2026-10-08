@@ -35,7 +35,7 @@ usage() {
   cat <<USAGE
 Использование: $0 [--profile <старый-профиль>] [--update-existing /путь/к/приложению]
 
-Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.8 всегда используется полный профиль.
+Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.16 всегда используется полный профиль.
 Без параметра --update-existing установщик предлагает:
   1) новую установку
   2) обновление существующей установки
@@ -49,17 +49,17 @@ while (($#)); do
     --profile)
       [[ $# -ge 2 ]] || { echo 'После --profile необходимо указать прежнее значение профиля.' >&2; exit 2; }
       # Совместимость с 4.x: старый updater мог передавать --profile <значение>.
-      # В 5.1.8 профиль не выбирается — всегда используется полный вариант.
+      # В 5.1.16 профиль не выбирается — всегда используется полный вариант.
       LEGACY_PROFILE="$2"
       [[ -n "$LEGACY_PROFILE" ]] || { echo 'Значение --profile не может быть пустым.' >&2; exit 2; }
-      echo "ℹ Получен устаревший параметр --profile; в 5.1.8 используется полный профиль."
+      echo "ℹ Получен устаревший параметр --profile; в 5.1.16 используется полный профиль."
       PROFILE=full
       shift 2
       ;;
     --profile=*)
       LEGACY_PROFILE="${1#*=}"
       [[ -n "$LEGACY_PROFILE" ]] || { echo 'Значение --profile не может быть пустым.' >&2; exit 2; }
-      echo "ℹ Получен устаревший параметр --profile; в 5.1.8 используется полный профиль."
+      echo "ℹ Получен устаревший параметр --profile; в 5.1.16 используется полный профиль."
       PROFILE=full
       shift
       ;;
@@ -99,9 +99,49 @@ mkdir -p "$(dirname "$INSTALL_LOG")"
 # Сохраняем полный журнал установки, не скрывая вывод в терминале.
 exec > >(tee -a "$INSTALL_LOG") 2>&1
 
+INSTALL_STEP=0
 log_step() {
+  INSTALL_STEP=$((INSTALL_STEP + 1))
   echo
-  echo "[Установщик VPN Service Platform] $*"
+  echo "[Установщик VPN Service Platform] Шаг ${INSTALL_STEP}: $*"
+  echo "  Время: $(date -Is)"
+}
+
+run_with_timeout() {
+  local seconds="$1"; shift
+  local child start elapsed
+  "$@" &
+  child=$!
+  start=$SECONDS
+  while kill -0 "$child" 2>/dev/null; do
+    elapsed=$((SECONDS - start))
+    if (( elapsed >= seconds )); then
+      echo "  ⏱ Превышен таймаут ${seconds} с; отправляется TERM PID=${child}" >&2
+      kill -TERM "$child" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.2
+  done
+  wait "$child"
+}
+
+run_timed() {
+  local seconds="$1" label="$2"; shift 2
+  echo "  Ожидается: ${label} (таймаут ${seconds} с)" >&2
+  if run_with_timeout "$seconds" "$@"; then
+    echo "  ✓ ${label}"
+  else
+    local rc=$?
+    if [[ "$rc" == "124" ]]; then
+      echo "  ✗ ${label}: превышен таймаут ${seconds} с" >&2
+    else
+      echo "  ✗ ${label}: команда завершилась с кодом ${rc}" >&2
+    fi
+    return "$rc"
+  fi
 }
 
 require_command() {
@@ -187,7 +227,7 @@ apt_install() {
 
   log_step "Устанавливаются недостающие системные зависимости: ${missing[*]}"
   for attempt in 1 2 3; do
-    if apt-get update && apt-get install -y --no-install-recommends "${missing[@]}"; then
+    if run_with_timeout 180 apt-get update && run_with_timeout 300 apt-get install -y --no-install-recommends "${missing[@]}"; then
       return 0
     fi
     echo "Попытка APT №$attempt завершилась ошибкой; выполняется повтор..." >&2
@@ -254,10 +294,10 @@ PYREQ
   fi
 
   log_step "Устанавливаются/проверяются Python-зависимости из $requirements"
-  "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip wheel
-  "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade -r "$requirements"
-  pip_requirements_ok "$requirements"
-  "$TARGET/.venv/bin/python" -m pip check
+  run_timed 120 "обновление pip/wheel" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip wheel
+  run_timed 600 "установка Python-зависимостей" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade -r "$requirements"
+  run_timed 60 "проверка установленных требований" pip_requirements_ok "$requirements"
+  run_timed 60 "pip check" "$TARGET/.venv/bin/python" -m pip check
   printf '%s\n' "$digest" > "$stamp"
   chmod 600 "$stamp"
 }
@@ -320,7 +360,7 @@ summary_unit() {
 summary_postgresql() {
   local dsn='' host='' port='' db=''
   if [[ -f "$TARGET/config.py" && -x "$TARGET/.venv/bin/python" ]]; then
-    dsn=$(target_python -c 'import config; print(str(getattr(config, "DATABASE_URL", "") or ""))' 2>/dev/null || true)
+    dsn=$(target_python -c 'import os, config; print(str(os.getenv("FARGOVPN_DATABASE_URL", "") or os.getenv("DATABASE_URL", "") or getattr(config, "DATABASE_URL", "")))' 2>/dev/null || true)
     if [[ -z "$dsn" ]]; then
       dsn=$(target_python -c 'import ast, pathlib; t=pathlib.Path("config.py").read_text(encoding="utf-8");
 for n in ast.parse(t).body:
@@ -515,7 +555,7 @@ restart_existing_services() {
     systemctl stop vpn-service-web.service >/dev/null 2>&1 || true
     systemctl stop vpn-service-web.socket >/dev/null 2>&1 || true
     rm -f /run/vpn-service/fargovpn.sock /run/vpn-service/fargovpn.sock.stale 2>/dev/null || true
-    systemctl start vpn-service-web.socket >/dev/null 2>&1 || true
+    run_with_timeout 10 systemctl start vpn-service-web.socket >/dev/null 2>&1 || true
     restart_unit_family vpn-service-web.service fargovpn-web.service
   else
     restart_unit_family vpn-service-web.service fargovpn-web.service
@@ -633,13 +673,27 @@ detect_existing_nginx_worker_group() {
 setup_existing_nginx_route() {
   [[ "$PROFILE" == full ]] || return 0
   require_command nginx
-  if ! nginx -t >>"$INSTALL_LOG" 2>&1; then
-    echo "Внешний nginx: ошибка конфигурации; подробности в $INSTALL_LOG" >&2
+  # Keep the customer's L4/L7 router intact, but synchronize FargoVPN's own managed URI location.
+  # 5.1.12 only validated nginx, leaving the parent strict CSP active and blocking page controllers.
+  if [[ ! -f "$TARGET/nginx_panel_guard.py" ]]; then
+    echo "FargoVPN nginx guard not found: $TARGET/nginx_panel_guard.py" >&2
     return 1
   fi
-  # Read-only validation. The external router owns all L4/L7 configuration.
-  echo 'Внешний nginx проверен; конфигурация и маршруты не изменялись.'
-  echo 'Для новой установки подключите URI панели к /run/vpn-service/fargovpn.sock во внешнем nginx.'
+  if ! target_python "$TARGET/nginx_panel_guard.py" --once >>"$INSTALL_LOG" 2>&1; then
+    echo 'Внешний nginx: не удалось синхронизировать managed FargoVPN location.' >&2
+    return 1
+  fi
+  if ! nginx -t >>"$INSTALL_LOG" 2>&1; then
+    echo "Внешний nginx: ошибка конфигурации после синхронизации; подробности в $INSTALL_LOG" >&2
+    return 1
+  fi
+  local dump
+  dump=$(nginx -T 2>/dev/null || true)
+  if ! grep -q 'proxy_hide_header Content-Security-Policy' <<<"$dump" || ! grep -Eq 'add_header Content-Security-Policy .*unsafe-inline' <<<"$dump"; then
+    echo 'Внешний nginx: итоговая конфигурация не содержит обязательный FargoVPN CSP contract.' >&2
+    return 1
+  fi
+  echo 'Внешний nginx синхронизирован: только managed FargoVPN location; L4/L7 маршруты не заменялись.'
 }
 
 project_dir() {
@@ -865,7 +919,7 @@ VPN_UPDATE_PROGRESS=52
 summary_running dependencies "Проверяются системные пакеты"
 write_update_status "installing" "Проверяются системные пакеты" "$VPN_UPDATE_PROGRESS" "dependencies"
 export DEBIAN_FRONTEND=noninteractive
-apt_install python3 python3-venv python3-pip curl sqlite3 ca-certificates iproute2 openssl rsync socat tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+apt_install coreutils python3 python3-venv python3-pip curl sqlite3 ca-certificates iproute2 openssl rsync socat tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
 if [[ -f "$SRC/systemd/vpn-service.logrotate" ]]; then
   install -m 0644 "$SRC/systemd/vpn-service.logrotate" /etc/logrotate.d/vpn-service
 fi
@@ -889,15 +943,10 @@ for unit in \
   # Uvicorn при graceful shutdown. Во время обновления это недопустимо:
   # веб-служба не должна блокировать замену файлов десятки секунд.
   if [[ "$unit" == "vpn-service-web" || "$unit" == "vpn-service-web.service" || "$unit" == "fargovpn-web" || "$unit" == "fargovpn-web.service" ]]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 6s systemctl stop "$unit" 2>/dev/null || {
-        systemctl kill "$unit" --kill-who=all --signal=SIGKILL 2>/dev/null || true
-        sleep 1
-      }
-    else
-      systemctl stop "$unit" 2>/dev/null || true
+    run_with_timeout 6 systemctl stop "$unit" 2>/dev/null || {
       systemctl kill "$unit" --kill-who=all --signal=SIGKILL 2>/dev/null || true
-    fi
+      sleep 1
+    }
   else
     systemctl stop "$unit" 2>/dev/null || true
   fi
@@ -1205,7 +1254,7 @@ values = {
     "GITHUB_TARGET_BRANCH": "main", "GITHUB_MAIN_SYNC_ENABLED": True, "GITHUB_RELEASE_TAG_PREFIX": "v",
     "GITHUB_RELEASE_NAME_TEMPLATE": "FargoVPN {version}", "GITHUB_RELEASE_ASSET_NAME": "VPN_Service_Platform_{version}_FULL.tar.gz",
     "GITHUB_RELEASE_MAKE_LATEST": True, "GITHUB_RELEASE_DRAFT": False, "GITHUB_RELEASE_PRERELEASE": False,
-    "UPDATE_CHECK_INTERVAL": 60, "UPDATE_VERIFY_TLS": True, "UPDATE_MAX_ARCHIVE_MB": 1024, "UPDATE_STALE_JOB_SECONDS": 7200,
+    "UPDATE_CHECK_INTERVAL": 60, "UPDATE_VERIFY_TLS": True, "UPDATE_MAX_ARCHIVE_MB": 1024, "UPDATE_STALE_JOB_SECONDS": 7200, "PUBLISH_STALE_JOB_SECONDS": 1800,
     "PUSH_ENABLED": True, "PUSH_VAPID_SUBJECT": "", "PUSH_VAPID_PRIVATE_KEY_PATH": "/var/lib/vpn-service/vapid_private.pem",
     "PUSH_VAPID_PUBLIC_KEY": "", "PUSH_TTL_SECONDS": 3600, "PUSH_MAX_SUBSCRIPTIONS_PER_USER": 8, "PUSH_TEST_ENABLED": True,
 }
@@ -1693,6 +1742,7 @@ ensure("PUSH_TTL_SECONDS", 3600)
 ensure("PUSH_MAX_SUBSCRIPTIONS_PER_USER", 8)
 ensure("PUSH_TEST_ENABLED", True)
 ensure("UPDATE_STALE_JOB_SECONDS", 7200)
+ensure("PUBLISH_STALE_JOB_SECONDS", 1800)
 if literal("UPDATE_IS_PUBLISHER", None) is None:
     set_value(
         "UPDATE_IS_PUBLISHER",
@@ -1892,7 +1942,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$TARGET
-ExecStart=$TARGET/web_start.sh
+ExecStart=/bin/bash $TARGET/web_start.sh
 StandardOutput=append:/var/log/vpn_bot.log
 StandardError=append:/var/log/vpn_bot.log
 UMask=0077
@@ -2042,14 +2092,14 @@ then
   exit 1
 fi
 
-systemctl daemon-reload
+run_with_timeout 20 systemctl daemon-reload
 summary_running services "Проверяются systemd unit-файлы"
 VPN_UPDATE_PROGRESS=94
 for legacy_unit in \
   fargovpn-backup.service fargovpn-backup.timer \
   vpn-bot-backup.service vpn-bot-backup.timer \
   vpn_bot_backup.service vpn_bot_backup.timer; do
-  systemctl disable --now "$legacy_unit" >/dev/null 2>&1 || true
+  run_with_timeout 15 systemctl disable --now "$legacy_unit" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$legacy_unit"
 done
 write_update_status "installing" "Файлы systemd-служб обновлены" "$VPN_UPDATE_PROGRESS" "services"
@@ -2059,8 +2109,8 @@ write_update_status "installing" "Файлы systemd-служб обновлен
 # Жизненным циклом FargoVPN управляет только systemd. Ручное убийство
 # panel_runtime.py здесь запрещено: при Restart=on-failure это создавало
 # гонку и серию неожиданных stop/start во время установки/обновления.
-systemctl stop vpn-service-web.service vpn-service-web.socket fargovpn-web.service fargovpn-web.socket 2>/dev/null || true
-systemctl daemon-reload
+run_with_timeout 15 systemctl stop vpn-service-web.service vpn-service-web.socket fargovpn-web.service fargovpn-web.socket 2>/dev/null || true
+run_with_timeout 20 systemctl daemon-reload
 VERIFY_UNITS=(
   /etc/systemd/system/vpn-service-bot.service
   /etc/systemd/system/vpn-service-backup.service
@@ -2089,31 +2139,31 @@ if [[ $PROFILE == full ]]; then
   if [[ ! -f /etc/systemd/system/vpn-service-web.service ]]; then abort_install 'vpn-service-web.service не создан'; fi
   if [[ ! -f /etc/systemd/system/vpn-service-web.socket ]]; then abort_install 'vpn-service-web.socket не создан'; fi
 fi
-systemctl enable vpn-service-bot.service vpn-service-backup.timer vpn-service-reminders.timer
+run_with_timeout 15 systemctl enable vpn-service-bot.service vpn-service-backup.timer vpn-service-reminders.timer
 # `enable` only affects boot-time activation and does not start an already
 # stopped unit. Start the bot explicitly when a token is configured; with an
 # empty token run_bot.sh exits cleanly and the installation remains usable.
 BOT_READY_FOR_RESTART=$(target_python -c 'import config; print("1" if str(getattr(config, "BOT_TOKEN", "")).strip() else "0")')
 if [[ "$BOT_READY_FOR_RESTART" == "1" ]]; then
-  if ! systemctl restart vpn-service-bot.service; then
+  if ! run_with_timeout 30 systemctl restart vpn-service-bot.service; then
     summary_unit vpn-service-bot.service 'Telegram-бот' >&2
     abort_install 'Не удалось запустить vpn-service-bot.service после обновления'
   fi
 fi
 if [[ $PROFILE == full ]]; then
-  systemctl enable vpn-service-web.socket
-  systemctl enable vpn-service-web.service
+  run_with_timeout 15 systemctl enable vpn-service-web.socket
+  run_with_timeout 15 systemctl enable vpn-service-web.service
   # Чистая socket-activation транзакция: старый listener закрывается полностью,
   # затем создаётся новый и только после этого запускается web service.
-  systemctl stop vpn-service-web.service vpn-service-web.socket >/dev/null 2>&1 || true
+  run_with_timeout 15 systemctl stop vpn-service-web.service vpn-service-web.socket >/dev/null 2>&1 || true
   rm -f "$SOCKET_PATH".stale "$SOCKET_PATH" 2>/dev/null || true
-  systemctl start vpn-service-web.socket
+  run_with_timeout 10 systemctl start vpn-service-web.socket
   if ! systemctl is-active --quiet vpn-service-web.socket; then
     echo "  state=$(systemctl show vpn-service-web.socket -p ActiveState --value 2>/dev/null || true)" >&2
     echo "  substate=$(systemctl show vpn-service-web.socket -p SubState --value 2>/dev/null || true)" >&2
     abort_install 'vpn-service-web.socket не запустился'
   fi
-  systemctl start vpn-service-web.service
+  run_with_timeout 15 systemctl start vpn-service-web.service
   WEB_ACTIVE=0
   for _ in $(seq 1 15); do
     if systemctl is-active --quiet vpn-service-web.service; then
@@ -2138,8 +2188,8 @@ if [[ $PROFILE == full && "$MODE" != "3" ]]; then
   setup_existing_nginx_route
   summary_ok nginx "Внешний Nginx используется без установки/перезаписи L4-конфигурации"
   if [[ -f /etc/systemd/system/vpn-service-nginx-guard.service ]]; then
-    systemctl enable vpn-service-nginx-guard.service >/dev/null 2>&1
-    systemctl restart vpn-service-nginx-guard.service
+    run_with_timeout 15 systemctl enable vpn-service-nginx-guard.service >/dev/null 2>&1
+    run_with_timeout 30 systemctl restart vpn-service-nginx-guard.service
     if ! systemctl is-active --quiet vpn-service-nginx-guard.service; then
       echo "  state=$(systemctl show vpn-service-nginx-guard.service -p ActiveState --value 2>/dev/null || true)" >&2
       echo "  substate=$(systemctl show vpn-service-nginx-guard.service -p SubState --value 2>/dev/null || true)" >&2
@@ -2148,8 +2198,8 @@ if [[ $PROFILE == full && "$MODE" != "3" ]]; then
     fi
   fi
 fi
-systemctl restart vpn-service-backup.timer
-systemctl restart vpn-service-reminders.timer
+run_with_timeout 20 systemctl restart vpn-service-backup.timer
+run_with_timeout 20 systemctl restart vpn-service-reminders.timer
 summary_ok restart "Бот, web socket/service и таймеры запущены/проверяются; Nginx внешний"
 
 VPN_UPDATE_PROGRESS=98
@@ -2175,11 +2225,13 @@ else
 fi
 
 if [[ $PROFILE == full ]]; then
-  "$TARGET/.venv/bin/python" "$TARGET/panel_runtime.py" --check >/dev/null
+  log_step "Запуск и проверка веб-панели"
+  run_timed 30 "проверка runtime-конфигурации панели" "$TARGET/.venv/bin/python" "$TARGET/panel_runtime.py" --check >/dev/null
   SOCKET_PATH=$(target_python -c 'import config; print(str(getattr(config, "WEB_SOCKET_PATH", "/run/vpn-service/fargovpn.sock")))')
   HEALTH_OK=0
   HEALTH_BODY=''
-  for _ in $(seq 1 60); do
+  echo "  Ожидается: Unix socket $SOCKET_PATH и /health (максимум 45 с)"
+  for _ in $(seq 1 45); do
     if [[ -S "$SOCKET_PATH" ]]; then
       HEALTH_BODY=$(curl --unix-socket "$SOCKET_PATH" -fsS --connect-timeout 2 --max-time 5 -H 'Cache-Control: no-cache' http://localhost/health 2>/dev/null || true)
       if [[ "$HEALTH_BODY" == OK* ]]; then
@@ -2187,6 +2239,7 @@ if [[ $PROFILE == full ]]; then
         break
       fi
     fi
+    if (( _ % 5 == 0 )); then echo "  … ждём web health: ${_}/45 с"; fi
     sleep 1
   done
   if [[ $HEALTH_OK -ne 1 ]]; then
@@ -2204,6 +2257,8 @@ if [[ $PROFILE == full ]]; then
     echo "Подробности сохранены в $INSTALL_LOG." >&2
     abort_install "health-check веб-панели не пройден"
   fi
+  log_step "Проверка доступа Nginx к Unix socket"
+  run_timed 20 "чтение эффективной конфигурации Nginx" nginx -T >/dev/null
   NGINX_WORKER_USER=$(nginx -T 2>/dev/null | sed -nE 's/^[[:space:]]*user[[:space:]]+([^;[:space:]]+)([[:space:]]+[^;[:space:]]+)?;.*/\1/p' | head -n1 || true)
   [[ -n "$NGINX_WORKER_USER" ]] || abort_install 'не удалось определить рабочего пользователя Nginx для проверки socket'
   NGINX_HEALTH=$(runuser -u "$NGINX_WORKER_USER" -- curl --unix-socket "$SOCKET_PATH" -fsS --connect-timeout 2 --max-time 5 http://localhost/health 2>&1) || {
@@ -2227,9 +2282,10 @@ if [[ $PROFILE == full ]]; then
   # the live API smoke-check is mandatory when either authentication mode is configured.
   XUI_TOKEN_READY=$(target_python -c 'import config; print("1" if (str(getattr(config, "MASTER_API_TOKEN", "") or "").strip() or (getattr(config, "XUI_USERNAME", "") and getattr(config, "XUI_PASSWORD", ""))) else "0")')
   if [[ "$XUI_TOKEN_READY" == "1" ]]; then
+    log_step "Проверка интеграции 3x-ui API"
     # FargoVPN depends on the live 3x-ui API for users, traffic, online state
     # and server status. Verify the same integration layer used by the web panel.
-    XUI_SMOKE=$(target_python - <<'PY_XUI_SMOKE'
+    XUI_SMOKE=$(run_timed 45 "проверка clients/list, inbounds/list и server/status через 3x-ui API" target_python - <<'PY_XUI_SMOKE'
 from services.xui_api import request_json_sync, fetch_snapshot_sync
 import json
 snapshot = fetch_snapshot_sync(force=True)
@@ -2281,7 +2337,7 @@ if [[ "$MODE" == "3" ]]; then
     # external Nginx; the external L4/L7 configuration is never replaced.
     setup_existing_nginx_route
     if [[ -f /etc/systemd/system/vpn-service-nginx-guard.service ]]; then
-      systemctl restart vpn-service-nginx-guard.service
+      run_with_timeout 30 systemctl restart vpn-service-nginx-guard.service
     fi
   fi
   echo '✓ Восстановление завершено; выполняется повторная проверка живых служб.'
@@ -2306,29 +2362,18 @@ if [[ "$MODE" == "3" ]]; then
   fi
 fi
 
-systemctl reset-failed >/dev/null 2>&1 || true
+log_step "Финальная уборка systemd и диагностика"
+run_with_timeout 20 systemctl reset-failed >/dev/null 2>&1 || true
 PROFILE=full
 PROFILE_STATUS="Полная установка"
-PANEL_PUBLIC_URL=$(target_python "$TARGET/nginx_panel_guard.py" --print-url 2>/dev/null || true)
+PANEL_PUBLIC_URL=$(run_with_timeout 25 target_python "$TARGET/nginx_panel_guard.py" --print-url 2>/dev/null || true)
 STATUS_DETAIL="$PROFILE_STATUS установлен; проверки служб пройдены"
 if [[ -n "$PANEL_PUBLIC_URL" ]]; then
   STATUS_DETAIL+="; Веб-панель: $PANEL_PUBLIC_URL"
 fi
-# When this release is installed from the administrator panel, the previous
-# publisher may have added a compatibility VERSION at repository root. After the
-# new publisher is installed, repair main from the complete package root so the
-# public tree immediately becomes the intended minimal structure.
-if [[ -f "$TARGET/config.py" ]]; then
-  GITHUB_PUBLISHER_READY=$(target_python -c 'import config; print("1" if str(getattr(config, "GITHUB_API_TOKEN", "") or "").strip() and bool(getattr(config, "GITHUB_MAIN_SYNC_ENABLED", False)) else "0")' 2>/dev/null || echo 0)
-  if [[ "$GITHUB_PUBLISHER_READY" == "1" && -f "$TARGET/update_manager.py" ]]; then
-    write_update_status "publishing" "Проверяется и очищается публичный GitHub main" "99" "github"
-    if ! target_python "$TARGET/update_manager.py" --sync-main-directory "$(dirname "$SRC")" --version "$VERSION" --json; then
-      echo '⚠️ Не удалось автоматически синхронизировать GitHub main после установки. Установка приложения завершена, но репозиторий требует повторной публикации.' >&2
-    else
-      echo '✓ GitHub main синхронизирован по новой минимальной структуре.'
-    fi
-  fi
-fi
+# IMPORTANT: the console installer is deliberately GitHub-write-free.
+# GitHub mutations (main/tag/release/assets) are performed only by the
+# persistent web-panel publisher worker after an administrator uploads a release archive.
 
 summary_ok health "Финальный health-check завершён; версия $VERSION активна"
 write_update_status "completed" "$STATUS_DETAIL" "100" "complete"

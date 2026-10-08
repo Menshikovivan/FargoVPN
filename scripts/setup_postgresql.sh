@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+STEP=0
+step(){ STEP=$((STEP+1)); echo "[PostgreSQL] Шаг ${STEP}: $*"; }
+run_timed(){ local sec="$1" label="$2"; shift 2; echo "  Ожидается: ${label} (таймаут ${sec} с)"; timeout --kill-after=5s "${sec}s" "$@"; }
 
 DB_NAME="${FARGOVPN_DB_NAME:-fargovpn}"
 DB_USER="${FARGOVPN_DB_USER:-fargovpn}"
@@ -12,9 +15,11 @@ DB_PASSWORD="${FARGOVPN_DB_PASSWORD:-}"
 [[ "$DB_USER" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "Некорректное имя PostgreSQL пользователя: $DB_USER" >&2; exit 2; }
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends postgresql postgresql-client openssl
-systemctl enable --now postgresql
+step "Проверка системных зависимостей"
+run_timed 180 "apt update" apt-get update
+run_timed 300 "установка PostgreSQL" apt-get install -y --no-install-recommends postgresql postgresql-client openssl
+step "Запуск PostgreSQL"
+run_timed 45 "enable/start PostgreSQL" systemctl enable --now postgresql
 
 if [[ -z "$DB_PASSWORD" ]]; then
   DB_PASSWORD="$(openssl rand -hex 24)"

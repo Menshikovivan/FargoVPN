@@ -8,7 +8,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 [![3x-ui](https://img.shields.io/badge/3x--ui-integrated-444444)](https://github.com/MHSanaei/3x-ui)
 
-**Текущая версия: 5.1.8**
+**Текущая версия: 5.1.16**
 
 FargoVPN рассчитан на владельцев VPN-сервисов, которым нужен готовый пользовательский Telegram-бот, административная веб-панель, управление подписками через 3x-ui и безопасное обновление без ручной работы с исходниками.
 
@@ -100,7 +100,7 @@ curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install
 
 ```bash
 tar -xzf FargoVPN_FULL.tar.gz
-cd FargoVPN-5.1.8
+cd FargoVPN-5.1.16
 sudo ./install.sh
 ```
 
@@ -250,6 +250,7 @@ flowchart TB
 FargoVPN/
 ├── install.sh                # публичный bootstrap-установщик
 ├── README.md                 # эта документация
+├── diagnose.sh               # read-only диагностика для запуска из release-архива
 ├── LICENSE                   # лицензия проекта
 ├── .github/                  # CI, шаблоны Issues/PR, Dependabot
 ├── app/                      # runtime FargoVPN и полный installer
@@ -292,6 +293,18 @@ sudo tail -n 200 /var/log/vpn_bot.log
 ```bash
 cat /root/vpn_bot/VERSION
 ```
+
+### Read-only диагностика
+
+```bash
+# из release-архива
+sudo bash ./diagnose.sh --json
+
+# после установки
+sudo bash /root/vpn_bot/scripts/diagnose.sh --json
+```
+
+Диагностика не изменяет GitHub: внешние GitHub-запросы из неё выполняются только методом GET. Итоговый отчёт сохраняется в приватном файле; токены и ключи маскируются.
 
 ### Проверка сервера
 

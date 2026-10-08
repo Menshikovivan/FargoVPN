@@ -24,11 +24,64 @@
     }
     return nativeFetch(resource, init);
   };
+  class FargoApiError extends Error {
+    constructor(message, status = 0, data = null) {
+      super(String(message || 'Запрос не выполнен'));
+      this.name = 'FargoApiError';
+      this.status = Number(status || 0);
+      this.data = data;
+    }
+  }
+  window.apiFetch = async function(resource, options = {}) {
+    const init = Object.assign({credentials: 'same-origin'}, options || {});
+    const timeout = Math.max(1000, Number(init.timeout || 20000));
+    delete init.timeout;
+    let timeoutController = null;
+    if (!init.signal && typeof AbortController !== 'undefined') {
+      timeoutController = new AbortController(); init.signal = timeoutController.signal;
+      setTimeout(() => timeoutController.abort(), timeout);
+    } else if (!init.signal && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+      init.signal = AbortSignal.timeout(timeout);
+    }
+    const response = await window.fetch(resource, init);
+    if (timeoutController && timeoutController.signal.aborted) throw new FargoApiError('Превышен таймаут запроса', 0, null);
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const finalUrl = String(response.url || resource || '');
+    const looksLikeLogin = /\/(?:login|auth)(?:[/?#]|$)/i.test(finalUrl) && !/\/(?:api|panel\/api)\//i.test(finalUrl);
+    let payload = null;
+    let text = '';
+    const expectsJson = /\/(?:api|panel\/api)(?:[/?#]|$)/i.test(new URL(String(resource || ''), document.baseURI).pathname);
+    if (contentType.includes('application/json')) {
+      payload = await response.json().catch(() => null);
+      if (payload === null && response.ok) throw new FargoApiError('Сервер вернул повреждённый JSON-ответ', response.status, null);
+    } else {
+      text = await response.text().catch(() => '');
+    }
+    if (looksLikeLogin || response.status === 401) throw new FargoApiError('Сессия панели истекла. Откройте страницу входа и авторизуйтесь снова.', 401, payload);
+    if (!response.ok) {
+      let detail = payload && (payload.detail || payload.error || payload.message);
+      if (detail && typeof detail === 'object') detail = detail.message || detail.detail || JSON.stringify(detail);
+      const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      throw new FargoApiError(detail || snippet || ('HTTP ' + response.status), response.status, payload);
+    }
+    if (expectsJson && !contentType.includes('application/json')) {
+      throw new FargoApiError('Сервер вернул не JSON (Content-Type: ' + (contentType || 'не указан') + ') · ' + String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240), response.status, payload);
+    }
+    if (payload && payload.ok === false) {
+      let detail = payload.error || payload.detail || payload.message || 'API вернул ok=false';
+      if (detail && typeof detail === 'object') detail = detail.message || detail.detail || JSON.stringify(detail);
+      throw new FargoApiError(String(detail), response.status, payload);
+    }
+    const normalized = payload && Object.prototype.hasOwnProperty.call(payload, 'data') ? payload.data : payload;
+    return { response, data: normalized, text, payload };
+  };
+  window.FargoApiError = FargoApiError;
 
   document.addEventListener('submit', async (event) => {
     if (event.defaultPrevented || !CSRF_TOKEN) return;
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || String((event.submitter && event.submitter.getAttribute('formmethod')) || form.method || 'get').toLowerCase() !== 'post') return;
+    const noNavigation = form.dataset.noNavigation === '1';
     event.preventDefault();
     if (form.dataset.submitting === '1') return;
     form.dataset.submitting = '1';
@@ -39,8 +92,18 @@
     const target = submitter && submitter.getAttribute('formaction') ? new URL(submitter.getAttribute('formaction'), document.baseURI).href : (form.action || location.href);
     try {
       const response = await window.fetch(target, {
-        method: 'POST', body: data, credentials: 'same-origin', redirect: 'follow', signal: AbortSignal.timeout(30000)
+        method: 'POST', body: data, credentials: 'same-origin', redirect: noNavigation ? 'manual' : 'follow', signal: AbortSignal.timeout(30000)
       });
+      if (noNavigation) {
+        if (response.type === 'opaqueredirect' || [301,302,303,307,308].includes(response.status)) {
+          throw new Error('Сервер вернул redirect вместо AJAX-ответа; проверьте обработчик страницы');
+        }
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || ('HTTP ' + response.status));
+        }
+        return;
+      }
       if (response.redirected || response.ok) location.assign(response.url || location.href);
       else {
         const error = await response.json().catch(() => ({}));
@@ -409,17 +472,73 @@
     window.addEventListener('pagehide', () => clearTimeout(timer), {once:true});
   }
 
+  const PANEL_BUILD_VERSION = '5.1.16';
+
+  function enforceClientVersion() {
+    const meta = document.querySelector('meta[name="fargovpn-app-version"]');
+    const serverVersion = String(meta?.content || '').trim();
+    window.__FARGOVPN_APP_VERSION__ = serverVersion;
+    if (!serverVersion || serverVersion === PANEL_BUILD_VERSION || document.getElementById('fargovpn-version-mismatch')) return;
+    const box = document.createElement('div');
+    box.id = 'fargovpn-version-mismatch';
+    box.className = 'update-banner';
+    box.setAttribute('role','alert');
+    const strong = document.createElement('strong'); strong.textContent = 'Доступна новая версия панели';
+    const span = document.createElement('span'); span.textContent = 'Загружен клиент ' + PANEL_BUILD_VERSION + ', сервер сообщает ' + serverVersion + '.';
+    const button = document.createElement('button'); button.type='button'; button.className='button small'; button.textContent='Обновить панель';
+    button.addEventListener('click', async () => {
+      try {
+        if ('caches' in window) { const keys=await caches.keys(); await Promise.all(keys.map(key=>caches.delete(key))); }
+        if ('serviceWorker' in navigator) { const regs=await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(reg=>reg.update())); }
+      } catch (_) {}
+      location.reload();
+    });
+    box.append(strong,span,button);
+    const slot=document.getElementById('global-update-slot');
+    if (slot) slot.replaceWith(box); else document.body.prepend(box);
+  }
+
   function initServiceWorker() {
-    const version = document.querySelector('meta[name="fargovpn-app-version"]');
-    window.__FARGOVPN_APP_VERSION__ = version ? version.content : '';
     const meta = document.querySelector('meta[name="fargovpn-sw-url"]');
     if (!meta || !('serviceWorker' in navigator) || !window.isSecureContext) return;
+    const version = String(document.querySelector('meta[name="fargovpn-app-version"]')?.content || 'current');
+    const reloadKey = 'fargovpn-sw-auto-reload-v2';
+    let marker = null;
+    try { marker = JSON.parse(sessionStorage.getItem(reloadKey) || 'null'); } catch (_) { marker = null; }
+    let reloaded = Boolean(marker && marker.version === version);
+    const persistReloadMarker = () => { try { sessionStorage.setItem(reloadKey, JSON.stringify({version, at: Date.now()})); } catch (_) {} };
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{
+      if (reloaded) { window.panelToast('Service Worker обновлён; автоматическая перезагрузка уже выполнялась в этой сессии.', 'bad'); return; }
+      reloaded = true;
+      persistReloadMarker();
+      location.reload();
+    }, {once:false});
     navigator.serviceWorker.register(meta.content, {updateViaCache:'none'})
-      .then(r => r.update()).catch(e => window.panelToast('Service Worker: ' + e.message, 'bad'));
+      .then(async r => { await r.update(); if(r.waiting) r.waiting.postMessage({type:'SKIP_WAITING'}); })
+      .catch(e => window.panelToast('Service Worker: ' + e.message, 'bad'));
+  }
+
+  function installGlobalErrorCapture() {
+    if (window.__fargovpnGlobalErrorCaptureInstalled) return;
+    window.__fargovpnGlobalErrorCaptureInstalled = true;
+    const send = (payload) => {
+      try {
+        const body = JSON.stringify(payload);
+        nativeFetch(panelPath('/api/panel/client-errors'), {method:'POST', credentials:'same-origin', keepalive:true, headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN}, body}).catch(()=>{});
+      } catch (_) {}
+    };
+    window.addEventListener('error', event => {
+      send({kind:'window.onerror', message:String(event.message||'Unknown error').slice(0,1000), source:String(event.filename||'').slice(-500), line:Number(event.lineno||0), column:Number(event.colno||0)});
+    });
+    window.addEventListener('unhandledrejection', event => {
+      const reason=event.reason; send({kind:'unhandledrejection', message:String(reason?.stack||reason?.message||reason||'Unhandled rejection').slice(0,2000)});
+    });
   }
 
   function startPanelScripts() {
     const safeInit = (name, fn) => { try { fn(); } catch (error) { console.error('[FargoVPN]', name, error); } };
+    safeInit('global-error-capture', installGlobalErrorCapture);
+    safeInit('client-version', enforceClientVersion);
     safeInit('service-worker', initServiceWorker);
     safeInit('broadcast-form', initBroadcastForm);
     safeInit('bottom-scroll', initBottomScroll);

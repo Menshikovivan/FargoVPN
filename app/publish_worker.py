@@ -22,7 +22,16 @@ def run(job_id: str) -> int:
         )
         if not archive.is_file():
             raise update_manager.UpdateError("Архив публикации не найден")
+        if update_manager.publish_cancel_requested(job_id):
+            update_manager.write_publish_status("cancelled", job_id=job_id, version=version, progress=3, phase="cancelled", message="Публикация отменена до обращения к GitHub", error="", finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            return 0
+        update_manager.write_publish_status("validating", job_id=job_id, version=version, progress=5, phase="github-auth", message="Проверяется токен и доступ к репозиторию GitHub", error="")
+        update_manager.github_validate_configuration()
+        update_manager.write_publish_status("validating", job_id=job_id, version=version, progress=8, phase="repository", message="Доступ к ветке main подтверждён; подготовка публикации", error="")
         def progress(percent: int, phase: str, message: str) -> None:
+            if update_manager.publish_cancel_requested(job_id):
+                raise update_manager.UpdateError("Публикация отменена администратором")
+            update_manager.append_publish_log(job_id, f"{phase}: {message}")
             update_manager.write_publish_status(
                 "completed" if percent >= 100 else phase,
                 job_id=job_id, version=version, progress=percent, phase=phase, message=message, error="",
@@ -43,13 +52,21 @@ def run(job_id: str) -> int:
             finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         archive.unlink(missing_ok=True)
+        update_manager.clear_publish_cancel(job_id)
         return 0
     except Exception as error:
+        if update_manager.publish_cancel_requested(job_id):
+            update_manager.write_publish_status(
+                "cancelled", job_id=job_id, version=version, progress=max(1, int(update_manager.read_publish_status().get("progress") or 1)), phase="cancelled", message="Публикация отменена администратором", error="", finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+            update_manager.clear_publish_cancel(job_id)
+            return 0
         update_manager.write_publish_status(
             "failed", job_id=job_id, version=version, progress=max(1, int(update_manager.read_publish_status().get("progress") or 1)),
             phase="failed", message="Публикация GitHub не завершена", error=str(error),
             finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
+        update_manager.clear_publish_cancel(job_id)
         traceback.print_exc()
         return 1
 

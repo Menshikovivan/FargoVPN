@@ -46,7 +46,7 @@ def test_messages_page_has_composer_and_reuses_existing_send_endpoint():
     assert 'id="messages-compose-form"' in src
     assert 'id="messages-compose-text"' in src
     assert 'accept="image/*,video/*"' in src
-    assert "fetch(compose.action" in src
+    assert "fetch(compose.action" in src or "window.apiFetch(compose.action" in src
     assert 'headers:{Accept:\'application/json\'}' in src or 'headers:{{Accept:{Accept' in src or "Accept:'application/json'" in src
     assert 'return JSONResponse({"ok": True, "detail": detail, "event": event}, status_code=200)' in read("webapp.py")
 

@@ -259,10 +259,28 @@ def prune_telegram_update_dedup(keep_days: int = 7, db_path: str | Path | None =
     ensure_schema(db_path)
     keep_days = max(1, int(keep_days))
     with _connect(db_path) as connection:
-        cursor = connection.execute(
-            "DELETE FROM telegram_update_dedup WHERE status='processed' AND first_seen_at < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')",
-            (keep_days,),
-        )
+        # Production PostgreSQL installs created by older releases may have
+        # first_seen_at as TEXT. Comparing TEXT directly with timestamptz raises
+        # UndefinedFunction and was visible in the 5.1.11 diagnostic log. Cast
+        # legacy ISO timestamps explicitly; keep the portable SQLite expression
+        # for legacy import/test databases.
+        try:
+            is_postgres = database_adapter.database_url().startswith("postgresql+")
+        except Exception:
+            is_postgres = False
+        if is_postgres:
+            sql = (
+                "DELETE FROM telegram_update_dedup "
+                "WHERE status='processed' AND first_seen_at::timestamptz "
+                "< CURRENT_TIMESTAMP - (? * INTERVAL '1 day')"
+            )
+        else:
+            sql = (
+                "DELETE FROM telegram_update_dedup "
+                "WHERE status='processed' "
+                "AND datetime(first_seen_at) < datetime('now', ?)"
+            )
+        cursor = connection.execute(sql, (keep_days,) if is_postgres else (f"-{keep_days} days",))
         return max(0, int(getattr(cursor, "rowcount", 0) or 0))
 
 

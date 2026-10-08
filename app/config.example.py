@@ -178,6 +178,7 @@ UPDATE_CHECK_INTERVAL = 60
 UPDATE_VERIFY_TLS = True
 UPDATE_MAX_ARCHIVE_MB = 1024
 UPDATE_STALE_JOB_SECONDS = 7200
+PUBLISH_STALE_JOB_SECONDS = 1800
 
 # Preferred deployment: loopback application + external HTTPS reverse proxy.
 

@@ -53,6 +53,7 @@ import user_events
 import message_journal
 import push_service
 import restore_manager
+from security_policy import PANEL_CONTENT_SECURITY_POLICY
 import registration_access
 from detached_jobs import DetachedJobError, launch_detached
 from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local
@@ -369,12 +370,7 @@ async def response_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; "
-        "img-src 'self' data: blob: https://t.me https://*.telegram.org; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline' https://telegram.org; "
-        "connect-src 'self' https://api.telegram.org https://telegram.org https://fcm.googleapis.com wss://push.services.mozilla.com; frame-ancestors 'self'"
-    )
+    response.headers["Content-Security-Policy"] = PANEL_CONTENT_SECURITY_POLICY
     secure_request = request.url.scheme == "https"
     if secure_request:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -1259,7 +1255,7 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     cabinet_logout_url = html.escape(public_path("/api/cabinet/logout"), quote=True)
     cabinet_connection_url = html.escape(public_path("/cabinet/connection"), quote=True)
     cabinet_home_url = html.escape(public_path("/cabinet"), quote=True)
-    return f"""<!doctype html><html lang="ru" data-version="{html.escape(update_manager.current_version(), quote=True)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1220"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="manifest" href="{html.escape(public_path("/cabinet/manifest.webmanifest"), quote=True)}?v={html.escape(update_manager.current_version())}"><link rel="apple-touch-icon" href="{html.escape(public_path("/static/icons/icon-192.png"), quote=True)}"><link rel="stylesheet" href="{html.escape(public_path('/static/panel.css'), quote=True)}?v={html.escape(update_manager.current_version())}><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Личный кабинет · {html.escape(str(config.SERVICE_NAME))}</title></head><body class="cabinet-page"><div class="cabinet-shell"><header class="cabinet-head"><div><div class="cabinet-brand">{html.escape(str(config.SERVICE_NAME))}</div><div class="cabinet-subtitle">Личный кабинет</div></div><button id="cabinet-logout" class="button secondary small">Выйти</button></header><main class="cabinet-main"><section class="cabinet-welcome"><div><div class="cabinet-eyebrow">Здравствуйте</div><h1>@{username_clean}</h1><p>Управляйте подпиской, копируйте ссылку подключения и код приглашения.</p></div><span class="badge {status_cls}">{status}</span></section><section class="cabinet-actions"><a class="button" href="https://t.me/{bot_username}?start=renew">🔄 Продлить подписку</a><a class="button secondary" href="{cabinet_connection_url}">📱 Как подключиться</a></section><section class="cabinet-grid"><div class="card cabinet-card cabinet-primary"><div class="cabinet-card-title"><span>📋 Моя подписка</span><span class="cabinet-online {'is-online' if online else ''}">{'● Онлайн' if online else '○ Не в сети'}</span></div><div class="cabinet-number">{remaining}</div><div class="muted">Осталось</div><div class="cabinet-facts"><div><span>До</span><b>{html.escape(expiry_text)}</b></div><div><span>Использовано</span><b>{bytes_to_gb(used)} GB</b></div><div><span>Лимит</span><b>{quota}</b></div></div></div><div class="card cabinet-card"><h2>🔗 Ссылка подписки</h2><p class="muted">Используйте её в совместимых VPN-клиентах.</p><div class="cabinet-copy"><input id="cabinet-sub-url" value="{sub_escaped}" readonly><button id="cabinet-copy" class="button">Копировать</button></div><div id="cabinet-copy-result" class="muted cabinet-result"></div></div><div class="card cabinet-card"><h2>📊 Трафик</h2><div class="cabinet-traffic"><div><span>Отдано</span><b>{bytes_to_gb(up)} GB</b></div><div><span>Скачано</span><b>{bytes_to_gb(down)} GB</b></div><div><span>Всего</span><b>{bytes_to_gb(used)} GB</b></div></div></div><div class="card cabinet-card"><h2>🎟 Код приглашения</h2><p class="muted">Приглашённый пользователь должен зарегистрироваться по коду и хотя бы один раз успешно оплатить подписку. После первой подтверждённой оплаты вы получите +10 бесплатных дней.</p><div class="cabinet-copy"><input id="cabinet-invite-code" value="{invite_code}" readonly><button id="cabinet-copy-invite" class="button">Копировать</button></div></div><div class="card cabinet-card"><h2>📱 Подключение</h2><p>Откройте ссылку подписки в VPN-клиенте или инструкции для устройства.</p><a class="button secondary" href="{cabinet_connection_url}">Инструкция по подключению</a><a class="button secondary" href="https://t.me/{bot_username}">Открыть Telegram-бота</a></div></section><section class="card cabinet-support"><h2>Нужна помощь?</h2><p class="muted">Для обращения к администратору используйте Telegram-бота.</p><a class="button" href="https://t.me/{bot_username}">💬 Открыть поддержку в Telegram</a></section></main></div><script>(function(){{const tg=window.Telegram&&window.Telegram.WebApp;try{{if(tg){{tg.ready();tg.expand();if(tg.disableVerticalSwipes)tg.disableVerticalSwipes();}}}}catch(_e){{}}const copy=document.getElementById('cabinet-copy');const input=document.getElementById('cabinet-sub-url');const result=document.getElementById('cabinet-copy-result');copy&&copy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(input.value);result.textContent='✅ Ссылка скопирована';}}catch(e){{input.select();document.execCommand('copy');result.textContent='✅ Ссылка скопирована';}}}});const inviteCopy=document.getElementById('cabinet-copy-invite');const inviteInput=document.getElementById('cabinet-invite-code');inviteCopy&&inviteCopy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(inviteInput.value);inviteCopy.textContent='✅ Скопировано';}}catch(e){{inviteInput.select();document.execCommand('copy');inviteCopy.textContent='✅ Скопировано';}}setTimeout(()=>inviteCopy.textContent='Копировать',1500);}});document.getElementById('cabinet-logout')?.addEventListener('click',async()=>{{try{{await fetch('{cabinet_logout_url}',{{method:'POST',credentials:'same-origin'}});}}finally{{location.href='{cabinet_home_url}';}}}});</script></body></html>"""
+    return f"""<!doctype html><html lang="ru" data-version="{html.escape(update_manager.current_version(), quote=True)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1220"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="manifest" href="{html.escape(public_path("/cabinet/manifest.webmanifest"), quote=True)}?v={html.escape(update_manager.current_version())}"><link rel="apple-touch-icon" href="{html.escape(public_path("/static/icons/icon-192.png"), quote=True)}"><link rel="stylesheet" href="{html.escape(public_path('/static/panel.css'), quote=True)}?v={html.escape(update_manager.current_version())}><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Личный кабинет · {html.escape(str(config.SERVICE_NAME))}</title></head><body class="cabinet-page"><div class="cabinet-shell"><header class="cabinet-head"><div><div class="cabinet-brand">{html.escape(str(config.SERVICE_NAME))}</div><div class="cabinet-subtitle">Личный кабинет</div></div><button type="button" id="cabinet-logout" class="button secondary small">Выйти</button></header><main class="cabinet-main"><section class="cabinet-welcome"><div><div class="cabinet-eyebrow">Здравствуйте</div><h1>@{username_clean}</h1><p>Управляйте подпиской, копируйте ссылку подключения и код приглашения.</p></div><span class="badge {status_cls}">{status}</span></section><section class="cabinet-actions"><a class="button" href="https://t.me/{bot_username}?start=renew">🔄 Продлить подписку</a><a class="button secondary" href="{cabinet_connection_url}">📱 Как подключиться</a></section><section class="cabinet-grid"><div class="card cabinet-card cabinet-primary"><div class="cabinet-card-title"><span>📋 Моя подписка</span><span class="cabinet-online {'is-online' if online else ''}">{'● Онлайн' if online else '○ Не в сети'}</span></div><div class="cabinet-number">{remaining}</div><div class="muted">Осталось</div><div class="cabinet-facts"><div><span>До</span><b>{html.escape(expiry_text)}</b></div><div><span>Использовано</span><b>{bytes_to_gb(used)} GB</b></div><div><span>Лимит</span><b>{quota}</b></div></div></div><div class="card cabinet-card"><h2>🔗 Ссылка подписки</h2><p class="muted">Используйте её в совместимых VPN-клиентах.</p><div class="cabinet-copy"><input id="cabinet-sub-url" value="{sub_escaped}" readonly><button type="button" id="cabinet-copy" class="button">Копировать</button></div><div id="cabinet-copy-result" class="muted cabinet-result"></div></div><div class="card cabinet-card"><h2>📊 Трафик</h2><div class="cabinet-traffic"><div><span>Отдано</span><b>{bytes_to_gb(up)} GB</b></div><div><span>Скачано</span><b>{bytes_to_gb(down)} GB</b></div><div><span>Всего</span><b>{bytes_to_gb(used)} GB</b></div></div></div><div class="card cabinet-card"><h2>🎟 Код приглашения</h2><p class="muted">Приглашённый пользователь должен зарегистрироваться по коду и хотя бы один раз успешно оплатить подписку. После первой подтверждённой оплаты вы получите +10 бесплатных дней.</p><div class="cabinet-copy"><input id="cabinet-invite-code" value="{invite_code}" readonly><button type="button" id="cabinet-copy-invite" class="button">Копировать</button></div></div><div class="card cabinet-card"><h2>📱 Подключение</h2><p>Откройте ссылку подписки в VPN-клиенте или инструкции для устройства.</p><a class="button secondary" href="{cabinet_connection_url}">Инструкция по подключению</a><a class="button secondary" href="https://t.me/{bot_username}">Открыть Telegram-бота</a></div></section><section class="card cabinet-support"><h2>Нужна помощь?</h2><p class="muted">Для обращения к администратору используйте Telegram-бота.</p><a class="button" href="https://t.me/{bot_username}">💬 Открыть поддержку в Telegram</a></section></main></div><script>(function(){{const tg=window.Telegram&&window.Telegram.WebApp;try{{if(tg){{tg.ready();tg.expand();if(tg.disableVerticalSwipes)tg.disableVerticalSwipes();}}}}catch(_e){{}}const copy=document.getElementById('cabinet-copy');const input=document.getElementById('cabinet-sub-url');const result=document.getElementById('cabinet-copy-result');copy&&copy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(input.value);result.textContent='✅ Ссылка скопирована';}}catch(e){{input.select();document.execCommand('copy');result.textContent='✅ Ссылка скопирована';}}}});const inviteCopy=document.getElementById('cabinet-copy-invite');const inviteInput=document.getElementById('cabinet-invite-code');inviteCopy&&inviteCopy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(inviteInput.value);inviteCopy.textContent='✅ Скопировано';}}catch(e){{inviteInput.select();document.execCommand('copy');inviteCopy.textContent='✅ Скопировано';}}setTimeout(()=>inviteCopy.textContent='Копировать',1500);}});document.getElementById('cabinet-logout')?.addEventListener('click',async()=>{{try{{await fetch('{cabinet_logout_url}',{{method:'POST',credentials:'same-origin'}});}}finally{{location.href='{cabinet_home_url}';}}}});</script></body></html>"""
 
 
 def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
@@ -1584,9 +1580,25 @@ def page(request: Request, title: str, body: str, active: str = "", scripts: str
 @app.exception_handler(401)
 async def unauthorized(request: Request, error: Exception):
     if request.url.path.startswith(("/api/", "/panel/api/")):
-        detail = getattr(error, "detail", "Требуется авторизация")
-        return JSONResponse({"detail": str(detail)}, status_code=401)
+        detail = str(getattr(error, "detail", "Требуется авторизация"))
+        return JSONResponse({"ok": False, "data": None, "error": {"code": "unauthorized", "message": detail}, "detail": detail}, status_code=401)
     return RedirectResponse(public_path("/login"), 303)
+
+@app.exception_handler(HTTPException)
+async def api_http_exception(request: Request, error: HTTPException):
+    if request.url.path.startswith(("/api/", "/panel/api/")):
+        detail = str(error.detail or "Запрос отклонён")
+        code = {400:"bad_request",401:"unauthorized",403:"forbidden",404:"not_found",409:"conflict",422:"validation_error",429:"rate_limited"}.get(int(error.status_code), "http_error")
+        headers = dict(error.headers or {})
+        return JSONResponse({"ok": False, "data": None, "error": {"code": code, "message": detail}, "detail": detail}, status_code=error.status_code, headers=headers)
+    raise error
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, error: Exception):
+    if request.url.path.startswith(("/api/", "/panel/api/")):
+        LOGGER.exception("Unhandled API exception method=%s path=%s", request.method, request.url.path)
+        return JSONResponse({"ok": False, "data": None, "error": {"code": "internal_error", "message": "Внутренняя ошибка панели. Подробности записаны в журнал."}, "detail": "Внутренняя ошибка панели. Подробности записаны в журнал."}, status_code=500)
+    raise error
 
 
 @app.get("/favicon.ico")
@@ -2495,7 +2507,7 @@ def users_page(
     body = f'''<header><div><h1>Пользователи</h1><div class="subtitle">Актуальные сроки, трафик, Telegram-привязки и история общения · {api_source_badge(bool(snapshot.get("stale")))}</div></div><div class="actions"><form id="subscription-refresh-form" class="inline" method="post" action="/users/refresh-subscription-links"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><button id="subscription-refresh-start" class="secondary" type="submit">↻ Обновить ссылки</button></form><a class="button secondary" href="/broadcast">✉ Массовая рассылка</a><a class="button secondary" href="/users/import-identities">Импорт привязок</a><form class="inline" method="post" action="/users/import-to-3xui" onsubmit="return confirm('Синхронизировать зарегистрированных Telegram-пользователей с текущим 3x-ui?')"><button class="secondary" type="submit">⬆ Загрузить в 3x-ui</button></form><a class="button" href="/users/new">＋ Создать пользователя</a></div></header><section id="subscription-refresh-panel" class="card subscription-refresh-panel" style="display:none"><div class="section-title"><h2>Обновление ссылок подписки</h2><span id="subscription-refresh-badge" class="badge">Ожидание</span></div><div class="subscription-refresh-progress"><div class="progress large"><span id="subscription-refresh-progress-bar" style="width:0%"></span></div><div class="progress-meta"><span id="subscription-refresh-progress-text">Подготовка…</span><span id="subscription-refresh-progress-percent">0%</span></div></div><div class="subscription-refresh-stats"><span>Обработано <b id="subscription-refresh-processed">0</b></span><span>Отправлено <b id="subscription-refresh-delivered">0</b></span><span>Пропущено <b id="subscription-refresh-skipped">0</b></span><span>Ошибок <b id="subscription-refresh-failed">0</b></span></div><div class="subscription-refresh-current" id="subscription-refresh-current"></div><details class="subscription-refresh-log" open><summary>Журнал выполнения</summary><pre id="subscription-refresh-log-body">Ожидание запуска…</pre></details></section><div id="subscription-refresh-status" class="notice" style="display:none"></div>{source_notice}
 
 <div class="toolbar"><div class="toolbar-filter" role="search" data-user-filter-form data-initial-status="{html.escape(status, quote=True)}" data-initial-sort="{html.escape(sort, quote=True)}" data-initial-order="{html.escape(order, quote=True)}" data-initial-query="{html.escape(q, quote=True)}" autocomplete="off"><label class="sr-only" for="user-filter-search">Поиск пользователя</label><input id="user-filter-search" value="{html.escape(q)}" placeholder="Имя, TG ID, @username или email" type="search" inputmode="search" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-autocomplete="none" enterkeyhint="search" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" data-purpose="user-search" data-testid="user-search"><select name="status" data-filter-status><option value="all">Все</option><option value="active" {'selected' if status=='active' else ''}>Активные</option><option value="expired" {'selected' if status=='expired' else ''}>Истёкшие</option><option value="blocked" {'selected' if status=='blocked' else ''}>Заблокированные</option><option value="online" {'selected' if status=='online' else ''}>Сейчас онлайн</option></select><select name="sort" data-filter-sort><option value="remaining" {'selected' if sort=='remaining' else ''}>По остатку срока</option><option value="last_online" {'selected' if sort=='last_online' else ''}>По последнему онлайн</option><option value="traffic" {'selected' if sort=='traffic' else ''}>По объёму трафика</option><option value="quota" {'selected' if sort=='quota' else ''}>По остатку лимита</option><option value="name" {'selected' if sort=='name' else ''}>По имени</option><option value="registration" {'selected' if sort=='registration' else ''}>По дате регистрации</option></select><select name="order" data-filter-order><option value="asc" {'selected' if order=='asc' else ''}>По возрастанию</option><option value="desc" {'selected' if order=='desc' else ''}>По убыванию</option></select></div></div><div class="users-list-summary"><span id="users-visible-count">0</span> из <span id="users-total-count">{len(cards)}</span> пользователей</div><div class="actions" data-user-pagination data-initial-page="{max(1, page_number)}"><button type="button" class="secondary" data-page-prev>← Назад</button><span data-page-label></span><button type="button" class="secondary" data-page-next>Далее →</button></div><div class="user-list">{''.join(cards) or '<div class="card">Пользователи не найдены.</div>'}</div>'''
-    scripts = f'<script src="/static/users.js?v={_panel_asset_version()}" defer></script>'
+    scripts = f'<script src="{html.escape(public_path("/static/users.js"), quote=True)}?v={_panel_asset_version()}" defer></script>'
     # This operation now has a dedicated navigation section.  Strip the old
     # control and persistent completed-status card from the Users workspace.
     body = re.sub(
@@ -3543,11 +3555,13 @@ def messages_page(
     media_limit = max(1, int(getattr(config, "CHAT_MEDIA_MAX_MB", 100)))
     compose = ""
     if selected > 0:
-        compose = f'''<form id="messages-compose-form" class="chat-compose messages-compose" method="post" action="/users/{selected}/message" enctype="multipart/form-data"><div class="chat-compose-main"><textarea id="messages-compose-text" name="message" maxlength="4096" rows="3" placeholder="Напишите сообщение…"></textarea><label class="chat-attachment"><span>＋ Фото или видео</span><input name="media" type="file" accept="image/*,video/*"><small>До {media_limit} МБ; подпись к медиа — до 1024 символов.</small></label><div id="messages-compose-status" class="notice" role="status" aria-live="polite" hidden></div></div><button id="messages-compose-send" type="submit">Отправить</button></form>'''
+        compose = f'''<form id="messages-compose-form" data-no-navigation="1" data-ajax-form="1" class="chat-compose messages-compose" method="post" action="/users/{selected}/message" enctype="multipart/form-data"><div class="chat-compose-main"><textarea id="messages-compose-text" name="message" maxlength="4096" rows="3" placeholder="Напишите сообщение…"></textarea><label class="chat-attachment"><span>＋ Фото или видео</span><input name="media" type="file" accept="image/*,video/*"><small>До {media_limit} МБ; подпись к медиа — до 1024 символов.</small></label><div id="messages-compose-status" class="notice" role="status" aria-live="polite" hidden></div><button id="messages-compose-retry" class="button secondary small" type="button" hidden>Повторить отправку</button></div><button id="messages-compose-send" type="submit">Отправить</button></form>'''
     body = f'''<header class="page-header"><div><h1>Сообщения</h1><div class="subtitle">Входящие, исходящие и служебные события · {range_start}–{range_end} из {total_events}</div></div><div class="actions">{" ".join(direction_filters)} {" ".join(type_filters)} {card_link}</div></header>
 <div class="card messages-toolbar"><form method="get" action="/messages"><input type="hidden" name="tg_id" value="{selected}"><input type="hidden" name="direction" value="{html.escape(direction)}"><input type="hidden" name="message_kind" value="{html.escape(message_kind)}"><label>Поиск <input type="search" name="q" value="{html.escape(q)}" placeholder="Текст, @username или Telegram ID"></label><label>На странице <select name="per_page"><option value="25" {"selected" if per_page == 25 else ""}>25</option><option value="50" {"selected" if per_page == 50 else ""}>50</option><option value="100" {"selected" if per_page == 100 else ""}>100</option></select></label><button class="button small" type="submit">Искать</button></form></div>
 <div class="messages-layout messages-layout-modern" data-message-live-feed="1"><section class="card messages-users"><div class="compact-panel-head"><div><strong>Диалоги</strong><span class="muted">Нажмите пользователя для открытия чата</span></div><span class="badge" data-message-dialog-count>{len(participants)}</span></div><label class="messages-search"><span>⌕</span><input type="search" placeholder="Фильтр списка пользователей" data-message-search autocomplete="off"></label><div class="messages-users-list" data-message-list>{"".join(user_rows) or '<p class="muted">Сообщений ещё нет.</p>'}</div></section>
 <section class="card messages-history"><div class="chat-head"><div><strong>@{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div>{card_link}</div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
+    messages_path_js = json.dumps(public_path("/messages"))
+    messages_feed_path_js = json.dumps(public_path("/api/panel/messages/feed"))
     scripts = f'''<script>(function(){{
 const list=document.querySelector('[data-message-list]');
 const search=document.querySelector('[data-message-search]');
@@ -3556,6 +3570,9 @@ const compose=document.getElementById('messages-compose-form');
 const composeText=document.getElementById('messages-compose-text');
 const composeSend=document.getElementById('messages-compose-send');
 const composeStatus=document.getElementById('messages-compose-status');
+const composeRetry=document.getElementById('messages-compose-retry');
+const messagesPath=__MESSAGES_PATH__;
+let lastFailedPayload=null;
 const selected=Number({selected})||0;
 const activeDirection='{direction}';
 const activeKind='{message_kind}';
@@ -3564,18 +3581,20 @@ let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||('id_'+tid)).replace(/^@/,'');if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href='{public_path('/messages')}?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent='@'+username;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||('id_'+tid)).replace(/^@/,'');if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent='@'+username;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
 function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.textContent=direction+' · '+kind+' · @'+String(item.display_username||item.username||('id_'+item.tg_id)).replace(/^@/,'')+' · '+String(item.created_at||'')+' · #'+id+' · '+status;const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
-function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');}}
-async function poll(){{if(stopped||document.hidden){{timer=setTimeout(poll,5000);return;}}if(inflight){{timer=setTimeout(poll,1500);return;}}inflight=true;try{{const url=new URL('{public_path('/api/panel/messages/feed')}',window.location.origin);url.searchParams.set('after_id',String(globalAfterId));if(selected)url.searchParams.set('tg_id',String(selected));const response=await fetch(url.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();globalAfterId=Math.max(globalAfterId,Number(data.next_after_id)||globalAfterId);updateUnread(data.unread||{{}});for(const item of (Array.isArray(data.dialogs)?data.dialogs:[]))upsertDialog(item);appendSelected(data.selected_events||[]);}}catch(error){{console.debug('[FargoVPN] messages live feed',error);}}finally{{inflight=false;timer=setTimeout(poll,3000);}}}}
+function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
+async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
+async function poll(){{if(stopped||document.hidden){{timer=setTimeout(poll,5000);return;}}if(inflight){{timer=setTimeout(poll,1500);return;}}inflight=true;try{{const url=new URL(__MESSAGES_FEED_PATH__,document.baseURI);url.searchParams.set('after_id',String(globalAfterId));if(selected)url.searchParams.set('tg_id',String(selected));const response=await fetch(url.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();globalAfterId=Math.max(globalAfterId,Number(data.next_after_id)||globalAfterId);updateUnread(data.unread||{{}});for(const item of (Array.isArray(data.dialogs)?data.dialogs:[]))upsertDialog(item);appendSelected(data.selected_events||[]);}}catch(error){{console.debug('[FargoVPN] messages live feed',error);}}finally{{inflight=false;timer=setTimeout(poll,3000);}}}}
 if(search)search.addEventListener('input',()=>{{clearTimeout(filterTimer);filterTimer=setTimeout(applySearch,80);}});
 if(composeText)composeText.addEventListener('keydown',(event)=>{{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){{event.preventDefault();compose?.requestSubmit();}}}});
-if(compose)compose.addEventListener('submit',async(event)=>{{event.preventDefault();if(composeSend?.disabled)return;const text=String(composeText?.value||'');const media=compose.querySelector('input[type=file]');if(!text.trim()&&!(media?.files?.length)){{setStatus('Введите сообщение или выберите фото/видео');composeText?.focus();return;}}composeSend.disabled=true;setStatus('Отправка…','good');try{{const response=await fetch(compose.action,{{method:'POST',body:new FormData(compose),credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}if(!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+response.status));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}compose.reset();setStatus('Сообщение отправлено','good');composeText?.focus();}}catch(error){{setStatus(error?.message||'Не удалось отправить сообщение');}}finally{{composeSend.disabled=false;}}}});
+if(compose)compose.addEventListener('submit',async(event)=>{{event.preventDefault();if(composeSend?.disabled)return;const media=compose.querySelector('input[type=file]');if(!String(composeText?.value||'').trim()&&!(media?.files?.length)){{setStatus('Введите сообщение или выберите фото/видео');composeText?.focus();return;}}lastFailedPayload=new FormData(compose);await doSend(lastFailedPayload);}});
+if(composeRetry)composeRetry.addEventListener('click',async()=>{{if(lastFailedPayload)await doSend(lastFailedPayload);}});
 document.addEventListener('visibilitychange',()=>{{if(!document.hidden){{clearTimeout(timer);poll();}}}});
 window.addEventListener('pagehide',()=>{{stopped=true;clearTimeout(timer);}},{{once:true}});
 window.__fargovpnUnreadMap=new Map();applySearch();setTimeout(poll,1200);
-}})();</script>'''
+}})();</script>'''.replace('__MESSAGES_PATH__', messages_path_js).replace('__MESSAGES_FEED_PATH__', messages_feed_path_js)
     return page(request, "Сообщения", body, "messages", scripts)
 
 
@@ -4354,15 +4373,108 @@ def _service_unit(service: str) -> str:
         "web": "vpn-service-web",
         "backup": "vpn-service-backup",
         "reminders": "vpn-service-reminders",
-        "update": "vpn-service-update*",
     }.get(service, "vpn-service-bot")
 
 
-def _read_service_logs(service: str, lines: int) -> str:
-    unit = _service_unit(service)
-    safe_lines = max(50, min(int(lines), 2000))
-    return shell(["journalctl", "-u", unit, "-n", str(safe_lines), "--no-pager"])
+def _log_source(service: str) -> tuple[str, str | None]:
+    base = Path("/var/lib/vpn-service/updates")
+    return {
+        "app": ("file", "/var/log/vpn_bot.log"),
+        "update": ("file", str(base / "update.log")),
+        "github-publish": ("file", str(base / "publish" / "publish.log")),
+        "github-launcher": ("file", str(base / "publish" / "launcher.log")),
+        "push": ("push", None),
+        "bot": ("journal", None),
+        "web": ("journal", None),
+        "backup": ("journal", None),
+        "reminders": ("journal", None),
+    }.get(service, ("journal", None))
 
+
+def _read_service_log_result(service: str, lines: int, level: str = "", query: str = "") -> dict[str, Any]:
+    safe_lines = max(50, min(int(lines), 2000))
+    kind, path = _log_source(service)
+    status = "ok"
+    detail = ""
+    text = ""
+    source = path or _service_unit(service)
+    if kind == "file":
+        from log_reader import tail_lines
+        target = Path(path or "")
+        try:
+            raw, truncated = tail_lines(target, safe_lines)
+            text = "".join(raw)
+            status = "empty" if not text else "ok"
+            detail = "Файл пуст." if not text else "Файл прочитан."
+        except FileNotFoundError:
+            status = "not_found"
+            detail = f"Файл не найден: {target}"
+            text = detail
+            truncated = False
+        except PermissionError:
+            status = "permission"
+            detail = f"Нет прав на чтение: {target}"
+            text = detail
+            truncated = False
+        except OSError as exc:
+            status = "error"
+            detail = f"Не удалось прочитать файл: errno={exc.errno}"
+            text = detail
+            truncated = False
+    elif kind == "push":
+        try:
+            rows = push_service.panel_logs(config.DB_PATH, safe_lines, "")
+            text = "\n".join(f"{item.get('created_at','')} [PUSH] {item.get('event','')} {item.get('details','')}" for item in rows)
+            status = "empty" if not text else "ok"
+            detail = "Push-журнал пуст." if not text else f"Получено записей: {len(rows)}."
+        except Exception as exc:
+            status = "error"
+            detail = f"Журнал Push недоступен: {type(exc).__name__}: {exc}"
+            text = detail
+            truncated = False
+    else:
+        try:
+            result = subprocess.run(
+                ["journalctl", "-u", _service_unit(service), "-n", str(safe_lines), "--no-pager", "-o", "cat"],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            text = ((result.stdout or "") + (result.stderr or ""))[-40000:]
+            if result.returncode != 0 and not text.strip():
+                status = "error"
+                detail = f"journalctl завершился с кодом {result.returncode}."
+                text = detail
+            elif not text.strip():
+                status = "empty"
+                detail = f"Журнал systemd { _service_unit(service) } пуст."
+            else:
+                status = "ok"
+                detail = f"Прочитан systemd-журнал {_service_unit(service)}."
+            truncated = False
+        except FileNotFoundError:
+            status = "error"
+            detail = "Команда journalctl не найдена."
+            text = detail
+            truncated = False
+        except Exception as exc:
+            status = "error"
+            detail = f"Журнал systemd недоступен: {type(exc).__name__}: {exc}"
+            text = detail
+            truncated = False
+    if level:
+        text = "\n".join(line for line in text.splitlines() if level.lower() in line.lower())
+    if query:
+        needle = query.lower()
+        text = "\n".join(line for line in text.splitlines() if needle in line.lower())
+    if not text:
+        status = "empty"
+        detail = "После применения фильтров подходящих строк нет."
+        text = "Журнал пуст после применения фильтров.\n" + detail
+    text = str(text)
+    return {"status": status, "detail": detail, "source": source, "kind": kind, "text": text, "truncated": bool(locals().get("truncated", False))}
+
+
+def _read_service_logs(service: str, lines: int, level: str = "", query: str = "") -> str:
+    return str(_read_service_log_result(service, lines, level, query).get("text") or "")
 
 
 @app.get("/audit", response_class=HTMLResponse)
@@ -4474,23 +4586,51 @@ def backup_live_api(request: Request):
     return data
 
 
-@app.get("/api/logs", response_class=JSONResponse)
-def logs_api(request: Request, service: str = "bot", lines: int = 300):
+@app.post("/api/panel/client-errors", response_class=JSONResponse)
+async def client_errors_api(request: Request):
     require_auth(request)
-    service = service if service in {"bot", "web", "backup", "reminders", "update", "backup-live"} else "bot"
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    kind = str(payload.get("kind") or "unknown")[:64]
+    message = str(payload.get("message") or "")[:3000]
+    source = str(payload.get("source") or "")[:500]
+    line = int(payload.get("line") or 0) if str(payload.get("line") or "0").isdigit() else 0
+    column = int(payload.get("column") or 0) if str(payload.get("column") or "0").isdigit() else 0
+    LOGGER.error("browser-js-error kind=%s message=%s source=%s line=%s column=%s", kind, message, source, line, column)
+    return {"ok": True, "data": {"recorded": True}, "recorded": True}
+
+@app.get("/api/logs", response_class=JSONResponse)
+def logs_api(request: Request, service: str = "app", lines: int = 300, level: str = "", q: str = ""):
+    require_auth(request)
+    service = service if service in {"app", "bot", "web", "backup", "reminders", "update", "github-publish", "github-launcher", "push", "backup-live"} else "app"
     safe_lines = max(50, min(int(lines), 2000))
     if service == "backup-live":
-        return {"service": service, "lines": safe_lines, "live": read_live_state()}
-    return {"service": service, "lines": safe_lines, "text": _read_service_logs(service, safe_lines)}
+        return {"ok": True, "service": service, "lines": safe_lines, "live": read_live_state()}
+    result = _read_service_log_result(service, safe_lines, level, q)
+    return {"ok": True, "service": service, "lines": safe_lines, "level": str(level or "")[:40], "q": str(q or "")[:200], **result}
+
+
+@app.get("/api/logs/download")
+def logs_download(request: Request, service: str = "app", lines: int = 1000, level: str = "", q: str = ""):
+    require_auth(request)
+    service = service if service in {"app", "bot", "web", "backup", "reminders", "update", "github-publish", "github-launcher", "push"} else "app"
+    safe_lines = max(50, min(int(lines), 2000))
+    text = _read_service_logs(service, safe_lines, level, q)
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(text, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="fargovpn-{service}.log"'})
 
 
 @app.get("/logs", response_class=HTMLResponse)
-def logs(request: Request, service: str = "bot", lines: int = 300):
+def logs(request: Request, service: str = "app", lines: int = 300, level: str = "", q: str = ""):
     require_auth(request)
-    service = service if service in {"bot", "web", "backup", "reminders", "update", "backup-live"} else "bot"
+    service = service if service in {"app", "bot", "web", "backup", "reminders", "update", "github-publish", "github-launcher", "push", "backup-live"} else "app"
     lines = max(50, min(lines, 2000))
     initial_live = read_live_state() if service == "backup-live" else {}
-    initial_text = "" if service == "backup-live" else _read_service_logs(service, lines)
+    initial_text = ""
     def selected(key: str) -> str:
         return "selected" if service == key else ""
     state = str(initial_live.get("status") or "idle")
@@ -4503,132 +4643,12 @@ def logs(request: Request, service: str = "bot", lines: int = 300):
         if isinstance(item, dict):
             event_html.append('<div class="backup-live-event"><span>'+html.escape(str(item.get("at") or ""))+'</span><b>'+html.escape(str(item.get("phase") or ""))+'</b><span>'+html.escape(str(item.get("message") or ""))+'</span></div>')
     body = f'''<header><div><h1>Журналы</h1><div class="subtitle">Последние сообщения systemd · для бэкапов доступен отдельный лёгкий live-процесс</div></div></header>
-<div class="toolbar"><div class="logs-toolbar"><label class="logs-filter"><span>Журнал</span><select id="logs-service" name="service"><option value="bot" {selected('bot')}>Telegram-бот</option><option value="web" {selected('web')}>Веб-панель</option><option value="backup" {selected('backup')}>Бэкапы</option><option value="backup-live" {selected('backup-live')}>Процесс бэкапа · live</option><option value="reminders" {selected('reminders')}>Напоминания</option><option value="update" {selected('update')}>Обновления</option></select></label><label class="logs-filter"><span>Строк</span><input id="logs-lines" type="number" name="lines" value="{lines}" min="50" max="2000"></label><span id="logs-loading" class="muted" aria-live="polite"></span></div></div>
+<div class="toolbar"><div class="logs-toolbar"><label class="logs-filter"><span>Журнал</span><select id="logs-service" name="service"><option value="app" {selected('app')}>/var/log/vpn_bot.log</option><option value="bot" {selected('bot')}>Telegram-бот · systemd</option><option value="web" {selected('web')}>Веб-панель · systemd</option><option value="update" {selected('update')}>Обновление · live</option><option value="github-publish" {selected('github-publish')}>Загрузка на GitHub</option><option value="github-launcher" {selected('github-launcher')}>GitHub launcher</option><option value="push" {selected('push')}>Push / Service Worker</option><option value="backup" {selected('backup')}>Бэкапы</option><option value="backup-live" {selected('backup-live')}>Процесс бэкапа · live</option><option value="reminders" {selected('reminders')}>Напоминания</option></select></label><label class="logs-filter"><span>Строк</span><select id="logs-lines"><option value="100" {"selected" if lines==100 else ""}>100</option><option value="500" {"selected" if lines==500 else ""}>500</option><option value="1000" {"selected" if lines==1000 else ""}>1000</option><option value="2000" {"selected" if lines>=2000 else ""}>2000</option></select></label><label class="logs-filter"><span>Уровень</span><select id="logs-level"><option value="" {"selected" if not level else ""}>Все</option><option value="ERROR">ERROR</option><option value="WARNING">WARNING</option><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option></select></label><label class="logs-filter"><span>Фильтр</span><input id="logs-query" value="{html.escape(str(q or ""), quote=True)}" placeholder="текст / job-id"></label><button id="logs-refresh" type="button" class="secondary">Обновить</button><label class="logs-check"><input id="logs-auto" type="checkbox"> авто 2 сек</label><span id="logs-loading" class="muted" aria-live="polite"></span><button id="logs-retry" type="button" class="button secondary small" hidden>Повторить</button><a id="logs-download" class="button secondary small" href="{html.escape(public_path('/api/logs/download?service=app&lines=300'), quote=True)}" download>Скачать</a></div></div>
 <div id="backup-live-panel" class="card" style="display:{'block' if service == 'backup-live' else 'none'}"><div class="section-title"><h2>Процесс текущего/последнего бэкапа</h2><span id="backup-live-status" class="badge">{html.escape(state)}</span></div><div class="muted" id="backup-live-archive">Архив: {html.escape(archive_name)}</div><div class="muted" id="backup-live-phase" style="margin-top:6px">Этап: {phase}</div><div class="progress large" style="margin-top:12px"><span id="backup-live-progress-bar" style="width:{progress}%"></span></div><div class="progress-meta"><span id="backup-live-progress-text">{progress}%</span><span>опрос 1 сек. только при открытом live-разделе</span></div><div id="backup-live-events" class="backup-live-events">{''.join(event_html) or '<div class="muted">Событий пока нет.</div>'}</div></div>
-<pre id="logs-output" class="auto-scroll-bottom" style="display:{'none' if service == 'backup-live' else 'block'}">{html.escape(initial_text)}</pre>'''
+<pre id="logs-output" class="auto-scroll-bottom" style="display:{'none' if service == 'backup-live' else 'block'}">{'Нажмите «Обновить» или дождитесь автоматической загрузки…' if service != 'backup-live' else ''}</pre>'''
     live_api_url = json.dumps(public_path("/api/backup/live"))
-    logs_api_url = json.dumps(public_path("/api/logs"))
-    script = """<script>
-(function(){
-  const select=document.getElementById('logs-service');
-  const lines=document.getElementById('logs-lines');
-  const output=document.getElementById('logs-output');
-  const panel=document.getElementById('backup-live-panel');
-  const loading=document.getElementById('logs-loading');
-  const status=document.getElementById('backup-live-status');
-  const archive=document.getElementById('backup-live-archive');
-  const phase=document.getElementById('backup-live-phase');
-  const bar=document.getElementById('backup-live-progress-bar');
-  const text=document.getElementById('backup-live-progress-text');
-  const events=document.getElementById('backup-live-events');
-  const liveUrl=LIVE_URL;
-  const logsUrl=LOGS_URL;
-  let seq=0;
-  let timer=0;
-  let lastLiveUpdate='';
-  let liveErrors=0;
-
-  function renderLive(d){
-    const updateKey=String(d&&d.updated_at||'');
-    if(updateKey && updateKey===lastLiveUpdate)return;
-    lastLiveUpdate=updateKey;
-    const st=String(d&&d.status||'idle');
-    const p=Math.max(0,Math.min(100,Number(d&&d.progress)||0));
-    if(status){
-      status.textContent=st==='success'?'Завершён':st==='partial'?'Частично':st==='error'?'Ошибка':(['running','created','delivering','retry'].includes(st)?'Выполняется':'Ожидание');
-      status.className='badge '+(st==='success'?'good':st==='error'?'bad':st==='partial'?'warn':'');
-    }
-    if(archive){
-      const n=String(d&&d.archive||'').split('/').pop();
-      archive.textContent='Архив: '+(n||'—');
-    }
-    if(phase)phase.textContent='Этап: '+String(d&&d.phase||'—');
-    if(bar)bar.style.width=p+'%';
-    if(text)text.textContent=p+'%';
-    if(events){
-      events.textContent='';
-      const list=Array.isArray(d&&d.events)?d.events.slice(-60):[];
-      if(!list.length){
-        events.textContent=st==='idle'?'Бэкап ещё не запускался — новых событий нет.':'Событий пока нет.';
-      }else{
-        list.forEach(item=>{
-          const row=document.createElement('div');
-          row.className='backup-live-event';
-          const at=document.createElement('span');
-          at.textContent=String(item&&item.at||'');
-          const ph=document.createElement('b');
-          ph.textContent=String(item&&item.phase||'');
-          const msg=document.createElement('span');
-          msg.textContent=String(item&&item.message||'');
-          row.append(at,ph,msg);
-          events.appendChild(row);
-        });
-        events.scrollTop=events.scrollHeight;
-      }
-    }
-  }
-
-  async function load(){
-    if(!select)return;
-    const mine=++seq;
-    const isLive=select.value==='backup-live';
-    if(panel)panel.style.display=isLive?'block':'none';
-    if(output)output.style.display=isLive?'none':'block';
-    let value=Number(lines&&lines.value||300);
-    if(!Number.isFinite(value))value=300;
-    value=Math.max(50,Math.min(2000,Math.trunc(value)));
-    if(lines)lines.value=String(value);
-    clearTimeout(timer);
-
-    try{
-      if(loading)loading.textContent='Загрузка…';
-      if(isLive){
-        const r=await fetch(liveUrl,{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(15000),headers:{Accept:'application/json'}});
-        if(!r.ok)throw new Error('HTTP '+r.status);
-        const d=await r.json();
-        if(mine!==seq)return;
-        liveErrors=0;
-        renderLive(d);
-      }else{
-        const r=await fetch(logsUrl+'?service='+encodeURIComponent(select.value)+'&lines='+encodeURIComponent(value),{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(15000),headers:{Accept:'application/json'}});
-        if(!r.ok)throw new Error('HTTP '+r.status);
-        const d=await r.json();
-        if(mine!==seq)return;
-        if(output)output.textContent=String(d.text||'Лог пуст или пока не создан.');
-        requestAnimationFrame(()=>{if(output)output.scrollTop=output.scrollHeight;});
-      }
-    }catch(e){
-      if(mine===seq){
-        if(isLive){
-          liveErrors+=1;
-          const message='Live-журнал недоступен: '+(e&&e.message||e)+'; повтор через '+(liveErrors>=3?'5':'2')+' сек.';
-          if(status){status.textContent='Недоступен';status.className='badge bad';}
-          if(phase)phase.textContent='Этап: live · '+message;
-          if(events)events.textContent=message;
-        }else if(output){
-          output.textContent='Не удалось загрузить журнал: '+(e.message||e);
-        }
-      }
-    }finally{
-      if(mine===seq&&loading)loading.textContent='';
-      if(isLive)timer=setTimeout(load,document.hidden?10000:(liveErrors>=3?5000:1000));
-    }
-  }
-
-  select?.addEventListener('change',load);
-  lines?.addEventListener('change',load);
-  lines?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();load();}});
-  document.addEventListener('visibilitychange',()=>{
-    if(select?.value==='backup-live'){
-      clearTimeout(timer);
-      if(!document.hidden)load();
-    }
-  });
-  load();
-})();
-</script>""".replace("LIVE_URL", live_api_url).replace("LOGS_URL", logs_api_url)
-
-    return page(request,"Журналы",body,"logs",script)
+    script = f'<script src="{html.escape(public_path("/static/logs.js"), quote=True)}?v={_panel_asset_version()}" defer></script>'
+    return page(request, "Журналы", body, "logs", script)
 
 
 def replace_assignment(text: str, name: str, value: Any) -> str:
@@ -4813,13 +4833,14 @@ def settings(request: Request):
       <div class="setting"><label>Интервал проверки, секунд</label><input type="number" name="update_check_interval" value="{int(getattr(config, 'UPDATE_CHECK_INTERVAL', 60))}" min="15" max="86400"></div>
       <div class="setting"><label>Максимальный архив, МБ</label><input type="number" name="update_max_archive_mb" value="{int(getattr(config, 'UPDATE_MAX_ARCHIVE_MB', 1024))}" min="64" max="4096"></div>
       <div class="setting"><label>Считать задачу зависшей через, сек.</label><input type="number" name="update_stale_job_seconds" value="{int(getattr(config, 'UPDATE_STALE_JOB_SECONDS', 7200))}" min="900" max="86400"></div>
+      <div class="setting"><label>Считать публикацию GitHub зависшей через, сек.</label><input type="number" name="publish_stale_job_seconds" value="{int(getattr(config, 'PUBLISH_STALE_JOB_SECONDS', 1800))}" min="300" max="86400"></div>
       <a class="button secondary" href="{html.escape(public_path("/updates"), quote=True)}">Открыть центр обновлений</a>
     </div>
   </div>
   </section>
     ''' if publisher else ""
 
-    panel_push_script = f'<script src="/static/push.js?v={_panel_asset_version()}" defer></script>'
+    panel_push_script = f'<script src="{html.escape(public_path("/static/push.js"), quote=True)}?v={_panel_asset_version()}" defer></script>'
 
     xui_panel_href = html.escape(
         str(getattr(config, "XUI_PANEL_URL", "") or getattr(config, "BASE_URL", "")).rstrip("/"),
@@ -5041,7 +5062,7 @@ def settings(request: Request):
     <button type="submit">Сохранить настройки</button>
   </div>
 </form>
-<script src="/static/settings.js?v={_panel_asset_version()}" defer></script>
+<script src="{html.escape(public_path("/static/settings.js"), quote=True)}?v={_panel_asset_version()}" defer></script>
 '''
     return page(request, "Настройки", body, "settings", scripts=panel_push_script)
 
@@ -5348,6 +5369,7 @@ def _save_settings(request: Request, form):
         "UPDATE_VERIFY_TLS": True,
         "UPDATE_MAX_ARCHIVE_MB": _form_int(form, "update_max_archive_mb", 1024, 64, 4096, "Размер архива обновления") if github_configurable else int(getattr(config, "UPDATE_MAX_ARCHIVE_MB", 1024)),
         "UPDATE_STALE_JOB_SECONDS": _form_int(form, "update_stale_job_seconds", 7200, 900, 86_400, "Тайм-аут зависшей задачи") if github_configurable else int(getattr(config, "UPDATE_STALE_JOB_SECONDS", 7200)),
+        "PUBLISH_STALE_JOB_SECONDS": _form_int(form, "publish_stale_job_seconds", 1800, 300, 86_400, "Тайм-аут зависшей публикации GitHub") if github_configurable else int(getattr(config, "PUBLISH_STALE_JOB_SECONDS", 1800)),
         "BACKUP_KEEP_DAYS": _form_int(form, "backup_keep_days", 14, 1, 365, "Хранение бэкапов"),
         "BACKUP_INTERVAL_DAYS": _form_int(form, "backup_interval_days", 3, 1, 30, "Интервал бэкапов"),
         "BACKUP_RETRY_INTERVAL_SECONDS": _form_int(form, "backup_retry_interval_seconds", 900, 60, 86_400, "Повтор доставки бэкапа"),
@@ -5436,19 +5458,49 @@ def updates_publish_status_api(request: Request, job_id: str = ""):
     requested = str(job_id or "").strip()
     if requested and str(status.get("job_id") or "") != requested:
         return JSONResponse({"ok": False, "detail": "Задача публикации не найдена", "state": status.get("state", "idle")}, status_code=404)
-    return {"ok": True, **status, "busy": update_manager.publish_job_busy(status)}
+    return {"ok": True, **status, "busy": update_manager.publish_job_busy(status), "output": update_manager.publish_log_tail(160)}
+
+
+@app.get("/api/updates/publish-history")
+def updates_publish_history_api(request: Request, limit: int = 20):
+    require_auth(request)
+    if not can_publish_update(request):
+        raise HTTPException(403, "История публикаций доступна только из основной панели")
+    return {"ok": True, "items": update_manager.publish_history(max(1, min(int(limit), 50)))}
 
 
 @app.get("/api/updates/publish-log")
-def updates_publish_log_api(request: Request):
+def updates_publish_log_api(request: Request, lines: int = 1000):
     require_auth(request)
     if not can_publish_update(request):
         raise HTTPException(403, "Журнал публикации доступен только из основной панели")
-    path = update_manager.update_dir() / "publish" / "launcher.log"
-    if not path.is_file():
-        return PlainTextResponse("Журнал публикации пока пуст.")
-    return FileResponse(path, media_type="text/plain; charset=utf-8", filename="fargovpn-github-publish.log")
+    from log_reader import tail_lines
+    chunks=[]
+    for path in (update_manager.publish_log_path(), update_manager.update_dir() / "publish" / "launcher.log"):
+        try:
+            text=''.join(tail_lines(path, max(50,min(int(lines),2000)), 2*1024*1024)[0]).strip()
+            if text: chunks.append(f"--- {path.name} ---\n{text}")
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            chunks.append(f"--- {path.name} ---\nНет прав на чтение: {exc}")
+        except OSError as exc:
+            chunks.append(f"--- {path.name} ---\nЖурнал недоступен: errno={exc.errno}")
+    return PlainTextResponse('\n\n'.join(chunks) or "Журнал публикации пока пуст.", media_type="text/plain; charset=utf-8")
 
+
+@app.post("/api/updates/publish-cancel")
+def updates_publish_cancel(request: Request, job_id: str = ""):
+    require_auth(request)
+    if not can_publish_update(request):
+        raise HTTPException(403, "Отмена публикации доступна только из основной панели")
+    job_id = str(job_id or request.query_params.get("job_id") or "").strip()
+    status = update_manager.read_publish_status()
+    if not job_id or str(status.get("job_id") or "") != job_id or not update_manager.publish_job_busy(status):
+        return JSONResponse({"ok": False, "detail": "Публикация уже завершена или не найдена"}, status_code=409)
+    update_manager.request_publish_cancel(job_id)
+    update_manager.append_publish_log(job_id, "Отправлен запрос на отмену публикации")
+    return JSONResponse({"ok": True, "job_id": job_id}, status_code=202)
 
 @app.get("/api/updates/status")
 def updates_status_api(request: Request):
@@ -5591,7 +5643,7 @@ def updates_page(request: Request):
         published_name = html.escape(str(published_update.get("filename") or "архив"))
         apply_form = (
             f'<div class="notice good">В GitHub опубликована версия <strong>{published_version}</strong>. Архив сохранён на панели и ещё не установлен: <span class="code">{published_name}</span>.</div>'
-            f'<form id="apply-update-form" method="post" action="{html.escape(public_path("/updates/apply"), quote=True)}">'
+            f'<form id="apply-update-form" data-no-navigation="1" data-ajax-form="1" method="post" action="{html.escape(public_path("/updates/apply"), quote=True)}">'
             f'<button id="apply-update-button" data-confirm="Установить опубликованную версию {published_version} и автоматически перезапустить службы?" {"disabled" if busy else ""}>'
             f'Установить опубликованную версию {published_version}</button></form>'
         )
@@ -5602,7 +5654,7 @@ def updates_page(request: Request):
             'Установить обновление</button></form>'
         )
     else:
-        apply_form = f'<form id="check-updates-form" method="post" action="{html.escape(public_path("/updates/check"), quote=True)}"><button id="check-updates-button" class="secondary" type="submit">Проверить сейчас</button><div id="check-updates-status" class="muted" aria-live="polite"></div></form>'
+        apply_form = f'<form id="check-updates-form" data-no-navigation="1" data-ajax-form="1" method="post" action="{html.escape(public_path("/updates/check"), quote=True)}"><button id="check-updates-button" class="secondary" type="submit">Проверить сейчас</button><div id="check-updates-status" class="muted" aria-live="polite"></div></form>'
     manual_block = ""
     if publisher:
         token_fingerprint = hashlib.sha256(str(getattr(config, "GITHUB_API_TOKEN", "")).encode()).hexdigest()[:12] if str(getattr(config, "GITHUB_API_TOKEN", "")).strip() else "не настроен"
@@ -5610,14 +5662,24 @@ def updates_page(request: Request):
 <p>Загруженный архив проходит проверку, публикуется как GitHub Release и синхронизирует публичную ветку <span class="code">main</span>. Установка теперь выполняется отдельно.</p>
 <p>Токен: <span class="code">{token_fingerprint}</span> · Репозиторий: <span class="code">{html.escape(configured_repo)}</span></p>
 <div class="notice">Кнопка публикации <strong>не запускает установку</strong>. После успешной публикации архив остаётся на панели, а установка выполняется отдельной кнопкой выше.</div>
-<form id="publish-update-form" method="post" action="{html.escape(public_path("/updates/publish"), quote=True)}" enctype="multipart/form-data">
+<form id="publish-update-form" data-no-navigation="1" data-ajax-form="1" method="post" action="{html.escape(public_path("/updates/publish"), quote=True)}" enctype="multipart/form-data">
 <div class="setting"><label>Полный архив релиза .tar.gz</label><input id="publish-archive" type="file" name="archive" accept=".tar.gz,application/gzip" required></div>
-<button id="publish-button" type="button">Загрузить обновление в GitHub</button>
+<button id="publish-button" type="submit">Загрузить обновление в GitHub</button><button id="publish-cancel-button" type="button" class="danger" disabled>Отменить публикацию</button>
 <div id="upload-progress" class="file-progress"><div class="progress large"><span id="upload-progress-bar" style="width:0%"></span></div><div id="upload-progress-text" class="muted">Загрузка…</div></div>
-<div id="github-publish-progress" class="file-progress"><div class="progress large"><span id="github-publish-progress-bar" style="width:0%"></span></div><div class="progress-meta"><span id="github-publish-progress-text">Ожидание публикации GitHub…</span><strong id="github-publish-progress-value">0%</strong></div><p class="muted" style="margin-top:8px"><a href="{html.escape(public_path("/api/updates/publish-log"), quote=True)}" target="_blank" rel="noopener">Открыть журнал запуска publisher</a></p></div>
-</form><form method="post" action="{html.escape(public_path("/updates/github/test"), quote=True)}" style="margin-top:12px"><button type="submit" class="secondary">Проверить авторизацию GitHub</button></form>
+<div id="github-publish-progress" class="file-progress"><div class="progress large"><span id="github-publish-progress-bar" style="width:0%"></span></div><div class="progress-meta"><span id="github-publish-progress-text">Ожидание публикации GitHub…</span><strong id="github-publish-progress-value">0%</strong></div><details style="margin-top:10px"><summary>Живой журнал GitHub publisher</summary><pre id="github-publish-live-log" class="changelog" style="max-height:280px">Ожидание данных…</pre></details><p class="muted" style="margin-top:8px"><a href="{html.escape(public_path("/api/updates/publish-log"), quote=True)}" target="_blank" rel="noopener">Открыть полный журнал publisher</a></p></div>
+</form><form id="github-test-form" data-no-navigation="1" data-ajax-form="1" method="post" action="{html.escape(public_path("/updates/github/test"), quote=True)}" style="margin-top:12px"><button id="github-test-button" type="submit" class="secondary">Проверить авторизацию GitHub</button><span id="github-test-status" class="muted" role="status" aria-live="polite" style="display:block;margin-top:8px"></span></form>
 <a class="button secondary" href="{html.escape(public_path("/settings"), quote=True)}#updates" style="margin-top:10px">Настройки GitHub</a></div>'''
+    if publisher:
+        history = update_manager.publish_history(10)
+        history_rows=[]
+        for item in history:
+            st=str(item.get("state") or "")
+            badge="good" if st=="completed" else ("bad" if st=="failed" else "warn")
+            label={"completed":"Успешно","failed":"Ошибка","cancelled":"Отменено"}.get(st,st or "—")
+            history_rows.append(f'<tr><td>{html.escape(str(item.get("created_at") or item.get("updated_at") or "—"))}</td><td>{html.escape(str(item.get("version") or "—"))}</td><td><span class="badge {badge}">{html.escape(label)}</span></td><td>{html.escape(str(item.get("message") or item.get("error") or "—"))}</td></tr>')
+        publish_history_block=f'<div class="card full"><div class="section-title"><h2>История публикаций GitHub</h2><span class="badge">последние 10</span></div><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Версия</th><th>Статус</th><th>Результат</th></tr></thead><tbody>{"".join(history_rows) or "<tr><td colspan=4>Публикаций пока нет.</td></tr>"}</tbody></table></div></div>'
     else:
+        publish_history_block = ""
         publisher_block = '<div class="card half"><h2>Центр обновлений</h2><p class="muted">Для этой учётной записи доступны только проверка и установка обновлений.</p></div>'
         manual_block = ""
     downgrade_block = ""
@@ -5632,7 +5694,7 @@ def updates_page(request: Request):
 <div class="grid"><div class="card half"><div class="section-title"><h2>Текущая установка</h2>{state_badge}</div>
 <p>Установлено: <strong id="update-current-version">{html.escape(update_manager.current_version())}</strong></p>
 <p>Последний релиз: <strong>{html.escape(str(info.get('version') or '—'))}</strong></p>
-<p>Источник: <span class="code">{html.escape(source_text)}</span></p>{source_details}{apply_form}</div>{publisher_block}{installed_changelog_block}{changelog_block}{history_block}{manual_block}</div>"""
+<p>Источник: <span class="code">{html.escape(source_text)}</span></p>{source_details}{apply_form}</div>{publisher_block}{publish_history_block}{installed_changelog_block}{changelog_block}{history_block}{manual_block}</div>"""
     initial = json.dumps(status, ensure_ascii=False, default=str).replace("<", "\\u003c")
     script = r'''<script>
 (function(){
@@ -5644,7 +5706,7 @@ const busyStates=new Set(['queued','checking','downloading','verifying','extract
 const csrfMeta=document.querySelector('meta[name="fargovpn-csrf-token"]');const csrfToken=csrfMeta?String(csrfMeta.content||''):'';
 const stateLabels={idle:'Ожидание',queued:'В очереди',checking:'Проверка версии',downloading:'Скачивание',verifying:'Проверка архива',extracting:'Распаковка',scheduled:'Запланировано',installing:'Установка',migrating:'Обновление базы',restarting:'Перезапуск служб','health-check':'Проверка запуска',completed:'Завершено',failed:'Ошибка'};
 
-let lastStatus=initial||{};let lastState=String(lastStatus.state||'idle');let currentJob=String(lastStatus.job_id||sessionStorage.getItem('fargovpn_update_job')||'');let watchedJob='';try{watchedJob=sessionStorage.getItem('fargovpn_update_watch_job')||'';}catch(_){}let serverProgress=Math.max(0,Math.min(100,Number(lastStatus.progress||0)));let shownProgress=serverProgress;let reloadScheduled=false;let recoveryInFlight=false;
+let rememberedUpdateJob='';try{rememberedUpdateJob=sessionStorage.getItem('fargovpn_update_job')||'';}catch(_){}let lastStatus=initial||{};let lastState=String(lastStatus.state||'idle');let currentJob=String(lastStatus.job_id||rememberedUpdateJob||'');let watchedJob='';try{watchedJob=sessionStorage.getItem('fargovpn_update_watch_job')||'';}catch(_){}let serverProgress=Math.max(0,Math.min(100,Number(lastStatus.progress||0)));let shownProgress=serverProgress;let reloadScheduled=false;let recoveryInFlight=false;
 const bar=document.getElementById('update-progress-bar');const value=document.getElementById('update-progress-value');const note=document.getElementById('update-connection-note');const phase=document.getElementById('update-phase');const elapsed=document.getElementById('update-elapsed');let progressStartedAt=0;
 function paintProgress(){if(bar)bar.style.width=shownProgress.toFixed(2)+'%';if(value)value.textContent=Math.floor(shownProgress)+'%';}
 const softCaps={queue:4,check:8,download:30,verify:32,extract:48,dependencies:58,'stop-services':62,backup:68,files:73,python:83,database:91,services:95,restart:98,health:99,github:99,restore:99};function animateProgress(){if(lastState&&busyStates.has(lastState)&&serverProgress<100){const now=Date.now();if(!progressStartedAt)progressStartedAt=now;const seconds=Math.max(0,Math.floor((now-progressStartedAt)/1000));if(elapsed)elapsed.textContent='Идёт '+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');const phaseName=String(lastStatus.phase||'').toLowerCase();const softCap=Math.max(serverProgress,Number(softCaps[phaseName]||Math.min(99,serverProgress+4)));if(shownProgress<serverProgress)shownProgress=Math.min(serverProgress,shownProgress+Math.max(0.35,(serverProgress-shownProgress)*0.18));else if(shownProgress<softCap)shownProgress=Math.min(softCap,shownProgress+Math.max(0.03,(softCap-shownProgress)*0.012));}else if(shownProgress>serverProgress&&serverProgress<100)shownProgress=serverProgress;paintProgress();requestAnimationFrame(animateProgress);}
@@ -5664,12 +5726,13 @@ async function poll(){try{await fetchStatus();}catch(_error){if(busyStates.has(l
 function optimisticStart(messageText){try{sessionStorage.setItem('fargovpn_update_watch_job','pending');}catch(_){}lastState='queued';lastStatus={...lastStatus,state:'queued',phase:'queue',message:messageText||'Запрос отправлен; ожидается подтверждение фоновой задачи'};serverProgress=0;shownProgress=0;progressStartedAt=Date.now();paintProgress();const message=document.getElementById('update-message');if(message)message.textContent=lastStatus.message;const badge=document.getElementById('update-state');if(badge){badge.textContent='В очереди';badge.className='badge warn';}if(bar)bar.classList.add('active');setRequestError('');if(note)note.textContent='Запрос передан серверу. Даже если веб-служба перезапустится до HTTP-ответа, статус будет восстановлен из файла задачи.';}
 const applyForm=document.getElementById('apply-update-form');
 if(applyForm)applyForm.addEventListener('submit',async(event)=>{event.preventDefault();if(!window.confirm('Установить обновление и автоматически перезапустить службы?'))return;window.dispatchEvent(new Event('vpn:update-starting'));const button=document.getElementById('apply-update-button');if(button)button.disabled=true;optimisticStart('Запрос на онлайн-обновление отправлен');try{const response=await fetchWithTimeout(purl('/updates/apply'),{method:'POST',headers:{Accept:'application/json'},credentials:'same-origin'},3500);let data={};try{data=await response.json();}catch(_e){}if(!response.ok){setRequestError(data.detail||data.error||'Сервер отклонил запуск обновления');lastState=String((lastStatus&&lastStatus.state)||'idle');if(button)button.disabled=false;return;}renderStatus(data.status||data);scheduleStatusCheck(250);}catch(_error){showReconnect('Задача могла уже запуститься. Ждём перезапуска веб-службы и читаем сохранённый статус.');recover().catch(()=>{});scheduleStatusCheck(1000);}});
+const githubTestForm=document.getElementById('github-test-form');const githubTestButton=document.getElementById('github-test-button');const githubTestStatus=document.getElementById('github-test-status');if(githubTestForm)githubTestForm.addEventListener('submit',async(event)=>{event.preventDefault();if(githubTestButton)githubTestButton.disabled=true;if(githubTestStatus)githubTestStatus.textContent='Проверяю токен, репозиторий и права GitHub…';try{const r=await fetchWithTimeout(githubTestForm.action,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json','X-Requested-With':'XMLHttpRequest','X-CSRF-Token':csrfToken}},15000);let d={};try{d=await r.json();}catch(_){}if(!r.ok||!d.ok)throw new Error(d.detail||('HTTP '+r.status));if(githubTestStatus)githubTestStatus.textContent='✓ GitHub доступ подтверждён: '+(d.login||'')+' → '+(d.repository||'');window.panelToast&&window.panelToast('GitHub авторизация подтверждена','good');}catch(error){if(githubTestStatus)githubTestStatus.textContent='✗ GitHub не прошёл проверку: '+(error.message||error);window.panelToast&&window.panelToast(githubTestStatus.textContent,'bad');}finally{if(githubTestButton)githubTestButton.disabled=false;}});
 const publishForm=document.getElementById('publish-update-form');
 const publishProgress=document.getElementById('github-publish-progress');const publishBar=document.getElementById('github-publish-progress-bar');const publishValue=document.getElementById('github-publish-progress-value');const publishText=document.getElementById('github-publish-progress-text');let publishTimer=0;
-function renderPublishStatus(data){if(!data)return;const raw=Math.max(0,Math.min(100,Number(data.progress||0)));if(publishProgress)publishProgress.classList.add('visible');if(publishBar){publishBar.style.width=raw+'%';publishBar.classList.toggle('active',Boolean(data.busy));}if(publishValue)publishValue.textContent=Math.round(raw)+'%';if(publishText){publishText.textContent=data.message||'Публикация GitHub…';}if(data.state==='completed'){if(publishBar)publishBar.classList.remove('active');if(publishText)publishText.textContent='✓ GitHub: публикация завершена. '+(data.github_tag||data.version||'');if(window.panelToast)window.panelToast('Публикация '+(data.version||'релиза')+' завершена','good');}if(data.state==='failed'){if(publishBar)publishBar.classList.remove('active');if(publishText)publishText.textContent='Ошибка публикации GitHub: '+(data.error||data.message||'неизвестная ошибка');if(window.panelToast)window.panelToast(publishText.textContent,'bad');}}
-function startPublishPolling(jobId){try{sessionStorage.setItem('fargovpn_publish_job',jobId);}catch(_){}clearInterval(publishTimer);const poll=async()=>{try{const r=await fetchWithTimeout(purl('/api/updates/publish-status?job_id='+encodeURIComponent(jobId)),{cache:'no-store',credentials:'same-origin',headers:{Accept:'application/json'}},5000);if(!r.ok)throw new Error('HTTP '+r.status);const data=await r.json();renderPublishStatus(data);if(data.state==='completed'||data.state==='failed'){clearInterval(publishTimer);try{sessionStorage.removeItem('fargovpn_publish_job')}catch(_){}const text=document.getElementById('upload-progress-text');if(text){text.textContent=data.state==='completed'?'Архив принят. Серверная публикация GitHub завершена.':'Публикация остановлена: '+(data.error||data.message||'неизвестная ошибка');}return;}}catch(error){const text=document.getElementById('github-publish-progress-text');if(text&&lastStatus&&publishTimer)text.textContent='Ожидание статуса GitHub…';} };poll();publishTimer=setInterval(poll,1000);}
+function renderPublishStatus(data){if(!data)return;const live=document.getElementById('github-publish-live-log');if(live&&typeof data.output==='string'){live.textContent=data.output||'Лог пока пуст.';live.scrollTop=live.scrollHeight;}const raw=Math.max(0,Math.min(100,Number(data.progress||0)));if(publishProgress)publishProgress.classList.add('visible');if(publishBar){publishBar.style.width=raw+'%';publishBar.classList.toggle('active',Boolean(data.busy));}if(publishValue)publishValue.textContent=Math.round(raw)+'%';if(publishText){publishText.textContent=data.message||'Публикация GitHub…';}if(data.state==='completed'){if(publishBar)publishBar.classList.remove('active');if(publishText)publishText.textContent='✓ GitHub: публикация завершена. '+(data.github_tag||data.version||'');if(window.panelToast)window.panelToast('Публикация '+(data.version||'релиза')+' завершена','good');}if(data.state==='cancelled'){if(publishBar)publishBar.classList.remove('active');if(publishText)publishText.textContent='Публикация отменена.';if(window.panelToast)window.panelToast('Публикация отменена','warn');}if(data.state==='failed'){if(publishBar)publishBar.classList.remove('active');if(publishText)publishText.textContent='Ошибка публикации GitHub: '+(data.error||data.message||'неизвестная ошибка');if(window.panelToast)window.panelToast(publishText.textContent,'bad');}}
+function startPublishPolling(jobId){try{sessionStorage.setItem('fargovpn_publish_job',jobId);}catch(_){}clearInterval(publishTimer);const poll=async()=>{try{const r=await fetchWithTimeout(purl('/api/updates/publish-status?job_id='+encodeURIComponent(jobId)),{cache:'no-store',credentials:'same-origin',headers:{Accept:'application/json'}},5000);if(!r.ok)throw new Error('HTTP '+r.status);const data=await r.json();renderPublishStatus(data);if(data.state==='completed'||data.state==='failed'||data.state==='cancelled'){clearInterval(publishTimer);const cancelBtn=document.getElementById('publish-cancel-button');if(cancelBtn)cancelBtn.disabled=true;try{sessionStorage.removeItem('fargovpn_publish_job')}catch(_){}const text=document.getElementById('upload-progress-text');if(text){text.textContent=data.state==='completed'?'Архив принят. Серверная публикация GitHub завершена.':'Публикация остановлена: '+(data.error||data.message||'неизвестная ошибка');}return;}}catch(error){const text=document.getElementById('github-publish-progress-text');if(text&&lastStatus&&publishTimer)text.textContent='Ожидание статуса GitHub…';} };poll();publishTimer=setInterval(poll,1000);}
 try{const rememberedPublish=sessionStorage.getItem('fargovpn_publish_job');if(rememberedPublish)startPublishPolling(rememberedPublish);}catch(_){}
-if(publishForm)publishForm.addEventListener('submit',(event)=>{event.preventDefault();const xhr=new XMLHttpRequest();const progress=document.getElementById('upload-progress');const uploadBar=document.getElementById('upload-progress-bar');const text=document.getElementById('upload-progress-text');const button=document.getElementById('publish-button');progress.classList.add('visible');button.disabled=true;text.textContent='1/2 · Передача архива на панель…';if(publishProgress)publishProgress.classList.remove('visible');xhr.open('POST',purl('/updates/publish'));xhr.setRequestHeader('Accept','application/json');xhr.setRequestHeader('X-Requested-With','XMLHttpRequest');if(csrfToken)xhr.setRequestHeader('X-CSRF-Token',csrfToken);xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);uploadBar.style.width=p+'%';text.textContent='1/2 · Архив загружен на панель: '+p+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch(_e){}if(xhr.status>=200&&xhr.status<300&&data.ok&&data.job?.job_id){uploadBar.style.width='100%';text.textContent='2/2 · Архив принят. Публикация GitHub выполняется…';button.disabled=true;startPublishPolling(data.job.job_id);return;}button.disabled=false;text.textContent='Ошибка запуска публикации: '+(data.detail||data.error||'HTTP '+xhr.status);if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.onabort=()=>{button.disabled=false;text.textContent='Загрузка архива отменена.';};xhr.onerror=()=>{button.disabled=false;text.textContent='Не удалось передать архив: соединение прервалось.';if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.timeout=900000;xhr.ontimeout=xhr.onerror;xhr.send(new FormData(publishForm));});
+const startPublishUpload=(event)=>{if(event)event.preventDefault();const archive=document.getElementById('publish-archive');const file=archive?.files?.[0];const button=document.getElementById('publish-button');const status=document.getElementById('upload-progress-text');if(!file){if(status)status.textContent='Выберите .tar.gz архив перед загрузкой.';if(window.panelToast)window.panelToast('Выберите архив .tar.gz','bad');archive?.focus();return;}if(!/\.tar\.gz$/i.test(String(file.name||''))){if(status)status.textContent='Нужен архив с расширением .tar.gz';if(window.panelToast)window.panelToast('Нужен архив .tar.gz','bad');archive?.focus();return;}if(!window.FormData||!window.XMLHttpRequest){if(status)status.textContent='Браузер не поддерживает фоновую загрузку.';return;}const xhr=new XMLHttpRequest();const progress=document.getElementById('upload-progress');const uploadBar=document.getElementById('upload-progress-bar');const text=document.getElementById('upload-progress-text');progress.classList.add('visible');button.disabled=true;text.textContent='1/2 · Передача архива на панель…';if(publishProgress)publishProgress.classList.remove('visible');xhr.open('POST',purl('/updates/publish'));xhr.setRequestHeader('Accept','application/json');xhr.setRequestHeader('X-Requested-With','XMLHttpRequest');if(csrfToken)xhr.setRequestHeader('X-CSRF-Token',csrfToken);xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);uploadBar.style.width=p+'%';text.textContent='1/2 · Архив загружен на панель: '+p+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch(_e){}if(xhr.status>=200&&xhr.status<300&&data.ok&&data.job?.job_id){uploadBar.style.width='100%';text.textContent='2/2 · Архив принят. Публикация GitHub выполняется…';button.disabled=true;try{publishForm.dataset.jobId=data.job.job_id;sessionStorage.setItem('fargovpn_publish_job',data.job.job_id)}catch(_){};const cancelBtn=document.getElementById('publish-cancel-button');if(cancelBtn)cancelBtn.disabled=false;startPublishPolling(data.job.job_id);return;}button.disabled=false;text.textContent='Ошибка запуска публикации: '+(data.detail||data.error||'HTTP '+xhr.status);if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.onabort=()=>{button.disabled=false;text.textContent='Загрузка архива отменена.';};xhr.onerror=()=>{button.disabled=false;text.textContent='Не удалось передать архив: соединение прервалось.';if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.timeout=900000;xhr.ontimeout=xhr.onerror;xhr.send(new FormData(publishForm));};if(publishForm)publishForm.addEventListener('submit',startPublishUpload);document.getElementById('publish-button')?.addEventListener('click',startPublishUpload);const cancelPublish=async()=>{const job=document.getElementById('publish-update-form')?.dataset?.jobId||sessionStorage.getItem('fargovpn_publish_job')||'';if(!job)return;const ok=window.confirm?window.confirm('Отменить публикацию GitHub?'):true;if(!ok)return;try{const r=await fetch(purl('/api/updates/publish-cancel?job_id='+encodeURIComponent(job)),{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||('HTTP '+r.status));document.getElementById('github-publish-progress-text')&&(document.getElementById('github-publish-progress-text').textContent='Запрошена отмена…');}catch(e){window.panelToast&&window.panelToast('Не удалось отменить публикацию: '+(e.message||e),'bad')}};document.getElementById('publish-cancel-button')?.addEventListener('click',cancelPublish);
 const manualForm=document.getElementById('manual-update-form');
 if(manualForm)manualForm.addEventListener('submit',(event)=>{event.preventDefault();if(!window.confirm('Проверить загруженный архив и установить его на этой панели?'))return;window.dispatchEvent(new Event('vpn:update-starting'));const xhr=new XMLHttpRequest();const progress=document.getElementById('manual-upload-progress');const uploadBar=document.getElementById('manual-upload-progress-bar');const text=document.getElementById('manual-upload-progress-text');const button=document.getElementById('manual-update-button');progress.classList.add('visible');button.disabled=true;text.textContent='Загрузка архива на панель…';xhr.open('POST',purl('/updates/upload-and-apply'));xhr.setRequestHeader('Accept','application/json');if(csrfToken)xhr.setRequestHeader('X-CSRF-Token',csrfToken);xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);uploadBar.style.width=p+'%';text.textContent='Загружено '+p+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch(_e){}if(xhr.status>=200&&xhr.status<300){uploadBar.style.width='100%';text.textContent='Архив проверен; установка запущена';optimisticStart('Ручной архив принят, запускается фоновая установка');renderStatus(data.status||data);scheduleStatusCheck(250);}else{button.disabled=false;text.textContent='Ошибка: '+(data.detail||data.error||'HTTP '+xhr.status);setRequestError(data.detail||data.error||'Архив не принят');}};xhr.onerror=()=>{optimisticStart('Загрузка завершилась разрывом соединения; проверяется статус задачи');text.textContent='Соединение прервалось. Если архив был принят, прогресс появится автоматически.';scheduleStatusCheck(700);};xhr.send(new FormData(manualForm));});
 renderStatus(initial);requestAnimationFrame(animateProgress);setTimeout(poll,450);
@@ -5708,11 +5771,32 @@ def updates_github_test(request: Request):
     require_auth(request)
     if not can_configure_github(request):
         raise HTTPException(403, "Настройка GitHub доступна только главной панели или до первичной настройки")
+    wants_json = "application/json" in request.headers.get("accept", "").lower() or request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
     try:
         result = update_manager.github_validate_configuration()
-        set_flash(request, f"GitHub подключён: {result.get('login')} → {result.get('repository')}", "good")
+        payload = {
+            "ok": True,
+            "login": str(result.get("login") or ""),
+            "repository": str(result.get("repository") or ""),
+            "branch": str(result.get("target_branch") or result.get("default_branch") or ""),
+            "can_write": bool(result.get("can_write")),
+            "detail": "GitHub авторизация, репозиторий, ветка и права записи подтверждены",
+        }
+        if wants_json:
+            return JSONResponse(payload, status_code=200)
+        set_flash(request, f"GitHub подключён: {result.get('login')} → {result.get('repository')} / {result.get('target_branch')}", "good")
     except Exception as error:
-        set_flash(request, f"Проверка GitHub не пройдена: {error}", "bad")
+        detail = str(error)
+        status = 502
+        if "HTTP 401" in detail:
+            status = 401
+        elif "HTTP 403" in detail:
+            status = 403
+        elif "HTTP 404" in detail:
+            status = 404
+        if wants_json:
+            return JSONResponse({"ok": False, "detail": detail}, status_code=status)
+        set_flash(request, f"Проверка GitHub не пройдена: {detail}", "bad")
     return RedirectResponse(public_path("/updates"), 303)
 
 @app.post("/updates/github/config")
@@ -6116,7 +6200,7 @@ def diagnostics(request: Request):
 <div class="card full"><div class="section-title"><h2>Обновления</h2><span class="badge {'good' if update_report.get('healthy') else 'bad'}">{html.escape('Издатель' if publisher else 'Ведомая панель')}</span></div>{update_error_html}{update_warning_html}{update_topology_html}</div><div class="card full table-wrap"><div class="section-title"><h2>Связанные systemd units</h2></div><table><thead><tr><th>Unit</th><th>Active</th><th>Enabled</th><th>Штатный</th><th>Рабочая папка</th></tr></thead><tbody>{unit_rows or '<tr><td colspan="5">systemd недоступен или units не найдены.</td></tr>'}</tbody></table></div>
 <div class="card full table-wrap"><div class="section-title"><h2>Запущенные процессы проекта</h2></div><table><thead><tr><th>PID</th><th>Команда</th></tr></thead><tbody>{process_rows or '<tr><td colspan="2">Процессы не найдены.</td></tr>'}</tbody></table></div>
 <div class="card full"><h2>Детали дубликатов</h2><pre>{duplicate_details}</pre></div><div class="card full"><h2>Сведения</h2><p>Версия: {html.escape(update_manager.current_version())}</p><p>Публичный вход: HTTPS 443</p><p>Backend: Unix socket</p><p>Основная БД: PostgreSQL</p><p>3x-ui: проверяется через API; внутренняя БД 3x-ui не используется как база FargoVPN.</p><p><a href="/health">Проверить /health</a></p></div></div>'''
-    return page(request, "Диагностика", body, "diagnostics", f'<script src="/static/diagnostic.js?v={_panel_asset_version()}" defer></script>')
+    return page(request, "Диагностика", body, "diagnostics", f'<script src="{html.escape(public_path("/static/diagnostic.js"), quote=True)}?v={_panel_asset_version()}" defer></script>')
 
 
 @app.get("/api/diagnostics")
@@ -6216,7 +6300,7 @@ def collect_diagnostics(request: Request):
         job = diagnostic_jobs.start(APP_DIR, str(request.session.get("user", "")), url=url, cookie=request.headers.get("cookie", ""))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"job": job, "state": "running"}
+    return {"ok": True, "data": {"job_id": job, "state": "running"}, "job_id": job, "job": {"job_id": job}, "state": "running", "error": ""}
 
 
 def _diagnostic_job(request: Request, job: str):
@@ -6231,7 +6315,11 @@ def _diagnostic_job(request: Request, job: str):
 @app.get("/api/diagnostics/collect/{job}")
 def diagnostic_job_status(request: Request, job: str):
     data = _diagnostic_job(request, job)
-    return {key: data[key] for key in ("state", "error", "checks") if key in data}
+    report_url = public_path(f"/api/diagnostics/collect/{job}/download") if data.get("state") == "completed" else ""
+    payload = {key: data[key] for key in ("state", "error", "checks", "path") if key in data}
+    payload["job_id"] = job
+    payload["report_url"] = report_url
+    return {"ok": True, "data": payload, **payload}
 
 
 @app.get("/api/diagnostics/collect/{job}/download")
