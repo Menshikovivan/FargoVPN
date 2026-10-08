@@ -1663,13 +1663,11 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
             if progress:
                 progress(path)
 
-        # Start from the current tree, but explicitly delete every path that is
-        # not present in the uploaded release. This is the repository-pruning
-        # guarantee required by the web-panel publisher.
-        for path in stale_paths:
-            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
-
-        tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"base_tree": base_tree_sha, "tree": entries})
+        # IMPORTANT: build the new tree from scratch. Do not inherit base_tree.
+        # The expected file set is the complete public repository surface, so
+        # omitted paths are physically absent from the new main tree. This is
+        # the strongest possible guarantee against stale files surviving in main.
+        tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"tree": entries})
         if tree.status_code >= 400:
             raise UpdateError(f"Не удалось собрать дерево main: HTTP {tree.status_code}: {github_json_error(tree)}")
         tree_sha = str((tree.json() or {}).get("sha") or "").strip()

@@ -19,45 +19,46 @@ def load_update_module():
     dj.launch_detached = lambda *a, **k: None
     sys.modules["config"] = cfg
     sys.modules["detached_jobs"] = dj
-    spec = importlib.util.spec_from_file_location("um511", ROOT / "update_manager.py")
+    spec = importlib.util.spec_from_file_location("um512", ROOT / "update_manager.py")
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "app/VERSION", "static/VERSION")] == ["5.1.1"] * 3
-    assert "## 5.1.1" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "app/VERSION", "static/VERSION")] == ["5.1.2"] * 3
+    assert "## 5.1.2" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
     with tempfile.TemporaryDirectory() as temp:
         root=Path(temp)
-        (root/"VERSION").write_text("5.1.1\n")
+        (root/"VERSION").write_text("5.1.2\n")
         (root/"install.sh").write_text("#!/bin/bash\n")
         (root/"README.md").write_text("# FargoVPN\n")
         (root/"old.zip").write_bytes(b"zip")
         (root/"secret.pem").write_text("PRIVATE")
         (root/".env").write_text("TOKEN=x\n")
-        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.1", hashlib.sha256(b"x").hexdigest())
+        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.2", hashlib.sha256(b"x").hexdigest())
         assert set(files)=={"VERSION","install.sh","README.md"}
 
 def test_pruning_contract():
     source=(ROOT/"update_manager.py").read_text(encoding="utf-8")
     assert "stale_paths = sorted(current_paths - expected_paths)" in source
-    assert '"sha": None' in source
     assert "_verify_github_main_tree" in source
     assert "github_main_stale_paths_removed" in source
+    assert '"tree": entries' in source
 
 def test_progress_contract():
     source=(ROOT/"webapp.py").read_text(encoding="utf-8")
     css=(ROOT/"static/panel.css").read_text(encoding="utf-8")
     assert "update-phase" in source and "update-elapsed" in source
-    assert "setTimeout(poll,busyStates.has(lastState)?700:3000)" in source
+    assert "shownProgress=Math.max(shownProgress,nextProgress)" in source
+    assert "shownProgress=Math.min(serverProgress" in source
     assert ".progress span.active" in css and "update-progress-flow" in css
 
 
-def test_main_sync_emits_explicit_deletions_for_stale_files(monkeypatch):
+def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
     m = load_update_module()
     class Resp:
         def __init__(self, status, payload): self.status_code=status; self._payload=payload
@@ -68,7 +69,7 @@ def test_main_sync_emits_explicit_deletions_for_stale_files(monkeypatch):
     new_tree = 'c' * 40
     commit_sha = 'd' * 40
     blob_sha = 'e' * 40
-    backup_ref = 'backup/before-v5.1.1-test'
+    backup_ref = 'backup/before-v5.1.2-test'
     def fake_request(method, path, **kwargs):
         calls.append((method, path, kwargs))
         if method == 'GET' and path.endswith('/git/ref/heads/main'):
@@ -91,9 +92,11 @@ def test_main_sync_emits_explicit_deletions_for_stale_files(monkeypatch):
         if method == 'POST' and path.endswith('/git/blobs'):
             return Resp(201, {'sha': blob_sha})
         if method == 'POST' and path.endswith('/git/trees'):
-            tree_entries = kwargs.get('json', {}).get('tree', [])
+            body = kwargs.get('json', {})
+            assert 'base_tree' not in body
+            tree_entries = body.get('tree', [])
             calls.append(('TREE_ENTRIES', '', {'json': {'tree': tree_entries}}))
-            assert any(e.get('path') == 'obsolete.md' and e.get('sha') is None for e in tree_entries)
+            assert [e.get('path') for e in tree_entries] == ['keep.txt']
             return Resp(201, {'sha': new_tree})
         if method == 'POST' and path.endswith('/git/commits'):
             return Resp(201, {'sha': commit_sha, 'html_url': 'https://github.com/Menshikovivan/FargoVPN/commit/' + commit_sha})
@@ -114,8 +117,8 @@ def test_main_sync_emits_explicit_deletions_for_stale_files(monkeypatch):
     with tempfile.TemporaryDirectory() as temp:
         archive = Path(temp) / 'release.tar.gz'
         archive.write_bytes(b'archive')
-        def fake_public_files(*_args): return {'keep.txt': b'new'}
-        monkeypatch.setattr(m, '_github_main_public_files', fake_public_files)
-        result = m._github_main_sync(archive, '5.1.1', hashlib.sha256(b'archive').hexdigest())
+        monkeypatch.setattr(m, '_github_main_public_files', lambda *_args: {'keep.txt': b'new'})
+        result = m._github_main_sync(archive, '5.1.2', hashlib.sha256(b'archive').hexdigest())
         assert result['stale_count'] == 1
         assert result['stale_paths_removed'] == ['obsolete.md']
+
