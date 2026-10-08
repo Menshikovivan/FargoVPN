@@ -148,6 +148,31 @@ def installed_changelog() -> dict[str, str]:
     return {"version": version or current_version(), "text": text[:30000]}
 
 
+def changelog_history(limit: int = 8, *, exclude_version: str = "") -> list[dict[str, str]]:
+    """Return recent local CHANGELOG sections for the updates page."""
+    path = APP_DIR / "CHANGELOG.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    matches = list(re.finditer(r"(?ms)^##\s+\[?([0-9A-Za-z._+-]{1,64})\]?[^\n]*\n(.*?)(?=^##\s+|\Z)", text))
+    result: list[dict[str, str]] = []
+    excluded = str(exclude_version or "").strip()
+    for match in matches:
+        version = str(match.group(1) or "").strip()
+        if not re.fullmatch(r"[0-9A-Za-z._+-]{1,64}", version):
+            continue
+        if excluded and version_key(version) == version_key(excluded):
+            continue
+        body = str(match.group(2) or "").strip()
+        if not body:
+            continue
+        result.append({"version": version, "text": f"## {version}\n\n{body}"[:30000]})
+        if len(result) >= max(1, min(int(limit), 20)):
+            break
+    return result
+
+
 def version_key(value: str) -> tuple[int, ...]:
     parts = [int(item) for item in re.findall(r"\d+", str(value))]
     return tuple((parts + [0, 0, 0])[:6])
@@ -682,13 +707,25 @@ def read_job_manifest(job_id: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def publisher_enabled() -> bool:
-    """Проверяет возможность выполнения служебного сценария публикации.
+def github_configuration_ready() -> bool:
+    """Return whether this installation has enough GitHub settings to publish."""
+    return bool(
+        github_token()
+        and str(getattr(config, "GITHUB_REPOSITORY_OWNER", "") or "").strip()
+        and github_repo()
+        and bool(getattr(config, "GITHUB_MAIN_SYNC_ENABLED", True))
+    )
 
-    Поля UPDATE_IS_PUBLISHER и UPDATE_PUBLISHER_USERNAME сохраняются для
-    совместимости со старыми конфигурациями и не являются источником решения.
+
+def publisher_enabled() -> bool:
+    """Проверяет возможность публикации GitHub с текущей панели.
+
+    Первичная настройка может выполняться из веб-панели без заранее заданной
+    publisher identity. После сохранения токена публикация разрешается самой
+    панели через её локальную GitHub-конфигурацию. Защищённый publisher digest
+    остаётся совместимым дополнительным способом назначения главной панели.
     """
-    return is_publisher_username(getattr(config, "WEB_USERNAME", ""))
+    return is_publisher_username(getattr(config, "WEB_USERNAME", "")) or github_configuration_ready()
 
 
 def is_publisher_username(username: str) -> bool:
@@ -1211,8 +1248,12 @@ def github_latest_release() -> dict[str, Any]:
     configured_name = str(getattr(config, "GITHUB_RELEASE_ASSET_NAME", "") or "").strip()
     asset = None
     if configured_name:
+        tag_value = str(payload.get("tag_name") or "")
+        prefix_value = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "v") or "v")
+        release_version = tag_value[len(prefix_value):] if prefix_value and tag_value.startswith(prefix_value) else tag_value
+        expected_asset = Path(configured_name.format(version=release_version)).name
         for item in assets:
-            if str(item.get("name") or "") == Path(configured_name.format(version=str(payload.get("tag_name") or ""))).name:
+            if str(item.get("name") or "") == expected_asset:
                 asset = item
                 break
     if asset is None:
@@ -1906,8 +1947,22 @@ def read_publish_job_manifest(job_id: str) -> dict[str, Any]:
 
 def start_publish_job(source: Path, original_name: str, actor: str = "web") -> dict[str, Any]:
     info = inspect_archive(source)
+    if not github_token():
+        raise UpdateError("GitHub не настроен: откройте «Настройки GitHub» и сохраните Personal Access Token")
+    if not str(getattr(config, "GITHUB_REPOSITORY_OWNER", "") or "").strip():
+        raise UpdateError("GitHub не настроен: укажите владельца репозитория в «Настройках GitHub»")
+    if str(getattr(config, "GITHUB_REPOSITORY_NAME", "FargoVPN") or "FargoVPN").strip() == "":
+        raise UpdateError("GitHub не настроен: укажите имя репозитория")
+    if str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() != "main":
+        raise UpdateError("Публикация FargoVPN выполняется только в ветку main")
+    if not github_main_sync_enabled():
+        raise UpdateError("GitHub: включите синхронизацию main в «Настройках GitHub»")
     if publish_job_busy():
         raise UpdateError("Другая публикация GitHub уже выполняется")
+    # Fail before queueing if the token cannot read the repository or lacks push access.
+    # This makes configuration problems visible in the upload response instead of
+    # producing a background job that can only fail later.
+    github_validate_configuration()
     root = update_dir() / "publish" / "pending"
     root.mkdir(parents=True, exist_ok=True)
     job_id = f"pub-{int(time.time())}-{secrets.token_hex(4)}"
@@ -1927,19 +1982,31 @@ def start_publish_job(source: Path, original_name: str, actor: str = "web") -> d
     unit = f"vpn-service-publish-worker-{int(time.time())}-{secrets.token_hex(2)}"
     try:
         from detached_jobs import DetachedJobError, launch_detached
+        launcher_log = update_dir() / "publish" / "launcher.log"
         launcher = launch_detached(
             unit,
             [str(python), str(worker), "--job-id", job_id],
             description=f"Публикация FargoVPN {info['version']} в GitHub",
             working_directory=APP_DIR,
-            output_path=update_dir() / "publish" / "launcher.log",
+            output_path=launcher_log,
         )
     except DetachedJobError as error:
         target.unlink(missing_ok=True)
         write_publish_status("failed", job_id=job_id, version=str(info["version"]), progress=1, phase="launch", message="Не удалось запустить публикацию", error=str(error), finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         raise UpdateError(str(error)) from error
-    write_publish_status("queued", job_id=job_id, version=str(info["version"]), actor=str(actor)[:100], progress=2, phase="queue", message="Фоновая публикация GitHub запущена", launcher=launcher, unit=unit)
-    return {"job_id": job_id, "version": str(info["version"]), "state": "queued", "launcher": launcher, "unit": unit}
+    write_publish_status("queued", job_id=job_id, version=str(info["version"]), actor=str(actor)[:100], progress=2, phase="queue", message="Фоновая публикация GitHub запущена; ожидается подтверждение worker", launcher=launcher, launcher_log=str(launcher_log), unit=unit)
+    deadline = time.monotonic() + 6.0
+    while time.monotonic() < deadline:
+        current = read_publish_status()
+        if str(current.get("job_id") or "") == job_id:
+            if str(current.get("state") or "") == "failed":
+                raise UpdateError(str(current.get("error") or "GitHub publisher worker завершился с ошибкой"))
+            if int(current.get("progress") or 0) >= 3:
+                break
+        time.sleep(0.1)
+    else:
+        raise UpdateError(f"GitHub publisher worker не подтвердил запуск в течение 6 с; журнал запуска: {launcher_log}")
+    return {"job_id": job_id, "version": str(info["version"]), "state": "queued", "launcher": launcher, "launcher_log": str(launcher_log), "unit": unit}
 
 
 def publish_update(source: Path, original_name: str = "update.tar.gz", progress: Callable[[int, str, str], None] | None = None) -> dict[str, Any]:
@@ -2450,8 +2517,6 @@ def start_update_job(
             str(worker),
             "--job-id",
             job_id,
-            "--startup-delay",
-            "4.0",
         ]
         launcher = ""
         launcher_error = ""
@@ -2476,7 +2541,10 @@ def start_update_job(
                 message="Фоновый процесс обновления запущен; ожидается подтверждение worker",
                 error="",
             )
-            deadline = time.monotonic() + 2.2
+            # systemd --no-block confirms the unit was queued, not that Python
+            # actually started. Wait briefly for the worker's durable ack.
+            # The worker writes progress=3 before network/file work begins.
+            deadline = time.monotonic() + 6.0
             acknowledged = False
             while time.monotonic() < deadline:
                 current_status = read_status()
@@ -2488,7 +2556,7 @@ def start_update_job(
                 time.sleep(0.1)
             if not acknowledged:
                 launcher_log = update_launcher_log_path()
-                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 2,2 с; журнал запуска: {launcher_log}")
+                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 6 с; журнал запуска: {launcher_log}")
         except Exception as error:
             write_status(
                 "failed",

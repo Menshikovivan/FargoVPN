@@ -15,6 +15,11 @@ def run(job_id: str) -> int:
     version = str(manifest.get("version") or "")
     original_name = str(manifest.get("original_name") or archive.name)
     try:
+        update_manager.write_publish_status(
+            "validating", job_id=job_id, version=version, progress=3, phase="startup",
+            message="GitHub publisher worker запущен; проверяется архив и конфигурация", error="",
+            finished_at="",
+        )
         if not archive.is_file():
             raise update_manager.UpdateError("Архив публикации не найден")
         def progress(percent: int, phase: str, message: str) -> None:

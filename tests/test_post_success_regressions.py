@@ -79,17 +79,21 @@ def test_bind_telegram_reports_partial_secondary_failures_as_warning():
 
 
 def test_update_status_reads_are_best_effort_after_jobs_start():
-    for name in ("updates_publish", "updates_upload_and_apply", "updates_apply", "updates_force_version", "updates_rollback"):
+    for name in ("updates_upload_and_apply", "updates_apply"):
         src = func(name)
-        if name == "updates_rollback":
-            assert "start_rollback_job(" in src
-            assert "update_manager.read_status()" in src
-        elif name == "updates_publish":
-            assert "start_publish_job(" in src
-            assert "audit(actor, " in src
-        else:
-            assert "start_update_job(" in src
-            assert "update_manager.read_status()" in src
+        assert "start_update_job(" in src
+        assert "update_manager.read_status()" in src
+    src = func("updates_publish")
+    assert "start_publish_job(" in src
+    assert "audit(actor, " in src
+
+
+def test_manual_rollback_routes_are_not_exposed_from_panel():
+    assert 'def updates_force_version' not in WEB
+    assert 'def updates_rollback' not in WEB
+    assert '/updates/force-version' not in WEB
+    assert '/updates/rollback' not in WEB
+    assert '/api/updates/releases' not in WEB
 
 
 def test_restart_service_does_not_emit_unhandled_500_on_systemd_run_failure():

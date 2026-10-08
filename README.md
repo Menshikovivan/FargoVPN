@@ -8,7 +8,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 [![3x-ui](https://img.shields.io/badge/3x--ui-integrated-444444)](https://github.com/MHSanaei/3x-ui)
 
-**Текущая версия: 5.1.5**
+**Текущая версия: 5.1.8**
 
 FargoVPN рассчитан на владельцев VPN-сервисов, которым нужен готовый пользовательский Telegram-бот, административная веб-панель, управление подписками через 3x-ui и безопасное обновление без ручной работы с исходниками.
 
@@ -90,8 +90,18 @@ graph LR
 
 ## Быстрая установка
 
+Для уже опубликованных релизов можно использовать стандартный bootstrap:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash
+```
+
+Для новой версии до её первой публикации в GitHub Releases используйте локальный release-архив. Распакуйте его на сервере и запустите корневой `install.sh`: он обнаружит соседний `app/VERSION` и установит именно этот архив, не скачивая старый `latest` из GitHub.
+
+```bash
+tar -xzf FargoVPN_FULL.tar.gz
+cd FargoVPN-5.1.8
+sudo ./install.sh
 ```
 
 Bootstrap загружает последнюю опубликованную версию, проверяет SHA-256 полного release-архива и запускает штатный установщик.
