@@ -88,14 +88,15 @@ fi
 PACKAGE_ROOT="$TMP/${TOP_DIRS[0]}"
 tar -xzf "$ARCHIVE" -C "$TMP" || { echo "Не удалось распаковать полный пакет FargoVPN во временный каталог." >&2; exit 1; }
 
-[[ -f "$PACKAGE_ROOT/install.sh" ]] || { echo "В полном пакете не найден install.sh." >&2; exit 1; }
-[[ -f "$PACKAGE_ROOT/VERSION" ]] || { echo "В полном пакете не найден VERSION." >&2; exit 1; }
-VERSION="$(tr -d '[:space:]' < "$PACKAGE_ROOT/VERSION")"
+INSTALLER="$PACKAGE_ROOT/app/install.sh"
+VERSION_FILE="$PACKAGE_ROOT/app/VERSION"
+[[ -f "$INSTALLER" && -f "$VERSION_FILE" ]] || { echo "В полном пакете не найден app/install.sh или app/VERSION." >&2; exit 1; }
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 echo "[FargoVPN bootstrap] Версия полного пакета: $VERSION"
 echo "[FargoVPN bootstrap] Запуск штатного установщика..."
 
 set +e
-/bin/bash "$PACKAGE_ROOT/install.sh" "$@"
+/bin/bash "$INSTALLER" "$@"
 STATUS=$?
 set -e
 exit "$STATUS"
