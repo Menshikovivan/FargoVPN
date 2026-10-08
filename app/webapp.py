@@ -1486,12 +1486,24 @@ def navigation(active: str) -> str:
             url = xui_panel_url
         if url.startswith('/'):
             url = public_path(url)
+        unread_badge = (
+            '<span class="nav-unread-badge" data-unread-total aria-label="Непрочитанные сообщения"'
+            + ("" if unread_total else " hidden")
+            + ">"
+            + (str(unread_total) if unread_total else "")
+            + "</span>"
+        ) if key == "messages" else ""
+        payment_badge = (
+            '<span class="nav-unread-badge" data-payment-attention aria-label="Оплаты, требующие внимания"'
+            + ("" if payment_total else " hidden")
+            + ">"
+            + (str(payment_total) if payment_total else "")
+            + "</span>"
+        ) if key == "payments" else ""
         links.append(
-            f'<a class="{"active" if key == active else ""}" href="{url}">'
+            f'<a class="{("active" if key == active else "")}" href="{url}">'
             f'<i class="nav-icon">{nav_svgs.get(icon, nav_svgs["settings"])}</i><span class="nav-label">{label}</span>'
-            f'{("<span class=\"nav-unread-badge\" data-unread-total aria-label=\"Непрочитанные сообщения\"" + ("" if unread_total else " hidden") + ">" + (str(unread_total) if unread_total else "") + "</span>") if key == "messages" else ""}'
-            f'{("<span class=\"nav-unread-badge\" data-payment-attention aria-label=\"Оплаты, требующие внимания\"" + ("" if payment_total else " hidden") + ">" + (str(payment_total) if payment_total else "") + "</span>") if key == "payments" else ""}'
-            f'</a>'
+            f'{unread_badge}{payment_badge}</a>'
         )
 
     return (

@@ -10,7 +10,7 @@
 
 - [ ] `bash -n install.sh`
 - [ ] все `*.sh` прошли `bash -n`
-- [ ] `python3 -m compileall -q .`
+- [ ] `python3 -m compileall -q app tests scripts`
 - [ ] `pytest -q`
 - [ ] для изменений installer/update проверено обновление со старой версии
 - [ ] секретов и runtime-файлов в изменении нет

@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
 def test_panel_routes_and_publisher_boundary(tmp_path):
@@ -20,6 +20,7 @@ from unittest.mock import patch
 from itsdangerous import TimestampSigner
 
 root = Path(sys.argv[1])
+ROOT = root
 spec = importlib.util.spec_from_file_location("config", root / "config.example.py")
 config = importlib.util.module_from_spec(spec)
 sys.modules["config"] = config

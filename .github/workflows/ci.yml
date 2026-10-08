@@ -28,17 +28,33 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -r tests/requirements-dev.txt
 
       - name: Validate shell syntax
         shell: bash
         run: |
           set -euo pipefail
           bash -n install.sh
-          find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          find app scripts -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
 
       - name: Validate Python syntax
-        run: python -m compileall -q .
+        run: python -m compileall -q app tests scripts
+
+      - name: Check repository layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f install.sh
+          test -f README.md
+          test -f LICENSE
+          test -f app/install.sh
+          test -f app/VERSION
+          test -f app/static/VERSION
+          if find . -maxdepth 1 -type f ! -name 'install.sh' ! -name 'README.md' ! -name 'LICENSE' | grep -q .; then
+            echo 'Unexpected file in repository root.' >&2
+            find . -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
 
       - name: Check forbidden tracked files
         shell: bash

@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 WEB = (ROOT / "webapp.py").read_text(encoding="utf-8")
 
 

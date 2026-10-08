@@ -1,6 +1,6 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 def read(name):
     return (ROOT / name).read_text(encoding="utf-8")

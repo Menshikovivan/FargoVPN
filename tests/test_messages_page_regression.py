@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
 def _messages_function() -> ast.FunctionDef:

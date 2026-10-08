@@ -30,7 +30,10 @@ def main():
                 if value: detail = detail.replace(value, '[REDACTED]')
             checks.append({'check': name, 'ok': False, 'detail': detail[:1000]})
     def versions():
-        values = [(ROOT / p).read_text().strip() for p in ('VERSION', 'app/VERSION', 'static/VERSION')]
+        version_files = [ROOT / 'VERSION', ROOT / 'app' / 'VERSION', ROOT / 'static' / 'VERSION', ROOT / 'app' / 'static' / 'VERSION']
+        existing = [path for path in version_files if path.is_file()]
+        values = [path.read_text().strip() for path in existing]
+        if len(values) < 1: raise RuntimeError('VERSION not found')
         if len(set(values)) != 1: raise RuntimeError('Version copies mismatch: ' + repr(values))
         if not __import__('re').fullmatch(r'\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?', values[0]): raise RuntimeError('Invalid VERSION: ' + repr(values[0]))
         return values[0]

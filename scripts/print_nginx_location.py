@@ -3,7 +3,7 @@
 from pathlib import Path
 import re
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 import config
 prefix = '/' + str(getattr(config, 'WEB_PUBLIC_PREFIX', '') or '').strip('/')
 if prefix == '/' or not re.fullmatch(r'/[A-Za-z0-9/_-]+', prefix):

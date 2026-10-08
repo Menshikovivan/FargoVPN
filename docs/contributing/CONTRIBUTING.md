@@ -10,8 +10,8 @@
 
 ```bash
 bash -n install.sh
-find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
-python3 -m compileall -q .
+find app scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+python3 -m compileall -q app tests scripts
 pytest -q
 ```
 
@@ -26,7 +26,7 @@ chore: clean repository structure
 docs: rewrite README
 fix: harden github release publication
 feat: add panel update verification
-release: 5.1.2
+release: 5.1.3
 ```
 
 ## Pull Request

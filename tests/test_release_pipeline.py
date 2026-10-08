@@ -5,7 +5,7 @@ import sys
 import tempfile
 import types
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 def load_update_module():
     cfg = types.ModuleType("config")
@@ -26,21 +26,23 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "app/VERSION", "static/VERSION")] == ["5.1.2"] * 3
-    assert "## 5.1.2" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.3"] * 2
+    assert "## 5.1.3" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
     with tempfile.TemporaryDirectory() as temp:
         root=Path(temp)
-        (root/"VERSION").write_text("5.1.2\n")
+        (root/"app").mkdir()
+        (root/"app/VERSION").write_text("5.1.3\n")
         (root/"install.sh").write_text("#!/bin/bash\n")
         (root/"README.md").write_text("# FargoVPN\n")
+        (root/"LICENSE").write_text("license\n")
         (root/"old.zip").write_bytes(b"zip")
         (root/"secret.pem").write_text("PRIVATE")
         (root/".env").write_text("TOKEN=x\n")
-        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.2", hashlib.sha256(b"x").hexdigest())
-        assert set(files)=={"VERSION","install.sh","README.md"}
+        files=m._github_main_public_files(root, root/"x.tar.gz", "5.1.3", hashlib.sha256(b"x").hexdigest())
+        assert set(files)=={"install.sh","README.md","LICENSE","app/VERSION"}
 
 def test_pruning_contract():
     source=(ROOT/"update_manager.py").read_text(encoding="utf-8")
@@ -69,7 +71,7 @@ def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
     new_tree = 'c' * 40
     commit_sha = 'd' * 40
     blob_sha = 'e' * 40
-    backup_ref = 'backup/before-v5.1.2-test'
+    backup_ref = 'backup/before-v5.1.3-test'
     def fake_request(method, path, **kwargs):
         calls.append((method, path, kwargs))
         if method == 'GET' and path.endswith('/git/ref/heads/main'):
@@ -118,7 +120,12 @@ def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
         archive = Path(temp) / 'release.tar.gz'
         archive.write_bytes(b'archive')
         monkeypatch.setattr(m, '_github_main_public_files', lambda *_args: {'keep.txt': b'new'})
-        result = m._github_main_sync(archive, '5.1.2', hashlib.sha256(b'archive').hexdigest())
+        result = m._github_main_sync(archive, '5.1.3', hashlib.sha256(b'archive').hexdigest())
         assert result['stale_count'] == 1
         assert result['stale_paths_removed'] == ['obsolete.md']
 
+
+def test_repository_root_is_minimal():
+    repo = ROOT.parent
+    files = sorted(p.name for p in repo.iterdir() if p.is_file())
+    assert files == ["LICENSE", "README.md", "install.sh"]

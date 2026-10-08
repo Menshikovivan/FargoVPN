@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
 def read(name):
@@ -36,9 +36,9 @@ def test_backup_delivery_has_no_duplicate_scheduler_launcher():
 
 
 def test_release_files_are_current():
-    assert read("VERSION").strip() == "5.1.2"
-    assert read("app/VERSION").strip() == "5.1.2"
-    assert read("README.md").startswith("# FargoVPN") and "Текущая версия: `5.1.2`" in read("README.md")
+    assert read("VERSION").strip() == "5.1.3"
+    repo_readme = Path(ROOT.parent / "README.md").read_text(encoding="utf-8")
+    assert repo_readme.startswith("# FargoVPN") and "5.1.3" in repo_readme
     assert not list(ROOT.glob("RELEASE_NOTES_*.md"))
     assert not (ROOT / "INSTALLED_CHANGELOG.md").exists()
     assert not (ROOT / "INSTALLED_CHANGELOG_VERSION").exists()

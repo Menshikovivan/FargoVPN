@@ -214,9 +214,9 @@ def inspect_archive(path: Path) -> dict[str, Any]:
                     raise UpdateError("Слишком большой распакованный объём архива")
                 install_names.add(name.rstrip("/"))
                 # Supported release layouts:
-                #   VERSION + install.sh + application files at the archive root (current format)
-                #   app/VERSION + install.sh + application files at the archive root (legacy format)
-                #   <prefix>/app/VERSION + <prefix>/install.sh (packaged/legacy format)
+                #   app/VERSION + root install.sh + app/install.sh (current format)
+                #   VERSION + install.sh + application files at the archive root (legacy format)
+                #   <prefix>/app/VERSION + <prefix>/install.sh (packaged legacy format)
                 if name == "VERSION" or name.endswith("/VERSION"):
                     candidate_prefix = name[:-len("VERSION")].rstrip("/")
                     candidate_is_app_layout = candidate_prefix == "app" or candidate_prefix.endswith("/app")
@@ -228,8 +228,10 @@ def inspect_archive(path: Path) -> dict[str, Any]:
             if version_member is None:
                 raise UpdateError("В архиве не найден VERSION (поддерживаются VERSION и app/VERSION)")
             install_name = f"{root_prefix + '/' if root_prefix else ''}install.sh"
-            if install_name not in install_names:
-                raise UpdateError("В архиве не найден install.sh")
+            legacy_installer = install_name in install_names
+            modern_installer = f"{root_prefix + '/' if root_prefix else ''}app/install.sh" in install_names
+            if not (legacy_installer or modern_installer):
+                raise UpdateError("В архиве не найден install.sh или app/install.sh")
             extracted = archive.extractfile(version_member)
             if extracted is None:
                 raise UpdateError("Не удалось прочитать версию обновления")
@@ -1106,10 +1108,9 @@ def _github_restore_main(base_sha: str, failed_sha: str) -> str:
 
 
 def github_release_tag(version: str) -> str:
-    prefix = str(getattr(config, "GITHUB_RELEASE_TAG_PREFIX", "v") or "v").strip()
-    if not prefix:
-        prefix = "v"
-    return f"{prefix}{version}"
+    # New public releases always use standard SemVer tags. Legacy releases such
+    # as FargoVPN-5.1.2 remain readable through the fallback version parser.
+    return f"v{version}"
 
 
 def github_release_name(version: str) -> str:
@@ -1520,14 +1521,15 @@ fi
 PACKAGE_ROOT="$TMP/${{TOP_DIRS[0]}}"
 tar -xzf "$ARCHIVE" -C "$TMP" || {{ echo "Не удалось распаковать полный пакет FargoVPN во временный каталог." >&2; exit 1; }}
 
-[[ -f "$PACKAGE_ROOT/install.sh" ]] || {{ echo "В полном пакете не найден install.sh." >&2; exit 1; }}
-[[ -f "$PACKAGE_ROOT/VERSION" ]] || {{ echo "В полном пакете не найден VERSION." >&2; exit 1; }}
-VERSION="$(tr -d '[:space:]' < "$PACKAGE_ROOT/VERSION")"
+INSTALLER="$PACKAGE_ROOT/app/install.sh"
+VERSION_FILE="$PACKAGE_ROOT/app/VERSION"
+[[ -f "$INSTALLER" && -f "$VERSION_FILE" ]] || {{ echo "В полном пакете не найден app/install.sh или app/VERSION." >&2; exit 1; }}
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 echo "[FargoVPN bootstrap] Версия полного пакета: $VERSION"
 echo "[FargoVPN bootstrap] Запуск штатного установщика..."
 
 set +e
-/bin/bash "$PACKAGE_ROOT/install.sh" "$@"
+/bin/bash "$INSTALLER" "$@"
 STATUS=$?
 set -e
 exit "$STATUS"
@@ -1571,11 +1573,12 @@ def _github_main_public_files(archive_root: Path, archive_path: Path, version: s
     if not version_file.is_file():
         version_file = archive_root / "app" / "VERSION"
     if not version_file.is_file():
-        raise UpdateError("Для синхронизации main не найден VERSION")
-    files["VERSION"] = version_file.read_bytes()
-    # main/install.sh is always the generated bootstrap, never the internal
-    # full installer, so a one-line public installation command remains stable.
+        raise UpdateError("Для синхронизации main не найден VERSION/app/VERSION")
+    # Keep the release archive structure in main, except that the public root
+    # install.sh is always the generated bootstrap rather than the full installer.
     files["install.sh"] = _github_main_bootstrap().encode("utf-8")
+    # A root VERSION is intentionally not created: version metadata lives in app/VERSION.
+    files.pop("VERSION", None)
     return files
 
 
@@ -1618,17 +1621,32 @@ def _verify_github_main_tree(owner: str, repo: str, commit_sha: str, expected_pa
 
 
 def _github_main_sync(source_archive: Path, version: str, checksum: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """Replace public main with one commit, explicitly prune stale paths, and keep a temporary backup ref."""
+    """Replace public main with one commit built from an uploaded release archive."""
+    with tempfile.TemporaryDirectory(prefix="fargovpn-main-sync-") as temp_dir:
+        root = safe_extract(source_archive, Path(temp_dir))
+        public_files = _github_main_public_files(root, source_archive, version, checksum)
+    return _github_main_sync_public_files(public_files, version, progress)
+
+
+def _github_main_sync_directory(source_root: Path, version: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """Repair/synchronize main directly from a package/repository root directory."""
+    root = source_root.resolve()
+    version_file = root / "VERSION"
+    if not version_file.is_file():
+        version_file = root / "app" / "VERSION"
+    if not root.is_dir() or not version_file.is_file():
+        raise UpdateError(f"Не найдено исходное дерево для синхронизации main: {root}")
+    public_files = _github_main_public_files(root, root / "release-source-placeholder.tar.gz", version, "")
+    return _github_main_sync_public_files(public_files, version, progress)
+
+
+def _github_main_sync_public_files(public_files: dict[str, bytes], version: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """Publish an exact public file map to main with a safety ref and rollback."""
     branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
     if branch != "main":
         raise UpdateError("Автосинхронизация публичного main требует GITHUB_TARGET_BRANCH=main")
     if not github_main_sync_enabled():
         raise UpdateError("Публикация требует синхронизации main: включите GITHUB_MAIN_SYNC_ENABLED")
-
-    with tempfile.TemporaryDirectory(prefix="fargovpn-main-sync-") as temp_dir:
-        root = safe_extract(source_archive, Path(temp_dir))
-        public_files = _github_main_public_files(root, source_archive, version, checksum)
-
     owner = quote(github_owner(), safe="")
     repo = quote(github_repo(), safe="")
     ref_path = f"/repos/{owner}/{repo}/git/ref/heads/{quote(branch, safe='')}"
@@ -1723,6 +1741,12 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
         except Exception:
             LOGGER.warning("Не удалось удалить backup-ветку GitHub %s после сбоя синхронизации main", backup_ref, exc_info=True)
         raise
+    branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
+    if branch != "main":
+        raise UpdateError("Автосинхронизация публичного main требует GITHUB_TARGET_BRANCH=main")
+    if not github_main_sync_enabled():
+        raise UpdateError("Публикация требует синхронизации main: включите GITHUB_MAIN_SYNC_ENABLED")
+
 
 def _release_tag_sha(tag: str) -> str | None:
     base = f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}"
@@ -2337,10 +2361,18 @@ def start_update_job(
         }
 
 
+def _package_installer(package_root: Path) -> Path:
+    modern = package_root / "app" / "install.sh"
+    legacy = package_root / "install.sh"
+    if modern.is_file():
+        return modern
+    if legacy.is_file():
+        return legacy
+    raise UpdateError("Установщик обновления не найден")
+
+
 def installer_command(package_root: Path) -> tuple[list[str], dict[str, str]]:
-    installer = package_root / "install.sh"
-    if not installer.is_file():
-        raise UpdateError("Установщик обновления не найден")
+    installer = _package_installer(package_root)
     environment = dict(os.environ)
     environment["VPN_UPDATE_STATUS_FILE"] = str(status_path())
     version_path = package_root / "VERSION"
@@ -2351,9 +2383,7 @@ def installer_command(package_root: Path) -> tuple[list[str], dict[str, str]]:
 
 
 def launch_update(package_root: Path, version: str) -> str:
-    installer = package_root / "install.sh"
-    if not installer.is_file():
-        raise UpdateError("Установщик обновления не найден")
+    installer = _package_installer(package_root)
     root = update_dir()
     root.mkdir(parents=True, exist_ok=True)
     log_path = root / "update.log"
@@ -2387,11 +2417,21 @@ def launch_update(package_root: Path, version: str) -> str:
 def _main() -> int:
     parser = RussianArgumentParser(description="Инструменты проверки пакетов обновления VPN Service")
     parser.add_argument("--verify", metavar="АРХИВ", help="проверить архив релиза без установки")
+    parser.add_argument("--sync-main-directory", metavar="DIR", help="синхронизировать public main из установленного runtime-каталога")
+    parser.add_argument("--version", metavar="VERSION", help="версия для --sync-main-directory")
     parser.add_argument("--json", action="store_true", help="вывести результат в формате JSON")
     args = parser.parse_args()
     if args.verify:
         result = inspect_archive(Path(args.verify))
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else f"OK {result['version']} {result['sha256']}")
+        return 0
+    if args.sync_main_directory:
+        version = str(args.version or current_version()).strip()
+        if not github_main_sync_enabled() or not github_token():
+            result = {"synced": False, "skipped": True, "reason": "GitHub publisher disabled or token missing"}
+        else:
+            result = _github_main_sync_directory(Path(args.sync_main_directory), version)
+        print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else str(result))
         return 0
     parser.print_help()
     return 0

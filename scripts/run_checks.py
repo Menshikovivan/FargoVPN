@@ -32,8 +32,9 @@ def main():
         if not any(part.startswith('.') or part=='node_modules' for part in path.relative_to(root).parts):ast.parse(path.read_text(),filename=str(path))
     for path in root.rglob('*.sh'):
         if not any(part.startswith('.') or part=='node_modules' for part in path.relative_to(root).parts):subprocess.run(['bash','-n',str(path)],check=True)
-    for path in [root/'service-worker.js',* (root/'static').glob('*.js')]:subprocess.run([node,'--check',str(path)],check=True)
-    copies=[(root/name).read_text().strip() for name in ['VERSION','app/VERSION','static/VERSION']]
+    app=root/'app'
+    for path in [app/'service-worker.js',* (app/'static').glob('*.js')]:subprocess.run([node,'--check',str(path)],check=True)
+    copies=[(root/'app/VERSION').read_text().strip(), (root/'app/static/VERSION').read_text().strip()]
     if len(set(copies))!=1:raise RuntimeError('Version copies differ')
     if not re.fullmatch(r'\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?', copies[0]): raise RuntimeError('Invalid VERSION')
     with tempfile.TemporaryDirectory(prefix='fargovpn-qa-') as temporary:
