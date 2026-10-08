@@ -1667,7 +1667,8 @@ def _github_main_sync_public_files(public_files: dict[str, bytes], version: str,
     commit_sha = ""
     try:
         entries: list[dict[str, Any]] = []
-        for path, data in sorted(public_files.items()):
+        total_files = max(1, len(public_files))
+        for index, (path, data) in enumerate(sorted(public_files.items()), start=1):
             blob = github_request(
                 "POST", f"/repos/{owner}/{repo}/git/blobs",
                 json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
@@ -1679,7 +1680,7 @@ def _github_main_sync_public_files(public_files: dict[str, bytes], version: str,
                 raise UpdateError(f"GitHub вернул некорректный blob SHA для {path}")
             entries.append({"path": path, "mode": "100755" if path.endswith(".sh") else "100644", "type": "blob", "sha": blob_sha})
             if progress:
-                progress(path)
+                progress(f"{index}/{total_files}::{path}")
 
         # IMPORTANT: build the new tree from scratch. Do not inherit base_tree.
         # The expected file set is the complete public repository surface, so
@@ -1816,7 +1817,131 @@ def _verify_published_release(release_id: int, tag: str, commit_sha: str, expect
     }
 
 
-def publish_update(source: Path, original_name: str = "update.tar.gz") -> dict[str, Any]:
+PUBLISH_BUSY_STATES = {"queued", "validating", "syncing-main", "creating-release", "uploading-assets", "verifying", "completed", "failed"}
+
+def publish_status_path() -> Path:
+    return update_dir() / "publish" / "status.json"
+
+def _publish_status_is_fresh(status: dict[str, Any] | None = None) -> bool:
+    current = status if isinstance(status, dict) else read_publish_status()
+    updated = str(current.get("updated_at") or "").strip()
+    if not updated:
+        return False
+    try:
+        stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds() <= max(900, int(getattr(config, "UPDATE_STALE_JOB_SECONDS", 7200)))
+    except (TypeError, ValueError):
+        return False
+
+def write_publish_status(state: str, **details: Any) -> None:
+    path = publish_status_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with _STATUS_LOCK, lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        previous: dict[str, Any] = {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                previous = loaded
+        except Exception:
+            pass
+        progress = details.get("progress", previous.get("progress", 0))
+        try:
+            progress = max(0, min(100, int(progress)))
+        except (TypeError, ValueError):
+            progress = 0
+        data = {
+            **previous,
+            "state": str(state),
+            "progress": progress,
+            "revision": int(previous.get("revision") or 0) + 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **details,
+        }
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
+        try:
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.chmod(temp, 0o600)
+            temp.replace(path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+def read_publish_status() -> dict[str, Any]:
+    try:
+        return json.loads(publish_status_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def publish_job_busy(status: dict[str, Any] | None = None) -> bool:
+    current = status if isinstance(status, dict) else read_publish_status()
+    return str(current.get("state") or "") in {"queued", "validating", "syncing-main", "creating-release", "uploading-assets", "verifying"} and _publish_status_is_fresh(current)
+
+def publish_job_manifest_path(job_id: str) -> Path:
+    safe = re.sub(r"[^0-9A-Za-z._-]", "_", str(job_id))[:120]
+    return update_dir() / "publish" / "jobs" / f"{safe}.json"
+
+def write_publish_job_manifest(job_id: str, actor: str, archive: Path, original_name: str, version: str) -> Path:
+    path = publish_job_manifest_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "job_id": job_id, "actor": str(actor)[:100], "archive": str(archive.resolve()),
+        "original_name": Path(original_name).name, "version": version,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(temp, 0o600)
+    temp.replace(path)
+    return path
+
+def read_publish_job_manifest(job_id: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(publish_job_manifest_path(job_id).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+def start_publish_job(source: Path, original_name: str, actor: str = "web") -> dict[str, Any]:
+    info = inspect_archive(source)
+    if publish_job_busy():
+        raise UpdateError("Другая публикация GitHub уже выполняется")
+    root = update_dir() / "publish" / "pending"
+    root.mkdir(parents=True, exist_ok=True)
+    job_id = f"pub-{int(time.time())}-{secrets.token_hex(4)}"
+    target = root / f"{job_id}.tar.gz"
+    shutil.copy2(source, target)
+    os.chmod(target, 0o600)
+    write_publish_job_manifest(job_id, actor, target, original_name, str(info["version"]))
+    write_publish_status(
+        "queued", job_id=job_id, version=str(info["version"]), actor=str(actor)[:100], progress=1,
+        phase="queue", message="Архив принят; публикация GitHub поставлена в очередь", error="",
+        finished_at="", github_tag="", github_release_url="", github_main_commit_sha="",
+    )
+    python = APP_DIR / ".venv" / "bin" / "python"
+    if not python.is_file():
+        python = Path(os.sys.executable)
+    worker = APP_DIR / "publish_worker.py"
+    unit = f"vpn-service-publish-worker-{int(time.time())}-{secrets.token_hex(2)}"
+    try:
+        from detached_jobs import DetachedJobError, launch_detached
+        launcher = launch_detached(
+            unit,
+            [str(python), str(worker), "--job-id", job_id],
+            description=f"Публикация FargoVPN {info['version']} в GitHub",
+            working_directory=APP_DIR,
+        )
+    except DetachedJobError as error:
+        target.unlink(missing_ok=True)
+        write_publish_status("failed", job_id=job_id, version=str(info["version"]), progress=1, phase="launch", message="Не удалось запустить публикацию", error=str(error), finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        raise UpdateError(str(error)) from error
+    write_publish_status("queued", job_id=job_id, version=str(info["version"]), actor=str(actor)[:100], progress=2, phase="queue", message="Фоновая публикация GitHub запущена", launcher=launcher, unit=unit)
+    return {"job_id": job_id, "version": str(info["version"]), "state": "queued", "launcher": launcher, "unit": unit}
+
+
+def publish_update(source: Path, original_name: str = "update.tar.gz", progress: Callable[[int, str, str], None] | None = None) -> dict[str, Any]:
     if not _PUBLISH_LOCK.acquire(blocking=False):
         raise UpdateError("Другая публикация GitHub уже выполняется")
     try:
@@ -1828,12 +1953,16 @@ def publish_update(source: Path, original_name: str = "update.tar.gz") -> dict[s
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise UpdateError("Другая публикация GitHub уже выполняется") from error
-            return _publish_update_locked(source, original_name)
+            return _publish_update_locked(source, original_name, progress)
     finally:
         _PUBLISH_LOCK.release()
 
 
-def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -> dict[str, Any]:
+def _publish_update_locked(source: Path, original_name: str = "update.tar.gz", progress: Callable[[int, str, str], None] | None = None) -> dict[str, Any]:
+    def report(percent: int, phase: str, message: str) -> None:
+        if progress:
+            progress(max(0, min(100, int(percent))), phase, message)
+    report(4, "validating", "Проверяется архив обновления")
     info = inspect_archive(source)
     version = str(info["version"])
     root = update_dir()
@@ -1856,14 +1985,26 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
     if _release_tag_sha(tag):
         raise UpdateError(f"Тег {tag} уже существует. Публикация остановлена; версия релиза должна быть новой.")
 
+    report(10, "validating", "Архив проверен; подготавливаются данные GitHub")
     repo_settings = _github_configure_repository()
-    main_sync = _github_main_sync(target, version, checksum)
+    report(15, "syncing-main", "Синхронизируется публичный main")
+    def main_progress(detail: str) -> None:
+        # The sync callback carries a stable file counter, so the UI can show real progress.
+        head, _, path = str(detail).partition("::")
+        try:
+            current, total = [int(item) for item in head.split("/", 1)]
+        except (TypeError, ValueError):
+            current, total = 1, 1
+        report(15 + int(min(33, current / max(1, total) * 33)), "syncing-main", f"GitHub main: {current}/{max(1,total)} файлов · {path}")
+    setattr(_publish_update_locked, "_main_seen", 0)
+    main_sync = _github_main_sync(target, version, checksum, progress=main_progress)
     if not main_sync.get("synced") or not main_sync.get("commit_sha"):
         raise UpdateError("GitHub не подтвердил коммит main; релиз не создавался")
 
     release_id = 0
     release: dict[str, Any] = {}
     try:
+        report(50, "creating-release", f"Создаётся GitHub Release {tag}")
         _prepare_release_tag(tag, str(main_sync["commit_sha"]))
         existing = github_request("GET", endpoint)
         draft = bool(getattr(config, "GITHUB_RELEASE_DRAFT", False))
@@ -1904,7 +2045,9 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
             (f"{generic_asset}.sha256", generic_checksum_line.encode("utf-8"), "text/plain; charset=utf-8"),
         ]
         uploaded_assets: list[dict[str, Any]] = []
-        for name, data, content_type in assets_payloads:
+        report(58, "uploading-assets", f"GitHub: подготовлено {len(assets_payloads)} assets")
+        for asset_index, (name, data, content_type) in enumerate(assets_payloads, start=1):
+            report(58 + int((asset_index - 1) * 8), "uploading-assets", f"GitHub: загружается asset {asset_index}/{len(assets_payloads)} — {name}")
             headers = {**github_headers(), "Content-Type": content_type, "Content-Length": str(len(data))}
             try:
                 upload = httpx.post(upload_url, params={"name": name}, headers=headers, content=data, timeout=600.0, follow_redirects=False)
@@ -1919,8 +2062,10 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
             if digest and digest != "sha256:" + hashlib.sha256(data).hexdigest():
                 raise UpdateError(f"GitHub вернул несовпадающий digest asset {name}")
             uploaded_assets.append(uploaded)
+            report(58 + int(asset_index * 8), "uploading-assets", f"GitHub: asset {asset_index}/{len(assets_payloads)} загружен")
 
         asset = next(item for item in uploaded_assets if str(item.get("name") or "") == asset_name)
+        report(92, "verifying", "Проверяются tag, Release и все assets")
         _verify_release_tag(tag, str(main_sync["commit_sha"]))
         verified_release = _verify_published_release(release_id, tag, str(main_sync["commit_sha"]), [name for name, _, _ in assets_payloads], target.stat().st_size, checksum)
 
@@ -1930,6 +2075,7 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
             except Exception:
                 LOGGER.warning("Не удалось удалить временную backup-ветку GitHub %s после успешного релиза", main_sync.get("backup_ref"), exc_info=True)
 
+        report(98, "verifying", "GitHub подтвердил Release; завершается публикация")
         metadata = {
             "version": version,
             "filename": asset_name,
