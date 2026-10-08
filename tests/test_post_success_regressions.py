@@ -83,12 +83,15 @@ def test_update_status_reads_are_best_effort_after_jobs_start():
         src = func(name)
         if name == "updates_rollback":
             assert "start_rollback_job(" in src
+            assert "update_manager.read_status()" in src
+            assert "LOGGER.warning" in src
         elif name == "updates_publish":
-            assert "publish_update(" in src
+            assert "start_publish_job(" in src
+            assert "update_manager.read_publish_status()" in src
         else:
             assert "start_update_job(" in src
-        assert "update_manager.read_status()" in src
-        assert "LOGGER.warning" in src
+            assert "update_manager.read_status()" in src
+            assert "LOGGER.warning" in src
 
 
 def test_restart_service_does_not_emit_unhandled_500_on_systemd_run_failure():
