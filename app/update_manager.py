@@ -2477,24 +2477,18 @@ def start_update_job(
                 error="",
             )
             deadline = time.monotonic() + 2.2
+            acknowledged = False
             while time.monotonic() < deadline:
                 current_status = read_status()
                 if str(current_status.get("job_id") or "") == job_id and int(current_status.get("progress") or 0) >= 3:
+                    acknowledged = True
                     break
                 if str(current_status.get("state") or "") == "failed" and str(current_status.get("job_id") or "") == job_id:
                     raise UpdateError(str(current_status.get("error") or "Фоновый worker завершился с ошибкой"))
                 time.sleep(0.1)
-            write_status(
-                "queued",
-                job_id=job_id,
-                unit=unit,
-                pid=process_id,
-                launcher=launcher,
-                progress=2,
-                phase="queue",
-                message="Фоновый процесс обновления запущен; начинается проверка пакета",
-                error="",
-            )
+            if not acknowledged:
+                launcher_log = update_launcher_log_path()
+                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 2,2 с; журнал запуска: {launcher_log}")
         except Exception as error:
             write_status(
                 "failed",
