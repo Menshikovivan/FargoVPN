@@ -5433,12 +5433,18 @@ def updates_status_api(request: Request):
 def _update_output_tail() -> str:
     from log_reader import tail_lines
     from log_security import redact
-    try:
-        return redact(''.join(tail_lines(update_manager.update_log_path(), 100, 131072)[0]))
-    except FileNotFoundError:
-        return "Вывод установщика пока отсутствует"
-    except OSError as error:
-        return f"Вывод установщика недоступен: errno={error.errno}"
+    paths = [update_manager.update_launcher_log_path(), update_manager.update_log_path()]
+    chunks = []
+    for path in paths:
+        try:
+            value = ''.join(tail_lines(path, 100, 131072)[0]).strip()
+            if value:
+                chunks.append(f"--- {path.name} ---\\n{value}")
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            chunks.append(f"--- {path.name} ---\\nЖурнал недоступен: errno={error.errno}")
+    return redact('\\n\\n'.join(chunks) or "Вывод установщика пока отсутствует")
 
 
 @app.get("/api/updates/availability")
