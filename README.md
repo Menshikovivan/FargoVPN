@@ -1,4 +1,4 @@
-# FargoVPN 4.9.3
+# FargoVPN 5.0.0
 
 <div align="center">
 
@@ -6,7 +6,7 @@
 
 Одна платформа для пользователей, платежей, сообщений и обслуживания VPN.
 
-[![Version](https://img.shields.io/badge/version-4.9.3-2563eb)](./VERSION)
+[![Version](https://img.shields.io/badge/version-5.0.0-2563eb)](./VERSION)
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white)
 ![Database](https://img.shields.io/badge/database-PostgreSQL-4169e1?logo=postgresql&logoColor=white)
 [![License](https://img.shields.io/badge/license-Personal_Use-64748b)](./LICENSE)
@@ -19,7 +19,7 @@
 
 FargoVPN — персональная платформа управления VPN-подписками через Telegram-бота и веб-панель с интеграцией 3x-ui. Пользователь регистрируется, оплачивает подписку и получает ссылку подключения; администратор управляет сервисом из одного интерфейса.
 
-> **В версии 4.9.3:** исправлены повторные чеки, статус новых пользователей и фото в панели; добавлен фильтр даты регистрации. [Изменения →](./CHANGELOG.md)
+> **В версии 5.0.0:** исправлены рассылка из панели, фильтр/сортировка пользователей, диагностика PostgreSQL и установщик; удалён профиль установки. [Изменения →](./CHANGELOG.md)
 
 ## Возможности
 
@@ -71,13 +71,12 @@ flowchart TD
 
 Поддерживаемая установщиком среда — сервер Ubuntu/Debian с `systemd`. Основной runtime использует Python, PostgreSQL, SQLAlchemy/psycopg и HTTP-клиенты. OCR требует Tesseract. Для web-панели нужен Unix-сокет, а внешний reverse-proxy/Nginx, если он используется, настраивается отдельно от FargoVPN.
 
-Точный перечень Python-зависимостей находится в `requirements.txt` и `requirements-lite.txt`. Рекомендуется выделять отдельный серверный runtime и не переносить production `config.py` в репозиторий.
+Точный перечень Python-зависимостей находится в `requirements.txt`. Рекомендуется выделять отдельный серверный runtime и не переносить production `config.py` в репозиторий.
 
 ## Быстрая установка
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh -o /tmp/fargovpn-install.sh
-sudo bash /tmp/fargovpn-install.sh
+curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash
 ```
 
 Установщик проверяет root/systemd, зависимости, целостность скачанного архива и его SHA-256, затем запускает штатную установку. В конце отображается итоговая сводка по установленной версии, web-панели, службам и health-check.
@@ -90,7 +89,6 @@ sudo bash /tmp/fargovpn-install.sh
 
 | Параметр | Назначение |
 |---|---|
-| `INSTALL_PROFILE` | Профиль установки `full`/`lite`. |
 | `SERVICE_NAME` | Отображаемое имя сервиса. |
 | `BOT_TOKEN` | Токен Telegram-бота; хранить только вне публичного репозитория. |
 | `ADMIN_IDS` | Telegram ID администраторов. |
@@ -217,14 +215,14 @@ FargoVPN распространяется по условиям `LICENSE` — Pe
 
 Используйте проект только в соответствии с законодательством, правилами провайдера и применимыми условиями сервисов, с которыми он интегрируется.
 
-## Обновление 4.9.3
+## Обновление 5.0.0
 
 Исправлены повторные чеки, статус подписки и медиа в переписке; добавлен диапазон дат регистрации и пагинация списка пользователей.
-Миграция добавляет `payments.purchase_token` и два индекса автоматически через `init_db.py` (или вручную `migrations/payment_submission_4_9_3.sql`). Старые платежи не переписываются.
+Исторические платежи не переписываются. Актуальные миграции базы выполняются штатным `init_db.py`.
 После обновления установщик обновляет управляемый location Nginx. Если используете собственный reverse proxy, разрешите размер тела запроса для фото и multipart overhead.
 Открытую до обновления оплату нужно заново открыть через кнопку покупки: состояние FSM хранится в памяти.
-Подробности, изменённые файлы и ручные проверки: [TEST_REPORT_4.9.3.md](./TEST_REPORT_4.9.3.md).
+Подробности, изменённые файлы и ручные проверки: [TEST_REPORT_5.0.0.md](./TEST_REPORT_5.0.0.md).
 Для запуска тестов: `python -m pip install -r requirements-dev.txt`, затем `python -m pytest tests -q`.
-Релизный asset: `VPN_Service_Platform_4.9.3_FULL.tar.gz`; стандартный tag: `FargoVPN-4.9.3`.
+Релизный asset: `VPN_Service_Platform_5.0.0_FULL.tar.gz`; стандартный tag: `FargoVPN-5.0.0`.
 Используйте штатную публикацию архива на основной панели или загрузите архив в GitHub Releases.
-Описание публикации формируется только из раздела 4.9.3 в `CHANGELOG.md`. Старые разделы остаются в файле как история.
+Описание публикации формируется только из раздела 5.0.0 в `CHANGELOG.md`. Старые разделы остаются в файле как история.
