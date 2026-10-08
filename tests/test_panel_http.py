@@ -50,6 +50,7 @@ manager.cached_update_info = lambda: {}
 manager.check_available_update = lambda **kw: {}
 manager.list_preupdate_backups = lambda: []
 manager.latest_local_update = lambda: None
+manager.github_release_history = lambda *a: []
 web.user_events.unread_messages_summary = lambda **kw: {"total": 0}
 web.service_state = lambda *a, **kw: "active"
 web.fetch_and_sync = lambda **kw: {"clients": [], "stale": False}
@@ -82,7 +83,7 @@ for session_user, configured_user, expected in (
     assert response.status_code == 200
     assert response.json()["version"] == (ROOT / "VERSION").read_text().strip()
     response = client.get("/api/updates/releases")
-    assert response.status_code == 404, response.text
+    assert response.status_code == (200 if expected else 403), response.text
     response = client.post("/updates/config", headers={"x-csrf-token": "test-csrf"})
     assert response.status_code == (410 if expected else 403), response.text
 # Execute settings validation through the persistence boundary without writing.

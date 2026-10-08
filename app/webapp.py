@@ -5495,6 +5495,31 @@ def updates_log_api(request: Request):
     return FileResponse(path, media_type="text/plain; charset=utf-8", filename="vpn-service-update.log")
 
 
+@app.get("/api/updates/releases")
+def updates_releases_api(request: Request):
+    require_auth(request)
+    if not can_publish_update(request):
+        raise HTTPException(403, "Список релизов для отката доступен только из основной панели")
+    installed = update_manager.current_version()
+    try:
+        releases = update_manager.github_release_history(30)
+        return {
+            "ok": True,
+            "installed_version": installed,
+            "items": [
+                {
+                    "version": str(item.get("version") or ""),
+                    "published_at": str(item.get("published_at") or ""),
+                    "size": int(item.get("size") or 0),
+                    "older": update_manager.version_key(str(item.get("version") or "")) < update_manager.version_key(installed),
+                }
+                for item in releases
+            ],
+        }
+    except Exception as error:
+        return JSONResponse({"ok": False, "detail": str(error), "items": []}, status_code=502)
+
+
 # Совместимость: старые клиенты /panel автоматически направляются на новые API-алиасы.
 def update_publisher_for_request(request: Request) -> bool:
     """Return whether the current web session is the dedicated publisher account."""
@@ -5512,6 +5537,8 @@ def updates_page(request: Request):
     info = update_manager.cached_update_info()
     status = update_manager.read_status()
     publisher = can_publish_update(request)
+    previous_versions = update_manager.list_preupdate_backups()
+    rollback_candidate = next((item for item in previous_versions if item.get("valid")), None)
     published_update = update_manager.latest_local_update() if publisher else None
     published_install_ready = bool(
         published_update
@@ -5528,6 +5555,7 @@ def updates_page(request: Request):
         "scheduled": "Запланировано",
         "installing": "Установка",
         "migrating": "Обновление базы",
+        "rolling-back": "Восстановление предыдущей версии",
         "restarting": "Перезапуск служб",
         "health-check": "Проверка запуска",
         "completed": "Завершено",
@@ -5556,15 +5584,15 @@ def updates_page(request: Request):
         f'<div class="card full changelog-card"><div class="section-title"><h2>Описание последнего GitHub Release — {html.escape(str(info.get("version") or "текущая версия"))}</h2><span class="badge good">GITHUB</span></div><pre class="changelog">{html.escape(changelog_text)}</pre></div>'
         if changelog_text else ''
     )
-    history_items = update_manager.changelog_history(8, exclude_version=installed_changelog_version)
-    history_block = ""
-    if history_items:
-        history_cards = []
-        for item in history_items:
-            history_cards.append(
-                f'<details class="changelog-history-item"><summary><strong>FargoVPN {html.escape(item["version"])}</strong></summary><pre class="changelog">{html.escape(item["text"])}</pre></details>'
-            )
-        history_block = f'<div class="card full changelog-card"><div class="section-title"><h2>История изменений предыдущих версий</h2><span class="badge">LOCAL CHANGELOG</span></div><div class="changelog-history">{"".join(history_cards)}</div></div>'
+    rollback_block = ''
+    if publisher and rollback_candidate:
+        rollback_block = f'''<div class="card full"><div class="section-title"><h2>Откат к предыдущей версии</h2><span class="badge warn">Резервная копия найдена</span></div>
+<p>Последняя сохранённая версия: <strong>{html.escape(str(rollback_candidate.get("version") or "неизвестно"))}</strong> · {html.escape(str(rollback_candidate.get("filename") or ""))}</p>
+<p class="muted">Откат восстанавливает файлы приложения и сохранённую systemd-конфигурацию перед обновлением.</p>
+<form method="post" action="{html.escape(public_path("/updates/rollback"), quote=True)}" onsubmit="return confirm('Откатить систему к предыдущей сохранённой версии? Текущая версия будет заменена.')"><input type="hidden" name="backup_path" value="{html.escape(str(rollback_candidate.get("path") or ""), quote=True)}"><button class="danger" {'disabled' if busy else ''}>Откатить к {html.escape(str(rollback_candidate.get("version") or "предыдущей версии"))}</button></form></div>'''
+    elif publisher and previous_versions:
+        rollback_error = str(previous_versions[0].get("validation_error") or "Снимок неполный")
+        rollback_block = f'''<div class="card full"><div class="section-title"><h2>Откат к предыдущей версии</h2><span class="badge bad">Старый снимок повреждён</span></div><p class="muted">{html.escape(rollback_error)}. Кнопка отключена, чтобы не останавливать рабочую установку. Для возврата к старому релизу используйте безопасную принудительную установку выше.</p><button class="danger" disabled>Откат недоступен</button></div>'''
     if published_install_ready:
         published_version = html.escape(str(published_update.get("version") or ""))
         published_name = html.escape(str(published_update.get("filename") or "архив"))
@@ -5600,6 +5628,9 @@ def updates_page(request: Request):
         publisher_block = '<div class="card half"><h2>Центр обновлений</h2><p class="muted">Для этой учётной записи доступны только проверка и установка обновлений.</p></div>'
         manual_block = ""
     downgrade_block = ""
+    if publisher:
+        downgrade_block = f'''<div class="card full downgrade-card"><div class="section-title"><div><h2>Принудительная установка предыдущей версии</h2><p class="muted">Аварийный инструмент администратора. Конфигурация и база сохраняются установщиком.</p></div><span class="badge warn">Требует подтверждения</span></div>
+    <form id="force-version-form" class="force-version-form" method="post" action="{html.escape(public_path("/updates/force-version"), quote=True)}"><div class="setting"><label for="force-version-select">Версия из GitHub Releases</label><select id="force-version-select" name="version" required disabled><option value="">Загрузка списка…</option></select></div><label class="check-row"><input type="checkbox" name="confirm_downgrade" value="1" required> Понимаю, что будет установлена более ранняя версия</label><button id="force-version-button" class="danger" disabled {'disabled' if busy else ''}>Установить выбранную версию</button><div id="force-version-status" class="muted">Получаю опубликованные версии…</div></form></div>'''
     error = f'<div class="notice">{html.escape(str(info.get("error")))}</div>' if info.get("error") else ""
     progress_value = max(0, min(100, int(status.get("progress") or 0)))
     status_message = str(status.get("message") or status.get("detail") or "Установка ещё не запускалась")
@@ -5611,7 +5642,7 @@ def updates_page(request: Request):
 <div class="grid"><div class="card half"><div class="section-title"><h2>Текущая установка</h2>{state_badge}</div>
 <p>Установлено: <strong id="update-current-version">{html.escape(update_manager.current_version())}</strong></p>
 <p>Последний релиз: <strong>{html.escape(str(info.get('version') or '—'))}</strong></p>
-<p>Источник: <span class="code">{html.escape(source_text)}</span></p>{source_details}{apply_form}</div>{publisher_block}{installed_changelog_block}{changelog_block}{history_block}{manual_block}</div>"""
+<p>Источник: <span class="code">{html.escape(source_text)}</span></p>{source_details}{apply_form}</div>{publisher_block}{downgrade_block}{installed_changelog_block}{changelog_block}{rollback_block}{manual_block}</div>"""
     initial = json.dumps(status, ensure_ascii=False, default=str).replace("<", "\\u003c")
     script = r'''<script>
 (function(){
@@ -5619,9 +5650,9 @@ const initial=__INITIAL__;
 const basePath=__BASE_PATH__;
 const purl=(p)=>{const raw=String(p||'/');if(raw===basePath||raw.startsWith(basePath+'/'))return raw;return basePath+(raw.startsWith('/')?raw:'/'+raw);};
 const pageVersion=__PAGE_VERSION__;const isPublisher=__PUBLISHER__;const updateDoneQuery=new URLSearchParams(location.search).get('update_done')==='1';
-const busyStates=new Set(['queued','checking','downloading','verifying','extracting','scheduled','installing','migrating','restarting','health-check']);
+const busyStates=new Set(['queued','checking','downloading','verifying','extracting','scheduled','installing','migrating','rolling-back','restarting','health-check']);
 const csrfMeta=document.querySelector('meta[name="fargovpn-csrf-token"]');const csrfToken=csrfMeta?String(csrfMeta.content||''):'';
-const stateLabels={idle:'Ожидание',queued:'В очереди',checking:'Проверка версии',downloading:'Скачивание',verifying:'Проверка архива',extracting:'Распаковка',scheduled:'Запланировано',installing:'Установка',migrating:'Обновление базы',restarting:'Перезапуск служб',health-check:'Проверка запуска',completed:'Завершено',failed:'Ошибка'};
+const stateLabels={idle:'Ожидание',queued:'В очереди',checking:'Проверка версии',downloading:'Скачивание',verifying:'Проверка архива',extracting:'Распаковка',scheduled:'Запланировано',installing:'Установка',migrating:'Обновление базы','rolling-back':'Восстановление предыдущей версии',restarting:'Перезапуск служб','health-check':'Проверка запуска',completed:'Завершено',failed:'Ошибка'};
 
 let lastStatus=initial||{};let lastState=String(lastStatus.state||'idle');let currentJob=String(lastStatus.job_id||sessionStorage.getItem('fargovpn_update_job')||'');let watchedJob='';try{watchedJob=sessionStorage.getItem('fargovpn_update_watch_job')||'';}catch(_){}let serverProgress=Math.max(0,Math.min(100,Number(lastStatus.progress||0)));let shownProgress=serverProgress;let reloadScheduled=false;let recoveryInFlight=false;
 const bar=document.getElementById('update-progress-bar');const value=document.getElementById('update-progress-value');const note=document.getElementById('update-connection-note');const phase=document.getElementById('update-phase');const elapsed=document.getElementById('update-elapsed');let progressStartedAt=0;
@@ -5651,7 +5682,9 @@ try{const rememberedPublish=sessionStorage.getItem('fargovpn_publish_job');if(re
 if(publishForm)publishForm.addEventListener('submit',(event)=>{event.preventDefault();const xhr=new XMLHttpRequest();const progress=document.getElementById('upload-progress');const uploadBar=document.getElementById('upload-progress-bar');const text=document.getElementById('upload-progress-text');const button=document.getElementById('publish-button');progress.classList.add('visible');button.disabled=true;text.textContent='1/2 · Передача архива на панель…';if(publishProgress)publishProgress.classList.remove('visible');xhr.open('POST',purl('/updates/publish'));xhr.setRequestHeader('Accept','application/json');if(csrfToken)xhr.setRequestHeader('X-CSRF-Token',csrfToken);xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);uploadBar.style.width=p+'%';text.textContent='1/2 · Архив загружен на панель: '+p+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch(_e){}if(xhr.status>=200&&xhr.status<300&&data.ok&&data.job?.job_id){uploadBar.style.width='100%';text.textContent='2/2 · Архив принят. Публикация GitHub выполняется…';button.disabled=true;startPublishPolling(data.job.job_id);return;}button.disabled=false;text.textContent='Ошибка запуска публикации: '+(data.detail||data.error||'HTTP '+xhr.status);if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.onerror=()=>{button.disabled=false;text.textContent='Не удалось передать архив: соединение прервалось.';if(window.panelToast)window.panelToast(text.textContent,'bad');};xhr.timeout=900000;xhr.ontimeout=xhr.onerror;xhr.send(new FormData(publishForm));});
 const manualForm=document.getElementById('manual-update-form');
 if(manualForm)manualForm.addEventListener('submit',(event)=>{event.preventDefault();if(!window.confirm('Проверить загруженный архив и установить его на этой панели?'))return;window.dispatchEvent(new Event('vpn:update-starting'));const xhr=new XMLHttpRequest();const progress=document.getElementById('manual-upload-progress');const uploadBar=document.getElementById('manual-upload-progress-bar');const text=document.getElementById('manual-upload-progress-text');const button=document.getElementById('manual-update-button');progress.classList.add('visible');button.disabled=true;text.textContent='Загрузка архива на панель…';xhr.open('POST',purl('/updates/upload-and-apply'));xhr.setRequestHeader('Accept','application/json');if(csrfToken)xhr.setRequestHeader('X-CSRF-Token',csrfToken);xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);uploadBar.style.width=p+'%';text.textContent='Загружено '+p+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch(_e){}if(xhr.status>=200&&xhr.status<300){uploadBar.style.width='100%';text.textContent='Архив проверен; установка запущена';optimisticStart('Ручной архив принят, запускается фоновая установка');renderStatus(data.status||data);scheduleStatusCheck(250);}else{button.disabled=false;text.textContent='Ошибка: '+(data.detail||data.error||'HTTP '+xhr.status);setRequestError(data.detail||data.error||'Архив не принят');}};xhr.onerror=()=>{optimisticStart('Загрузка завершилась разрывом соединения; проверяется статус задачи');text.textContent='Соединение прервалось. Если архив был принят, прогресс появится автоматически.';scheduleStatusCheck(700);};xhr.send(new FormData(manualForm));});
-renderStatus(initial);requestAnimationFrame(animateProgress);setTimeout(poll,450);
+async function loadDowngradeVersions(){if(!isPublisher)return;const select=document.getElementById('force-version-select'),button=document.getElementById('force-version-button'),status=document.getElementById('force-version-status');if(!select)return;try{const response=await fetchWithTimeout(purl('/api/updates/releases'),{cache:'no-store',credentials:'same-origin',headers:{Accept:'application/json'}},22000);const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.detail||'Список релизов недоступен');const older=(data.items||[]).filter(item=>item.older);select.innerHTML='';if(!older.length){select.innerHTML='<option value="">Предыдущих версий не найдено</option>';if(status)status.textContent='В GitHub Releases нет версии ниже установленной.';return;}older.forEach(item=>{const option=document.createElement('option');option.value=item.version;option.textContent='Версия '+item.version+(item.published_at?' · '+new Date(item.published_at).toLocaleDateString('ru-RU'):'');select.appendChild(option)});select.disabled=false;if(button)button.disabled=busyStates.has(lastState);if(status)status.textContent='Доступно предыдущих версий: '+older.length+'.';}catch(error){select.innerHTML='<option value="">Не удалось загрузить версии</option>';if(status)status.textContent='Ошибка: '+(error.message||error);}}
+const forceForm=document.getElementById('force-version-form');if(forceForm)forceForm.addEventListener('submit',async event=>{const selected=document.getElementById('force-version-select')?.value||'';if(!selected||!window.confirm('Принудительно установить версию '+selected+'? Перед заменой файлов будет создан снимок текущей установки.')){event.preventDefault();return;}event.preventDefault();const button=document.getElementById('force-version-button'),status=document.getElementById('force-version-status');if(button)button.disabled=true;if(status)status.textContent='Запускаю безопасное понижение версии…';try{const response=await fetch(forceForm.action,{method:'POST',body:new FormData(forceForm),credentials:'same-origin',headers:{Accept:'application/json'}});const type=String(response.headers.get('content-type')||'').toLowerCase();let data=null;if(type.includes('application/json'))data=await response.json();else{const text=await response.text();throw new Error('Сервер вернул '+(type||'неизвестный Content-Type')+' вместо JSON'+(text?' ('+text.slice(0,120)+')':''));}if(!response.ok||!data?.ok)throw new Error(data?.detail||('HTTP '+response.status));optimisticStart('Понижение версии '+selected+' запущено');renderStatus(data.status||data);scheduleStatusCheck(250);}catch(error){if(status)status.textContent='Ошибка: '+(error.message||error);if(button)button.disabled=false;}});
+renderStatus(initial);loadDowngradeVersions();requestAnimationFrame(animateProgress);setTimeout(poll,450);
 })();
 </script>'''.replace('__INITIAL__', initial).replace('__PAGE_VERSION__', json.dumps(update_manager.current_version())).replace('__PUBLISHER__', json.dumps(bool(publisher))).replace('__BASE_PATH__', json.dumps(public_prefix()))
     return page(request, "Обновления", body, "updates", script)
@@ -5903,6 +5936,63 @@ def updates_apply(request: Request):
     return RedirectResponse(public_path("/updates"), 303)
 
 
+@app.post("/updates/force-version")
+def updates_force_version(
+    request: Request,
+    version: str = Form(...),
+    confirm_downgrade: str = Form(""),
+):
+    """Install one explicitly selected older GitHub release."""
+    require_auth(request)
+    if not can_publish_update(request):
+        raise HTTPException(403, "Принудительная установка версии доступна только из основной панели")
+    wants_json = "application/json" in request.headers.get("accept", "")
+    try:
+        if confirm_downgrade != "1":
+            raise update_manager.UpdateError("Подтвердите принудительное понижение версии")
+        info = update_manager.github_release_by_version(version)
+        installed = update_manager.current_version()
+        if update_manager.version_key(str(info.get("version") or "")) >= update_manager.version_key(installed):
+            raise update_manager.UpdateError("Для этой кнопки выберите версию ниже установленной")
+        info = {**info, "allow_downgrade": True, "requested_by_admin": True}
+        job = update_manager.start_update_job(str(request.session.get("user", "web")), update_info=info)
+        audit(str(request.session.get("user", "web")), "force_downgrade", json.dumps({"from": installed, "to": version, "job_id": job.get("job_id")}, ensure_ascii=False))
+        if wants_json:
+            try:
+                status = update_manager.read_status()
+            except Exception as error:
+                LOGGER.warning("Понижение версии запущено, но статус задачи недоступен: %s", error)
+                status = {"state": "unknown", "message": "Статус задачи временно недоступен"}
+            return JSONResponse({"ok": True, "version": version, "job": job, "status": status}, status_code=202)
+        set_flash(request, f"Принудительная установка версии {version} запущена", "good")
+    except Exception as error:
+        if wants_json:
+            return JSONResponse({"ok": False, "detail": str(error)}, status_code=409)
+        set_flash(request, f"Не удалось запустить понижение версии: {error}", "bad")
+    return RedirectResponse(public_path("/updates"), 303)
+
+@app.post("/updates/rollback")
+def updates_rollback(request: Request, backup_path: str = Form(...)):
+    require_auth(request)
+    if not can_publish_update(request):
+        raise HTTPException(403, "Откат версии доступен только из основной панели")
+    wants_json = "application/json" in request.headers.get("accept", "")
+    try:
+        job = update_manager.start_rollback_job(str(request.session.get("user", "web")), backup_path)
+        audit(str(request.session.get("user", "web")), "rollback_update", Path(backup_path).name)
+        try:
+            status = update_manager.read_status()
+        except Exception as error:
+            LOGGER.warning("Откат запущен, но статус задачи недоступен: %s", error)
+            status = {"state": "unknown", "message": "Статус задачи временно недоступен"}
+        if wants_json:
+            return JSONResponse({"ok": True, "job": job, "status": status}, status_code=202)
+        set_flash(request, "Откат запущен; дождитесь завершения проверки служб")
+    except Exception as error:
+        if wants_json:
+            return JSONResponse({"ok": False, "detail": str(error)}, status_code=409)
+        set_flash(request, f"Не удалось запустить откат: {error}", "bad")
+    return RedirectResponse(public_path("/updates"), 303)
 
 @app.get("/diagnostics", response_class=HTMLResponse)
 def diagnostics(request: Request):

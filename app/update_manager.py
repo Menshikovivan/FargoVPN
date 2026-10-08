@@ -148,31 +148,6 @@ def installed_changelog() -> dict[str, str]:
     return {"version": version or current_version(), "text": text[:30000]}
 
 
-def changelog_history(limit: int = 8, *, exclude_version: str = "") -> list[dict[str, str]]:
-    """Return recent local CHANGELOG sections for the updates page."""
-    path = APP_DIR / "CHANGELOG.md"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    matches = list(re.finditer(r"(?ms)^##\s+\[?([0-9A-Za-z._+-]{1,64})\]?[^\n]*\n(.*?)(?=^##\s+|\Z)", text))
-    result: list[dict[str, str]] = []
-    excluded = str(exclude_version or "").strip()
-    for match in matches:
-        version = str(match.group(1) or "").strip()
-        if not re.fullmatch(r"[0-9A-Za-z._+-]{1,64}", version):
-            continue
-        if excluded and version_key(version) == version_key(excluded):
-            continue
-        body = str(match.group(2) or "").strip()
-        if not body:
-            continue
-        result.append({"version": version, "text": f"## {version}\n\n{body}"[:30000]})
-        if len(result) >= max(1, min(int(limit), 20)):
-            break
-    return result
-
-
 def version_key(value: str) -> tuple[int, ...]:
     parts = [int(item) for item in re.findall(r"\d+", str(value))]
     return tuple((parts + [0, 0, 0])[:6])
@@ -2475,6 +2450,8 @@ def start_update_job(
             str(worker),
             "--job-id",
             job_id,
+            "--startup-delay",
+            "4.0",
         ]
         launcher = ""
         launcher_error = ""
@@ -2499,10 +2476,7 @@ def start_update_job(
                 message="Фоновый процесс обновления запущен; ожидается подтверждение worker",
                 error="",
             )
-            # systemd --no-block confirms the unit was queued, not that Python
-            # actually started. Wait briefly for the worker's durable ack.
-            # The worker writes progress=3 before network/file work begins.
-            deadline = time.monotonic() + 6.0
+            deadline = time.monotonic() + 2.2
             acknowledged = False
             while time.monotonic() < deadline:
                 current_status = read_status()
@@ -2514,7 +2488,7 @@ def start_update_job(
                 time.sleep(0.1)
             if not acknowledged:
                 launcher_log = update_launcher_log_path()
-                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 6 с; журнал запуска: {launcher_log}")
+                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 2,2 с; журнал запуска: {launcher_log}")
         except Exception as error:
             write_status(
                 "failed",
