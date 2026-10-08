@@ -2860,8 +2860,11 @@ def user_detail_page(request: Request, tg_id: int):
     xui_extra = fetch_client_extra_sync(str(row.get("email") or "")) if str(row.get("email") or "").strip() else {"traffic": {}, "ips": [], "error": ""}
     xui_ips = xui_extra.get("ips") if isinstance(xui_extra.get("ips"), list) else []
     xui_traffic = xui_extra.get("traffic") if isinstance(xui_extra.get("traffic"), dict) else {}
+    xui_ip_tags = " ".join(f'<span>{html.escape(str(ip))}</span>' for ip in xui_ips)
+    if not xui_ip_tags:
+        xui_ip_tags = '<span class="muted">3x-ui пока не вернула IP</span>'
     xui_extra_html = (
-        f'<div class="setting"><label>Последние IP подключения (3x-ui)</label><div class="compact-tags">{" ".join(f"<span>{html.escape(str(ip))}</span>" for ip in xui_ips) or "<span class=\"muted\">3x-ui пока не вернула IP</span>"}</div></div>'
+        f'<div class="setting"><label>Последние IP подключения (3x-ui)</label><div class="compact-tags">{xui_ip_tags}</div></div>'
         f'<div class="setting"><label>Сводка трафика 3x-ui</label><div class="detail-inline-stats"><span>↑ {fmt_bytes(xui_traffic.get("up"))}</span><span>↓ {fmt_bytes(xui_traffic.get("down"))}</span><span>Всего {fmt_bytes(int(xui_traffic.get("up") or 0)+int(xui_traffic.get("down") or 0))}</span></div></div>'
     )
     if xui_extra.get("error"):
