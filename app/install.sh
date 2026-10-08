@@ -1936,6 +1936,8 @@ ExecStart=$TARGET/.venv/bin/python $TARGET/update_worker.py --job-id %i --startu
 Nice=10
 IOSchedulingClass=best-effort
 TimeoutStartSec=infinity
+StandardOutput=append:/var/lib/vpn-service/updates/update-launcher.log
+StandardError=append:/var/lib/vpn-service/updates/update-launcher.log
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=Asia/Almaty
 EOF_UNIT
