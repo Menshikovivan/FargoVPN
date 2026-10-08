@@ -2,9 +2,10 @@
 set -Eeuo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main"
+RELEASE_BASE="https://github.com/Menshikovivan/FargoVPN/releases/latest/download"
 ARCHIVE_NAME="FargoVPN_FULL.tar.gz"
-ARCHIVE_URL="${FARGOVPN_ARCHIVE_URL:-$REPO_RAW/$ARCHIVE_NAME}"
-CHECKSUM_URL="${FARGOVPN_CHECKSUM_URL:-$REPO_RAW/$ARCHIVE_NAME.sha256}"
+ARCHIVE_URL="${FARGOVPN_ARCHIVE_URL:-$RELEASE_BASE/$ARCHIVE_NAME}"
+CHECKSUM_URL="${FARGOVPN_CHECKSUM_URL:-$RELEASE_BASE/$ARCHIVE_NAME.sha256}"
 TMP_BASE="${FARGOVPN_BOOTSTRAP_TMPDIR:-/var/tmp}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then

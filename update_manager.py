@@ -1579,8 +1579,46 @@ def _github_main_public_files(archive_root: Path, archive_path: Path, version: s
     return files
 
 
+def _github_main_tree_state(owner: str, repo: str, commit_sha: str) -> tuple[str, set[str]]:
+    """Return current commit tree SHA and all non-directory paths in it."""
+    commit = github_request("GET", f"/repos/{owner}/{repo}/git/commits/{quote(commit_sha, safe='')}")
+    if commit.status_code >= 400:
+        raise UpdateError(f"Не удалось получить дерево текущего main: HTTP {commit.status_code}: {github_json_error(commit)}")
+    tree_sha = str(((commit.json().get("tree") or {}).get("sha")) or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+        raise UpdateError("GitHub вернул некорректный SHA дерева текущего main")
+    tree = github_request("GET", f"/repos/{owner}/{repo}/git/trees/{quote(tree_sha, safe='')}", params={"recursive": "1"})
+    if tree.status_code >= 400:
+        raise UpdateError(f"Не удалось прочитать дерево текущего main: HTTP {tree.status_code}: {github_json_error(tree)}")
+    payload = tree.json() if isinstance(tree.json(), dict) else {}
+    if payload.get("truncated"):
+        raise UpdateError("GitHub вернул усечённое дерево main; публикация остановлена, чтобы не удалить файлы неверно")
+    paths = {
+        str(item.get("path") or "").strip("/")
+        for item in (payload.get("tree") or [])
+        if isinstance(item, dict)
+        and str(item.get("type") or "") in {"blob", "commit"}
+        and str(item.get("path") or "").strip("/")
+    }
+    return tree_sha, paths
+
+
+def _verify_github_main_tree(owner: str, repo: str, commit_sha: str, expected_paths: set[str]) -> None:
+    """Fail closed unless the published main contains exactly the expected file set."""
+    _tree_sha, actual_paths = _github_main_tree_state(owner, repo, commit_sha)
+    missing = sorted(expected_paths - actual_paths)
+    unexpected = sorted(actual_paths - expected_paths)
+    if missing or unexpected:
+        details: list[str] = []
+        if missing:
+            details.append("отсутствуют: " + ", ".join(missing[:20]))
+        if unexpected:
+            details.append("лишние: " + ", ".join(unexpected[:20]))
+        raise UpdateError("GitHub main после публикации не совпадает с ожидаемым деревом: " + "; ".join(details))
+
+
 def _github_main_sync(source_archive: Path, version: str, checksum: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """Replace public main with one commit and keep a temporary backup ref."""
+    """Replace public main with one commit, explicitly prune stale paths, and keep a temporary backup ref."""
     branch = str(getattr(config, "GITHUB_TARGET_BRANCH", "main") or "main").strip() or "main"
     if branch != "main":
         raise UpdateError("Автосинхронизация публичного main требует GITHUB_TARGET_BRANCH=main")
@@ -1602,12 +1640,20 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise UpdateError(f"GitHub вернул некорректный SHA ветки {branch}")
 
+    base_tree_sha, current_paths = _github_main_tree_state(owner, repo, base_sha)
+    expected_paths = set(public_files)
+    stale_paths = sorted(current_paths - expected_paths)
+
     backup_ref = _github_create_backup_ref(base_sha, version)
     applied = False
+    commit_sha = ""
     try:
         entries: list[dict[str, Any]] = []
         for path, data in sorted(public_files.items()):
-            blob = github_request("POST", f"/repos/{owner}/{repo}/git/blobs", json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"})
+            blob = github_request(
+                "POST", f"/repos/{owner}/{repo}/git/blobs",
+                json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
+            )
             if blob.status_code >= 400:
                 raise UpdateError(f"Не удалось создать Git blob для {path}: HTTP {blob.status_code}: {github_json_error(blob)}")
             blob_sha = str((blob.json() or {}).get("sha") or "").strip()
@@ -1617,14 +1663,23 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
             if progress:
                 progress(path)
 
-        tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"tree": entries})
+        # Start from the current tree, but explicitly delete every path that is
+        # not present in the uploaded release. This is the repository-pruning
+        # guarantee required by the web-panel publisher.
+        for path in stale_paths:
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+
+        tree = github_request("POST", f"/repos/{owner}/{repo}/git/trees", json={"base_tree": base_tree_sha, "tree": entries})
         if tree.status_code >= 400:
             raise UpdateError(f"Не удалось собрать дерево main: HTTP {tree.status_code}: {github_json_error(tree)}")
         tree_sha = str((tree.json() or {}).get("sha") or "").strip()
         if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
             raise UpdateError("GitHub вернул некорректный SHA дерева main")
 
-        commit = github_request("POST", f"/repos/{owner}/{repo}/git/commits", json={"message": f"Release {version}", "tree": tree_sha, "parents": [base_sha]})
+        commit = github_request(
+            "POST", f"/repos/{owner}/{repo}/git/commits",
+            json={"message": f"Release {version}", "tree": tree_sha, "parents": [base_sha]},
+        )
         if commit.status_code >= 400:
             raise UpdateError(f"Не удалось создать commit main: HTTP {commit.status_code}: {github_json_error(commit)}")
         commit_payload = commit.json()
@@ -1645,9 +1700,22 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
         applied = True
         if str((update_ref.json().get("object") or {}).get("sha") or "") != commit_sha:
             raise UpdateError("GitHub не подтвердил SHA опубликованного commit main")
-        return {"enabled": True, "synced": True, "branch": branch, "commit_sha": commit_sha, "base_sha": base_sha, "backup_ref": backup_ref, "commit_url": str(commit_payload.get("html_url") or f"https://github.com/{github_owner()}/{github_repo()}/commit/{commit_sha}"), "files": sorted(public_files)}
+
+        _verify_github_main_tree(owner, repo, commit_sha, expected_paths)
+        return {
+            "enabled": True,
+            "synced": True,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "base_sha": base_sha,
+            "backup_ref": backup_ref,
+            "stale_paths_removed": stale_paths,
+            "stale_count": len(stale_paths),
+            "commit_url": str(commit_payload.get("html_url") or f"https://github.com/{github_owner()}/{github_repo()}/commit/{commit_sha}"),
+            "files": sorted(public_files),
+        }
     except Exception as error:
-        if applied:
+        if applied and commit_sha:
             try:
                 _github_restore_main(base_sha, commit_sha)
             except Exception as rollback_error:
@@ -1657,7 +1725,6 @@ def _github_main_sync(source_archive: Path, version: str, checksum: str, progres
         except Exception:
             LOGGER.warning("Не удалось удалить backup-ветку GitHub %s после сбоя синхронизации main", backup_ref, exc_info=True)
         raise
-
 
 def _release_tag_sha(tag: str) -> str | None:
     base = f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}"
@@ -1860,6 +1927,7 @@ def _publish_update_locked(source: Path, original_name: str = "update.tar.gz") -
             "github_main_commit_sha": str(main_sync.get("commit_sha") or ""),
             "github_main_commit_url": str(main_sync.get("commit_url") or ""),
             "github_main_files": list(main_sync.get("files") or []),
+            "github_main_stale_paths_removed": int(main_sync.get("stale_count") or 0),
             "github_repository": repo_settings.get("repository", ""),
             "github_repository_topics": list(repo_settings.get("topics") or []),
             "github_repository_configured": bool(repo_settings.get("configured")),
