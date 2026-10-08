@@ -269,7 +269,7 @@ def test_publish_busy_keeps_live_legacy_worker_without_unit(monkeypatch, tmp_pat
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     from datetime import datetime, timezone
     status_path.write_text(__import__("json").dumps({
-        "state": "validating", "job_id": "pub-legacy-live", "version": "5.1.17",
+        "state": "validating", "job_id": "pub-legacy-live", "version": "5.1.18",
         "progress": 8, "updated_at": "2020-01-01T00:00:00+00:00",
     }), encoding="utf-8")
     monkeypatch.setattr(m, "_publish_worker_process_alive", lambda _job_id: True)
@@ -282,7 +282,7 @@ def test_publish_busy_keeps_live_systemd_worker(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     from datetime import datetime, timezone
     status_path.write_text(__import__("json").dumps({
-        "state": "validating", "job_id": "pub-live-1", "version": "5.1.17",
+        "state": "validating", "job_id": "pub-live-1", "version": "5.1.18",
         "progress": 8, "updated_at": datetime.now(timezone.utc).isoformat(),
         "unit": "vpn-service-publish-worker-live",
     }), encoding="utf-8")

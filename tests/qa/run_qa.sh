@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="$ROOT/app:${PYTHONPATH:-}"
 
-printf '%s\n' '== FargoVPN 5.1.17 QA suite =='
+printf '%s\n' '== FargoVPN 5.1.18 QA suite =='
 python3 -m py_compile app/*.py app/services/*.py tests/test_release_512_regressions.py tests/qa/*.py
 for f in app/static/*.js; do node --check "$f" >/dev/null; done
 bash -n app/install.sh
