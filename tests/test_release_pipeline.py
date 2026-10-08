@@ -26,8 +26,8 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.18"] * 2
-    assert "## 5.1.18" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.19"] * 2
+    assert "## 5.1.19" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
@@ -223,12 +223,20 @@ def test_github_publish_bootstrap_is_panel_driven():
     assert "Настройки GitHub" in web
 
 
-def test_local_bootstrap_uses_embedded_release_package():
+def test_public_bootstrap_downloads_verified_release_package():
     bootstrap = (ROOT.parent / "install.sh").read_text(encoding="utf-8")
-    assert 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap
-    assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
-    assert 'exec /bin/bash "$LOCAL_INSTALLER" "$@"' in bootstrap
-    assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
+    # The publisher may keep main/install.sh release-independent while FULL
+    # archives can also be installed directly from their embedded app tree.
+    assert "releases/latest/download" in bootstrap
+    assert "FargoVPN_FULL.tar.gz" in bootstrap
+    assert "sha256sum -c" in bootstrap
+    assert "app/install.sh" in bootstrap
+    if 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap:
+        assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
+        assert 'exec /bin/bash "$LOCAL_INSTALLER" "$@"' in bootstrap
+        assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
+    else:
+        assert 'INSTALLER="$PACKAGE_ROOT/app/install.sh"' in bootstrap
 
 
 def test_publish_worker_ack_is_persistent():
@@ -255,10 +263,10 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.18"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.18"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.19"
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.19"
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
-    assert "5.1.18 всегда используется полный профиль" in installer
+    assert "5.1.19 всегда используется полный профиль" in installer
 
 
 def test_messages_generated_js_has_safe_path_placeholders_and_no_nested_public_path_511():

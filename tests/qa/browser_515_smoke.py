@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real headless-Chromium smoke tests for 5.1.18 page controllers."""
+"""Real headless-Chromium smoke tests for 5.1.19 page controllers."""
 from __future__ import annotations
 import json
 from pathlib import Path

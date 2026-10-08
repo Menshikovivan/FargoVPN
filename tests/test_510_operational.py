@@ -50,9 +50,14 @@ def test_console_installer_contains_no_github_mutation_path():
         assert "git push" not in text and "git commit" not in text and "git tag" not in text
         assert "gh release create" not in text and "gh release upload" not in text
     assert not any(token in installer for token in forbidden)
+    # The public main-branch bootstrap is intentionally release-independent and
+    # may use curl or wget without a progress flag. Both transports issue GET by
+    # default; reject explicit write methods/payload flags instead of pinning UX.
     assert "releases/latest/download" in bootstrap
-    assert "--progress-bar" in bootstrap
-    assert "GET" in bootstrap
+    assert "FargoVPN_FULL.tar.gz" in bootstrap
+    assert "sha256sum -c" in bootstrap
+    assert ("curl" in bootstrap or "wget" in bootstrap)
+    assert not any(token in bootstrap for token in ("-X POST", "-X PUT", "-X PATCH", "--request POST", "--post-data", "--method=POST"))
 
 
 def test_installer_has_numbered_timed_steps_and_xui_deadline():
@@ -145,9 +150,22 @@ def test_console_bootstrap_network_is_only_get(tmp_path: Path):
 
     with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
-        root_script = ROOT / "install.sh"
+        source_script = (ROOT / "install.sh").read_text(encoding="utf-8")
+        # The production installer correctly requires root. This integration test
+        # exercises only its GET/download/checksum/delegation path, so neutralize
+        # that guard in an isolated copy rather than requiring privileged CI.
+        guard = "if [[ ${EUID:-$(id -u)} -ne 0 ]]; then"
+        guard_start = source_script.find(guard)
+        if guard_start >= 0:
+            guard_end = source_script.find("\nfi", guard_start)
+            assert guard_end >= 0, "root privilege guard is not a simple if/fi block"
+            source_script = source_script[:guard_start] + ": # root check disabled only in the isolated test copy" + source_script[guard_end + len("\nfi"): ]
+        test_script = tmp_path / "install-under-test.sh"
+        test_script.write_text(source_script, encoding="utf-8")
+        root_script = test_script
         env = os.environ.copy()
         env["FARGOVPN_USE_REMOTE_LATEST"] = "1"
+        env["FARGOVPN_BOOTSTRAP_TMPDIR"] = str(tmp_path / "bootstrap-tmp")
         env["FARGOVPN_ARCHIVE_URL"] = f"http://127.0.0.1:{server.server_address[1]}/FargoVPN_FULL.tar.gz"
         env["FARGOVPN_CHECKSUM_URL"] = f"http://127.0.0.1:{server.server_address[1]}/FargoVPN_FULL.tar.gz.sha256"
         result = subprocess.run(["bash", str(root_script), "--help"], env=env, capture_output=True, text=True, timeout=20)
@@ -234,6 +252,7 @@ def test_github_request_timeout_is_converted_to_safe_error(monkeypatch):
 
 def test_publish_busy_reconciles_dead_systemd_worker(monkeypatch, tmp_path: Path):
     m = _load_update_module()
+    monkeypatch.setattr(m.config, "UPDATE_DIR", str(tmp_path), raising=False)
     status_path = tmp_path / "status.json"
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     status_path.write_text(__import__("json").dumps({
@@ -250,6 +269,7 @@ def test_publish_busy_reconciles_dead_systemd_worker(monkeypatch, tmp_path: Path
 
 def test_publish_busy_reconciles_legacy_status_without_unit(monkeypatch, tmp_path: Path):
     m = _load_update_module()
+    monkeypatch.setattr(m.config, "UPDATE_DIR", str(tmp_path), raising=False)
     status_path = tmp_path / "status.json"
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     status_path.write_text(__import__("json").dumps({
@@ -269,7 +289,7 @@ def test_publish_busy_keeps_live_legacy_worker_without_unit(monkeypatch, tmp_pat
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     from datetime import datetime, timezone
     status_path.write_text(__import__("json").dumps({
-        "state": "validating", "job_id": "pub-legacy-live", "version": "5.1.18",
+        "state": "validating", "job_id": "pub-legacy-live", "version": "5.1.19",
         "progress": 8, "updated_at": "2020-01-01T00:00:00+00:00",
     }), encoding="utf-8")
     monkeypatch.setattr(m, "_publish_worker_process_alive", lambda _job_id: True)
@@ -282,7 +302,7 @@ def test_publish_busy_keeps_live_systemd_worker(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(m, "publish_status_path", lambda: status_path)
     from datetime import datetime, timezone
     status_path.write_text(__import__("json").dumps({
-        "state": "validating", "job_id": "pub-live-1", "version": "5.1.18",
+        "state": "validating", "job_id": "pub-live-1", "version": "5.1.19",
         "progress": 8, "updated_at": datetime.now(timezone.utc).isoformat(),
         "unit": "vpn-service-publish-worker-live",
     }), encoding="utf-8")

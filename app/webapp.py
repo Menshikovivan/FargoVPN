@@ -33,6 +33,7 @@ from urllib.parse import quote, urlencode, urlsplit
 import httpx
 import psutil
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -1591,7 +1592,10 @@ async def api_http_exception(request: Request, error: HTTPException):
         code = {400:"bad_request",401:"unauthorized",403:"forbidden",404:"not_found",409:"conflict",422:"validation_error",429:"rate_limited"}.get(int(error.status_code), "http_error")
         headers = dict(error.headers or {})
         return JSONResponse({"ok": False, "data": None, "error": {"code": code, "message": detail}, "detail": detail}, status_code=error.status_code, headers=headers)
-    raise error
+    # Keep standard HTTP errors (403/404/422, etc.) as real HTTP responses for
+    # browser routes. Re-raising from a custom handler bypasses FastAPI's default
+    # handler and turns expected access denials into unhandled server errors.
+    return await http_exception_handler(request, error)
 
 @app.exception_handler(Exception)
 async def unhandled_exception(request: Request, error: Exception):
