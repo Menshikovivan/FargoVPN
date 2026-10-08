@@ -128,7 +128,7 @@ def installed_changelog() -> dict[str, str]:
                     changelog_text,
                 )
                 if match:
-                    text = f"## {wanted}\\n\\n{match.group(1).strip()}"
+                    text = f"## {wanted}\n\n{match.group(1).strip()}"
                 else:
                     text = changelog_text
 
@@ -2369,6 +2369,26 @@ def update_job_busy(status: dict[str, Any] | None = None) -> bool:
 def update_log_path() -> Path:
     return update_dir() / "update.log"
 
+def update_launcher_log_path() -> Path:
+    return update_dir() / "update-launcher.log"
+
+def _make_update_launcher(job_id: str, command: list[str]) -> Path:
+    root = update_dir() / "launchers"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{re.sub(r'[^A-Za-z0-9._-]', '_', job_id)}.sh"
+    log_path = update_launcher_log_path()
+    quoted = " ".join(shlex.quote(str(item)) for item in command)
+    script = (
+        "#!/usr/bin/env bash\nset -Eeuo pipefail\n"
+        f"mkdir -p {shlex.quote(str(log_path.parent))}\n"
+        f"exec >> {shlex.quote(str(log_path))} 2>&1\n"
+        f"echo '[FargoVPN update launcher] $(date -Is) job={shlex.quote(job_id)} starting'\n"
+        f"exec {quoted}\n"
+    )
+    path.write_text(script, encoding="utf-8")
+    os.chmod(path, 0o700)
+    return path
+
 
 def start_update_job(
     actor: str = "web",
@@ -2437,43 +2457,14 @@ def start_update_job(
         launcher_error = ""
         process_id = 0
         try:
-            template = Path("/etc/systemd/system/vpn-service-update@.service")
-            if (
-                shutil.which("systemctl")
-                and Path("/run/systemd/system").exists()
-                and template.is_file()
-            ):
-                unit = f"vpn-service-update@{job_id}.service"
-                result = subprocess.run(
-                    ["systemctl", "--no-block", "start", unit],
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    launcher = "systemd-template"
-                else:
-                    launcher_error = (result.stdout + result.stderr).strip()
-                    unit = ""
-
-            if not launcher:
-                try:
-                    launcher = launch_detached(
-                        transient_unit,
-                        command,
-                        description=f"Фоновое обновление VPN Service ({job_id})",
-                        working_directory=APP_DIR,
-                    )
-                    unit = transient_unit
-                except DetachedJobError as error:
-                    details = "; ".join(
-                        item for item in (launcher_error, str(error)) if item
-                    )
-                    raise UpdateError(
-                        details or "Не удалось запустить отдельную systemd-службу обновления"
-                    ) from error
-
+            launcher_script = _make_update_launcher(job_id, command)
+            launcher = launch_detached(
+                transient_unit,
+                ["/bin/bash", str(launcher_script)],
+                description=f"Фоновое обновление VPN Service ({job_id})",
+                working_directory=APP_DIR,
+            )
+            unit = transient_unit
             write_status(
                 "queued",
                 job_id=job_id,
@@ -2482,9 +2473,22 @@ def start_update_job(
                 launcher=launcher,
                 progress=2,
                 phase="queue",
-                message="Фоновый процесс обновления запущен; начинается проверка пакета",
+                message="Фоновый процесс обновления запущен; ожидается подтверждение worker",
                 error="",
             )
+            deadline = time.monotonic() + 2.2
+            acknowledged = False
+            while time.monotonic() < deadline:
+                current_status = read_status()
+                if str(current_status.get("job_id") or "") == job_id and int(current_status.get("progress") or 0) >= 3:
+                    acknowledged = True
+                    break
+                if str(current_status.get("state") or "") == "failed" and str(current_status.get("job_id") or "") == job_id:
+                    raise UpdateError(str(current_status.get("error") or "Фоновый worker завершился с ошибкой"))
+                time.sleep(0.1)
+            if not acknowledged:
+                launcher_log = update_launcher_log_path()
+                raise UpdateError(f"Фоновый worker не подтвердил запуск в течение 2,2 с; журнал запуска: {launcher_log}")
         except Exception as error:
             write_status(
                 "failed",

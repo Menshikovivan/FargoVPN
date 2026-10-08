@@ -1910,7 +1910,7 @@ def dashboard(request: Request):
 
     message_items: list[str] = []
     for row in recent_events:
-        name = str(row["username"] or f"id_{int(row["tg_id"])}")
+        name = str(row["username"] or f"id_{int(row['tg_id'])}")
         message_items.append(
             f'<a class="dash-message" href="/messages?tg_id={int(row["tg_id"])}">'
             f'<span class="avatar avatar-{(int(row["tg_id"]) % 5) + 1}">{html.escape(initials(name))}</span>'
@@ -2860,8 +2860,11 @@ def user_detail_page(request: Request, tg_id: int):
     xui_extra = fetch_client_extra_sync(str(row.get("email") or "")) if str(row.get("email") or "").strip() else {"traffic": {}, "ips": [], "error": ""}
     xui_ips = xui_extra.get("ips") if isinstance(xui_extra.get("ips"), list) else []
     xui_traffic = xui_extra.get("traffic") if isinstance(xui_extra.get("traffic"), dict) else {}
+    xui_ip_tags = " ".join(f'<span>{html.escape(str(ip))}</span>' for ip in xui_ips)
+    if not xui_ip_tags:
+        xui_ip_tags = '<span class="muted">3x-ui пока не вернула IP</span>'
     xui_extra_html = (
-        f'<div class="setting"><label>Последние IP подключения (3x-ui)</label><div class="compact-tags">{" ".join(f"<span>{html.escape(str(ip))}</span>" for ip in xui_ips) or "<span class=\"muted\">3x-ui пока не вернула IP</span>"}</div></div>'
+        f'<div class="setting"><label>Последние IP подключения (3x-ui)</label><div class="compact-tags">{xui_ip_tags}</div></div>'
         f'<div class="setting"><label>Сводка трафика 3x-ui</label><div class="detail-inline-stats"><span>↑ {fmt_bytes(xui_traffic.get("up"))}</span><span>↓ {fmt_bytes(xui_traffic.get("down"))}</span><span>Всего {fmt_bytes(int(xui_traffic.get("up") or 0)+int(xui_traffic.get("down") or 0))}</span></div></div>'
     )
     if xui_extra.get("error"):
@@ -2904,7 +2907,7 @@ def user_detail_page(request: Request, tg_id: int):
 const b=document.getElementById('telegram-lookup-button'),r=document.getElementById('telegram-lookup-result');
 const initialChatScroll=()=>{{const chat=document.getElementById('chat-window');if(chat)chat.scrollTop=chat.scrollHeight;}};
 requestAnimationFrame(initialChatScroll);setTimeout(initialChatScroll,100);
-if(b)b.addEventListener('click',async()=>{{const i=document.querySelector('input[name=\"username\"]'),u=String((i&&i.value)||'').trim().replace(/^@/,'');if(!u){{r.textContent='Укажите @username';return;}}b.disabled=true;r.textContent='Поиск…';try{{const x=await fetch('/api/telegram/lookup?username='+encodeURIComponent(u));const d=await x.json();if(!x.ok)throw new Error(d.detail||'Ошибка');r.textContent=d.matches&&d.matches.length?d.matches.map(z=>'@'+(z.username||u)+' — Telegram ID '+z.tg_id+(z.telegram_connected?' · подключён':' · без привязки')).join('\\n'):'Совпадений нет. Для произвольного @username Telegram Bot API не даёт универсального способа получить ID.';}}catch(e){{r.textContent=e.message||'Ошибка';}}finally{{b.disabled=false;}}}});
+if(b)b.addEventListener('click',async()=>{{const i=document.querySelector('input[name=\"username\"]'),u=String((i&&i.value)||'').trim().replace(/^@/,'');if(!u){{r.textContent='Укажите @username';return;}}b.disabled=true;r.textContent='Поиск…';try{{const x=await fetch('/api/telegram/lookup?username='+encodeURIComponent(u));const d=await x.json();if(!x.ok)throw new Error(d.detail||'Ошибка');r.textContent=d.matches&&d.matches.length?d.matches.map(z=>'@'+(z.username||u)+' — Telegram ID '+z.tg_id+(z.telegram_connected?' · подключён':' · без привязки')).join('\n'):'Совпадений нет. Для произвольного @username Telegram Bot API не даёт универсального способа получить ID.';}}catch(e){{r.textContent=e.message||'Ошибка';}}finally{{b.disabled=false;}}}});
 
 const linkButton=document.getElementById('telegram-link-button'),linkResult=document.getElementById('telegram-link-result');
 if(linkButton)linkButton.addEventListener('click',async()=>{{linkButton.disabled=true;linkResult.style.display='block';linkResult.textContent='Создание одноразовой ссылки…';try{{const body=new URLSearchParams();body.set('tg_id',String({tg_id}));const response=await fetch('/api/telegram/link-request',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body,credentials:'same-origin'}});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка');linkResult.innerHTML='Передайте пользователю ссылку: <a href="'+data.deep_link+'" target="_blank" rel="noopener">'+data.deep_link+'</a>';const token=data.token;const poll=async()=>{{try{{const r=await fetch('/api/telegram/link-request/'+encodeURIComponent(token),{{credentials:'same-origin',cache:'no-store'}});const status=await r.json();if(status.status==='resolved'){{linkResult.textContent='✅ Telegram ID получен: '+status.tg_id;setTimeout(()=>location.reload(),600);return;}}if(status.status==='expired'){{linkResult.textContent='Ссылка истекла. Создайте новую.';return;}}setTimeout(poll,2000);}}catch(_e){{setTimeout(poll,3000);}}}};poll();}}catch(error){{linkResult.textContent=error.message||'Ошибка';}}finally{{linkButton.disabled=false;}}}});
@@ -4817,6 +4820,24 @@ def settings(request: Request):
 
     panel_push_script = f'<script src="/static/push.js?v={_panel_asset_version()}" defer></script>'
 
+    xui_panel_href = html.escape(
+        str(getattr(config, "XUI_PANEL_URL", "") or getattr(config, "BASE_URL", "")).rstrip("/"),
+        quote=True,
+    )
+    bot_panel_href = html.escape(
+        str(getattr(config, "BOT_PANEL_URL", "") or "").rstrip("/"),
+        quote=True,
+    )
+    xui_panel_link = (
+        f'<a class="button secondary" href="{xui_panel_href}" target="_blank" rel="noopener noreferrer">◈ Открыть 3x-ui</a>'
+        if str(getattr(config, "XUI_PANEL_URL", "") or getattr(config, "BASE_URL", "")).strip()
+        else ""
+    )
+    bot_panel_link = (
+        f'<a class="button secondary" href="{bot_panel_href}" target="_blank" rel="noopener noreferrer">V Открыть FargoVPN</a>'
+        if str(getattr(config, "BOT_PANEL_URL", "") or "").strip()
+        else ""
+    )
 
     body = f'''
 <header>
@@ -4923,7 +4944,7 @@ def settings(request: Request):
         <div class="setting"><label>Пароль 3x-ui</label><input type="password" name="xui_password" placeholder="Пусто — оставить текущий" autocomplete="new-password"></div>
         <div class="check-row"><label><input type="checkbox" name="xui_verify_tls" value="1" {_config_checked('XUI_VERIFY_TLS', True)}> Проверять TLS-сертификат 3x-ui</label></div>
         <button type="submit" formaction="{html.escape(public_path('/settings/xui'), quote=True)}">Сохранить подключение 3x-ui</button>
-        <div class="integration-actions">{f'<a class="button secondary" href="{html.escape(str(getattr(config, 'XUI_PANEL_URL', '') or getattr(config, 'BASE_URL', '')).rstrip('/'), quote=True)}" target="_blank" rel="noopener noreferrer">◈ Открыть 3x-ui</a>' if (str(getattr(config, 'XUI_PANEL_URL', '') or getattr(config, 'BASE_URL', '')).strip()) else ''}{f'<a class="button secondary" href="{html.escape(str(getattr(config, 'BOT_PANEL_URL', '')).rstrip('/'), quote=True)}" target="_blank" rel="noopener noreferrer">V Открыть FargoVPN</a>' if str(getattr(config, 'BOT_PANEL_URL', '') or '').strip() else ''}</div>
+        <div class="integration-actions">{xui_panel_link}{bot_panel_link}</div>
       </div>
       <div class="card full">
         <div class="section-title"><div><h2>Инбаунды для новых клиентов</h2><div class="muted">Настройка применяется только при создании нового клиента/подписки. Существующие клиенты не перебиндиваются.</div></div></div>
@@ -5433,12 +5454,18 @@ def updates_status_api(request: Request):
 def _update_output_tail() -> str:
     from log_reader import tail_lines
     from log_security import redact
-    try:
-        return redact(''.join(tail_lines(update_manager.update_log_path(), 100, 131072)[0]))
-    except FileNotFoundError:
-        return "Вывод установщика пока отсутствует"
-    except OSError as error:
-        return f"Вывод установщика недоступен: errno={error.errno}"
+    paths = [update_manager.update_launcher_log_path(), update_manager.update_log_path()]
+    chunks = []
+    for path in paths:
+        try:
+            value = ''.join(tail_lines(path, 100, 131072)[0]).strip()
+            if value:
+                chunks.append(f"--- {path.name} ---\n{value}")
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            chunks.append(f"--- {path.name} ---\nЖурнал недоступен: errno={error.errno}")
+    return redact('\n\n'.join(chunks) or "Вывод установщика пока отсутствует")
 
 
 @app.get("/api/updates/availability")
