@@ -146,3 +146,18 @@ def test_update_completion_refresh_contract():
     assert "window.location.replace(purl('/updates')" in web
 
 
+
+
+def test_update_worker_launch_contract_and_changelog_history():
+    manager=(ROOT/"update_manager.py").read_text(encoding="utf-8")
+    worker=(ROOT/"update_worker.py").read_text(encoding="utf-8")
+    web=(ROOT/"webapp.py").read_text(encoding="utf-8")
+    start=manager.index("def start_update_job")
+    end=manager.index("def _package_installer")
+    assert '"--startup-delay"' not in manager[start:end]
+    assert "time.monotonic() + 6.0" in manager
+    assert "update-launcher.log" in manager
+    assert 'run(job_id: str, startup_delay: float = 0.0)' in worker
+    assert '_status(' in worker and 'worker_pid=os.getpid()' in worker
+    assert "def changelog_history(" in manager
+    assert "История изменений предыдущих версий" in web
