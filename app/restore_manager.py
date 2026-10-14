@@ -494,15 +494,52 @@ def drop_database(name: str) -> None:
         logger.warning("Не удалось удалить PostgreSQL базу %s: %s", safe, exc)
 
 
+@contextmanager
+def compatible_plain_dump(dump: Path, server_version: int):
+    """Remove only pg_dump's neutral PG17+ timeout header on older servers."""
+    if server_version >= 170000:
+        yield dump
+        return
+    with dump.open("rb") as source, tempfile.TemporaryDirectory(prefix="fargovpn_pg_compat_") as directory:
+        output = Path(directory) / "restore.sql"
+        removed = False
+        with output.open("wb") as target:
+            header = True
+            for index in range(64):
+                line = source.readline()
+                if not line:
+                    break
+                if index == 0 and line != b"--\n":
+                    header = False
+                if line.startswith(b"-- Name:"):
+                    header = False
+                if header and line.rstrip(b"\r\n") == b"SET transaction_timeout = 0;":
+                    target.write(b"-- transaction_timeout=0 omitted for PostgreSQL <17\n")
+                    removed = True
+                else:
+                    target.write(line)
+            shutil.copyfileobj(source, target)
+        output.chmod(0o600)
+        if removed:
+            logger.info("PostgreSQL <17: исключён SET transaction_timeout=0 из заголовка временной копии dump")
+        yield output if removed else dump
+
+
 def restore_dump(dump: Path, dsn: str) -> None:
     if shutil.which("psql") is None:
         raise RuntimeError("Команда psql не установлена")
     command_dsn, env = dsn_password_and_cli(dsn)
     try:
-        subprocess.run(
-            ["psql", "--dbname", command_dsn, "--set", "ON_ERROR_STOP=1", "--file", str(dump)],
-            check=True, env=env, timeout=1800, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        probe = subprocess.run(
+            ["psql", "--no-psqlrc", "--dbname", command_dsn, "--tuples-only", "--no-align", "--command", "SHOW server_version_num"],
+            check=True, env=env, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        server_version = int(probe.stdout.strip())
+        with compatible_plain_dump(dump, server_version) as compatible:
+            subprocess.run(
+                ["psql", "--no-psqlrc", "--dbname", command_dsn, "--set", "ON_ERROR_STOP=1", "--file", str(compatible)],
+                check=True, env=env, timeout=1800, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "неизвестная ошибка").strip()
         raise RuntimeError(f"Восстановление PostgreSQL dump не прошло: {detail[-3000:]}") from exc
@@ -786,7 +823,10 @@ def stop_services(include_xui: bool) -> None:
     if include_xui:
         units = _external_units() + units
     for unit in units:
-        subprocess.run(["systemctl", "stop", unit], check=False, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(["systemctl", "stop", unit], check=False, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"Не удалось остановить {unit} перед восстановлением: {detail[-1500:]}")
 
 
 def start_services(full: bool) -> None:
@@ -975,7 +1015,7 @@ def _restore_fargo_config_from_archive(root: Path) -> None:
         os.chmod(env_target, 0o600)
 
 
-def _restore_system_configs(root: Path) -> None:
+def _restore_system_configs(root: Path, *, xui_target: Path = Path("/etc/x-ui")) -> None:
     # 4.6.13 stored this directory as etc-x-ui; 4.6.14 backups use the same
     # canonical spelling. Keep the alternate legacy spelling accepted as well.
     xui_source = next(
@@ -984,11 +1024,25 @@ def _restore_system_configs(root: Path) -> None:
     )
     if xui_source is None:
         raise RuntimeError("Полный архив не содержит system/etc-x-ui")
-    xui_target = Path("/etc/x-ui")
-    if xui_target.exists():
-        shutil.rmtree(xui_target)
-    xui_target.mkdir(parents=True, exist_ok=True)
-    _copy_tree_safe(xui_source, xui_target)
+    # Config restoration must not remove the database already swapped above.
+    db_path = Path(str(_cfg("XUI_DB_PATH", "/etc/x-ui/x-ui.db"))).expanduser()
+    with tempfile.TemporaryDirectory(prefix="fargovpn_xui_config_") as directory:
+        preserved = Path(directory)
+        saved = []
+        if db_path.parent == xui_target and xui_target.is_dir():
+            for item in xui_target.iterdir():
+                if item.is_file() and (item.name == db_path.name or item.name in {db_path.name + suffix for suffix in ("-wal", "-shm", "-journal")} or item.name.startswith(db_path.name + ".pre_restore_")):
+                    shutil.copy2(item, preserved / item.name)
+                    saved.append(item.name)
+        try:
+            if xui_target.exists():
+                shutil.rmtree(xui_target)
+            xui_target.mkdir(parents=True, exist_ok=True)
+            _copy_tree_safe(xui_source, xui_target)
+        finally:
+            xui_target.mkdir(parents=True, exist_ok=True)
+            for name in saved:
+                shutil.copy2(preserved / name, xui_target / name)
 
     xray_source = root / "system" / "etc-xray"
     xray_target = Path("/etc/xray")
@@ -1068,27 +1122,44 @@ def _db_swap_rollback(target_dsn: str, rollback_name: str) -> None:
     logger.error("Неудачная восстановленная БД оставлена под именем %s", failed_name)
 
 
+def _sqlite_snapshot(source: Path, destination: Path) -> None:
+    """Materialize committed SQLite state, including WAL, as one standalone DB."""
+    from contextlib import closing
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as src:
+        with closing(sqlite3.connect(destination)) as dst:
+            src.backup(dst)
+            dst.execute("PRAGMA journal_mode=DELETE")
+    os.chmod(destination, 0o600)
+    result = _sqlite_integrity(destination)
+    if result != "ok":
+        raise RuntimeError(f"SQLite snapshot не прошёл integrity_check: {result}")
+
+
+def _sqlite_remove_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(database) + suffix).unlink(missing_ok=True)
+
+
 def _sqlite_xui_swap(root: Path, archive_db: Path, current_db: Path, suffix: str) -> Path:
     if _sqlite_integrity(archive_db) != "ok":
         raise RuntimeError("Архивная SQLite база 3x-ui не прошла integrity_check")
     current_db.parent.mkdir(parents=True, exist_ok=True)
     rollback = current_db.with_name(f"{current_db.name}.pre_restore_{suffix}")
     if current_db.exists():
-        shutil.copy2(current_db, rollback)
+        _sqlite_snapshot(current_db, rollback)
     temp = current_db.with_name(f"{current_db.name}.restore_tmp_{os.getpid()}")
-    shutil.copy2(archive_db, temp)
-    os.chmod(temp, 0o600)
+    _sqlite_snapshot(archive_db, temp)
+    _sqlite_remove_sidecars(current_db)
     os.replace(temp, current_db)
-    if _sqlite_integrity(current_db) != "ok":
-        if rollback.exists():
-            shutil.copy2(rollback, current_db)
-        else:
-            current_db.unlink(missing_ok=True)
-        raise RuntimeError("SQLite база 3x-ui после замены не прошла integrity_check")
+    integrity = _sqlite_integrity(current_db)
+    if integrity != "ok":
+        _sqlite_xui_rollback(current_db, rollback)
+        raise RuntimeError(f"SQLite база 3x-ui после замены не прошла integrity_check: {integrity}")
     return rollback
 
 
 def _sqlite_xui_rollback(current_db: Path, rollback: Path) -> None:
+    _sqlite_remove_sidecars(current_db)
     if rollback.is_file():
         temp = current_db.with_name(f"{current_db.name}.rollback_tmp_{os.getpid()}")
         shutil.copy2(rollback, temp)

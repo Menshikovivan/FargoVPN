@@ -35,7 +35,7 @@ usage() {
   cat <<USAGE
 Использование: $0 [--profile <старый-профиль>] [--update-existing /путь/к/приложению]
 
-Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.19 всегда используется полный профиль.
+Параметр --profile оставлен только для совместимости со старыми установками; в 5.1.20 всегда используется полный профиль.
 Без параметра --update-existing установщик предлагает:
   1) новую установку
   2) обновление существующей установки
@@ -49,17 +49,17 @@ while (($#)); do
     --profile)
       [[ $# -ge 2 ]] || { echo 'После --profile необходимо указать прежнее значение профиля.' >&2; exit 2; }
       # Совместимость с 4.x: старый updater мог передавать --profile <значение>.
-      # В 5.1.19 профиль не выбирается — всегда используется полный вариант.
+      # В 5.1.20 профиль не выбирается — всегда используется полный вариант.
       LEGACY_PROFILE="$2"
       [[ -n "$LEGACY_PROFILE" ]] || { echo 'Значение --profile не может быть пустым.' >&2; exit 2; }
-      echo "ℹ Получен устаревший параметр --profile; в 5.1.19 используется полный профиль."
+      echo "ℹ Получен устаревший параметр --profile; в 5.1.20 используется полный профиль."
       PROFILE=full
       shift 2
       ;;
     --profile=*)
       LEGACY_PROFILE="${1#*=}"
       [[ -n "$LEGACY_PROFILE" ]] || { echo 'Значение --profile не может быть пустым.' >&2; exit 2; }
-      echo "ℹ Получен устаревший параметр --profile; в 5.1.19 используется полный профиль."
+      echo "ℹ Получен устаревший параметр --profile; в 5.1.20 используется полный профиль."
       PROFILE=full
       shift
       ;;
@@ -194,6 +194,11 @@ preflight() {
   require_command python3
   require_command systemctl
   require_command tar
+  if [[ ! -f "$SRC/scripts/setup_postgresql.sh" ]]; then
+    echo 'Неполный пакет: отсутствует app/scripts/setup_postgresql.sh. Установка остановлена до изменения служб.' >&2
+    exit 1
+  fi
+  bash -n "$SRC/scripts/setup_postgresql.sh"
 
   python3 - <<'PY'
 import sys
@@ -893,6 +898,10 @@ PY_RESTORE_INFO
       [[ -n $OLD ]] || { echo 'Для восстановления только базы требуется существующая установка FargoVPN.' >&2; exit 1; }
       TARGET="$OLD"
     else
+      if ! config_is_valid "$RESTORE_ROOT/bot/config.py"; then
+        echo "В полном архиве отсутствует корректный bot/config.py; восстановление остановлено до изменения служб." >&2
+        exit 1
+      fi
       # Full restore can be performed on a clean server after the external
       # 3x-ui installer. Reuse the standard target if it already exists.
       if [[ -d "$DEFAULT_TARGET" ]]; then TARGET="$DEFAULT_TARGET"; OLD="$DEFAULT_TARGET"; else TARGET="$DEFAULT_TARGET"; fi
@@ -1002,7 +1011,7 @@ if [[ -n $OLD ]]; then
   fi
   if config_is_valid "$OLD/config.py"; then
     cp "$OLD/config.py" "$TMP/config.py"
-  else
+  elif [[ -f "$OLD/config.py" ]]; then
     cp "$OLD/config.py" "$TMP/corrupt_config.py"
     if recover_config_file "$OLD/config.py" "$TMP/config.py"; then
       echo "⚠ Старый config.py повреждён; безопасно восстановлены распознаваемые параметры."
@@ -1010,6 +1019,8 @@ if [[ -n $OLD ]]; then
       rm -f "$TMP/config.py"
       echo "⚠ Старый config.py повреждён и не поддаётся безопасному восстановлению; будет создан новый конфиг." >&2
     fi
+  else
+    echo "ℹ В существующем каталоге нет config.py; конфигурация будет создана на этапе настройки."
   fi
   # The canonical application database is data/vpn_bot.db.
   # Prefer it over any legacy root-level vpn_bot.db so migration cannot silently
