@@ -1,3 +1,7 @@
+## 5.1.23
+
+Добавлены семейные ссылки из Telegram и панели, отвязка аккаунтов, лимит до четырёх участников и рассылки подтверждённым членам профиля. Исправлены мобильные карточки и отображение прогресса обновления.
+
 ## 5.1.22
 
 Добавлены статусы проверки PIN-кода и оплаты в боте и панели; семейная привязка нескольких Telegram аккаунтов к одному VPN профилю; автоматический множитель цены и индивидуальная сумма пользователя. Миграция добавляет self-link для существующих аккаунтов без изменения подписок и платежей.
@@ -178,3 +182,7 @@
 ## 5.1.2
 
 Исправления очистки `main` и отображения прогресса обновления.
+## 5.1.23
+- Added Telegram family-link invitations, member removal, a four-account limit, and broadcast delivery to linked members.
+- Fixed web-panel family-invite delivery and mobile card layout; update progress now follows installer-reported status.
+

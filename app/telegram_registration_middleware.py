@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import BaseFilter
+from aiogram.types import Message
 
 import config
 import registration_access
@@ -189,6 +191,18 @@ class InvitationAccessMiddleware(BaseMiddleware):
         # 4-digit message. Deep links, callbacks, media, commands, inline
         # queries and all other update types remain blocked until activation.
         if invite_code_message(source) and is_private_source(source, chat):
+            return await handler(event, data)
+
+        # A family invitation is an explicit, single-use profile-owner
+        # authorization. Let only a private /start family_<token> reach its
+        # handler before PIN activation; this creates no VPN entitlement.
+        message = source if isinstance(source, Message) else None
+        start_text = str(getattr(message, "text", "") or "").strip()
+        if (
+            message is not None
+            and is_private_source(source, chat)
+            and re.fullmatch(r"/start(?:@\w+)?\s+family_[A-Za-z0-9_-]{20,100}", start_text)
+        ):
             return await handler(event, data)
 
         target = prompt_chat_id(event, user, chat, source)

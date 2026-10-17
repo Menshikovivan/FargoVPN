@@ -191,6 +191,9 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}*,*::before,*::after{box-s
 .cabinet-actions-inline{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.cabinet-actions-inline .button{min-width:0}
 @media(max-width:560px){.cabinet-actions-inline{display:grid;grid-template-columns:1fr}.cabinet-actions-inline .button{width:100%}}
 
+/* Cards using desktop grid spans must return to a single mobile column. */
+@media(max-width:560px){.grid>.half,.grid>.wide,.grid>.side,.grid>.full,.grid>.metric,.monitoring-grid>.metric,.monitoring-grid>.wide,.monitoring-grid>.side,.monitoring-grid>.full{grid-column:1/-1!important}}
+
 /* 4.0 mobile hardening: charts and action bars may never enlarge the viewport. */
 .chart, .chart-card, .monitoring-grid, .monitoring-grid > *, .dash-kpis, .dash-kpis > *, .dash-layout, .dash-layout > * { min-width:0 !important; max-width:100% !important; width:100%; }
 .chart { overflow:hidden !important; }

@@ -114,6 +114,9 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
         owner = int(row[0])
         if owner == int(telegram_id):
             raise ValueError("Нельзя привязать основной аккаунт к самому себе")
+        # Serialize membership changes for one profile so concurrent invites
+        # cannot exceed the four-account cap.
+        connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(owner),))
         users = connection.execute(
             "SELECT tg_id,COALESCE(registration_status,'active'),COALESCE(uuid,''),COALESCE(email,''),COALESCE(sub_id,''),COALESCE(expiry_time,0) FROM users WHERE tg_id IN (?,?) ORDER BY tg_id FOR UPDATE",
             (owner, int(telegram_id)),
@@ -121,8 +124,13 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
         by_id = {int(item[0]): item for item in users}
         if owner not in by_id or int(telegram_id) not in by_id:
             raise ValueError("Оба аккаунта должны начать диалог с ботом")
-        if str(by_id[owner][1]).lower() != 'active' or str(by_id[int(telegram_id)][1]).lower() != 'active':
-            raise ValueError("Оба аккаунта должны пройти проверку PIN-кода")
+        if str(by_id[owner][1]).lower() != 'active':
+            raise ValueError("Основной аккаунт должен пройти проверку PIN-кода")
+        count = connection.execute(
+            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=?", (owner,)
+        ).fetchone()
+        if int(count[0] or 0) >= 4:
+            raise ValueError("В одном профиле может быть не более 4 Telegram аккаунтов")
         alias = by_id[int(telegram_id)]
         if str(alias[2] or '').strip() or str(alias[3] or '').strip() or str(alias[4] or '').strip() or int(alias[5] or 0) > 0:
             raise ValueError("У дополнительного аккаунта уже есть данные VPN-подписки; сначала разберите профиль в панели")
@@ -135,8 +143,58 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
         ).fetchone()
         if not current or int(current[0]) != owner:
             raise ValueError("Этот аккаунт уже связан с другим профилем")
+        # Keep pending PIN state intact. Once it becomes active, the alias is
+        # eligible for broadcasts and shared subscription access.
         connection.execute(
             "UPDATE telegram_profile_link_requests SET consumed_at=? WHERE token_hash=? AND consumed_at IS NULL",
             (int(time.time()), digest),
         )
         return owner
+
+
+def create_profile_link_request_sync(owner_tg_id: int, db_path: str | None = None, ttl_seconds: int = 1800) -> str:
+    """Create a one-use family invitation for the profile owner."""
+    import hashlib
+    import secrets
+    import time
+    owner = profile_owner(int(owner_tg_id), db_path)
+    if owner != int(owner_tg_id):
+        raise ValueError("Создать ссылку может только владелец профиля")
+    with db.connect(db_path) as connection:
+        connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(owner),))
+        user = connection.execute(
+            "SELECT COALESCE(registration_status,'active') FROM users WHERE tg_id=?", (owner,)
+        ).fetchone()
+        count = connection.execute(
+            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=?", (owner,)
+        ).fetchone()
+        if not user or str(user[0]).lower() != 'active':
+            raise ValueError("Основной аккаунт должен пройти проверку PIN-кода")
+        if int(count[0] or 0) >= 4:
+            raise ValueError("Достигнут лимит: максимум 4 аккаунта вместе с основным")
+        token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        connection.execute(
+            "DELETE FROM telegram_profile_link_requests WHERE expires_at<? OR consumed_at IS NOT NULL", (now,)
+        )
+        connection.execute(
+            "INSERT INTO telegram_profile_link_requests(token_hash,profile_tg_id,created_at,expires_at,created_by) VALUES(?,?,?,?,?)",
+            (hashlib.sha256(token.encode()).hexdigest(), owner, now, now + max(60, int(ttl_seconds)), owner),
+        )
+    return token
+
+
+def unlink_profile_member_sync(owner_tg_id: int, telegram_id: int, db_path: str | None = None) -> None:
+    owner = profile_owner(int(owner_tg_id), db_path)
+    if owner != int(owner_tg_id):
+        raise ValueError("Отвязать участника может только владелец профиля")
+    if int(telegram_id) == owner:
+        raise ValueError("Основной аккаунт нельзя отвязать от собственного профиля")
+    with db.connect(db_path) as connection:
+        connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(owner),))
+        row = connection.execute(
+            "SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (int(telegram_id),)
+        ).fetchone()
+        if not row or int(row[0]) != owner:
+            raise ValueError("Аккаунт не привязан к этому профилю")
+        connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=?", (int(telegram_id),))

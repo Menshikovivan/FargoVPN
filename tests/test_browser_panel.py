@@ -31,6 +31,18 @@ def _logs_script() -> str:
     return (ROOT / "app" / "static" / "logs.js").read_text(encoding="utf-8")
 
 
+def test_update_progress_number_tracks_server_reports_without_prediction():
+    script = _updates_script()
+    assert "shownProgress=serverProgress;paintProgress()" in script
+    assert "softCaps" not in script
+
+
+def test_mobile_grid_resets_desktop_card_spans():
+    css = (ROOT / "app" / "static" / "panel.css").read_text(encoding="utf-8")
+    assert "@media(max-width:560px){.grid>.half,.grid>.wide,.grid>.side,.grid>.full" in css
+    assert "grid-column:1/-1!important" in css
+
+
 @pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")
 def test_real_browser_publish_button_upload_progress_and_live_log():
     html = """<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><body>
@@ -102,6 +114,9 @@ def test_real_browser_update_progress_and_live_log_survive_status_poll():
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.set_content(html, wait_until="domcontentloaded")
         page.wait_for_function("document.getElementById('update-progress-value').textContent === '42%'", timeout=3000)
+        page.wait_for_timeout(1400)
+        assert page.locator("#update-progress-value").text_content() == "42%"
+        assert page.locator("#update-progress-bar").evaluate("el => Math.round(parseFloat(el.style.width))") == 42
         assert page.locator("#update-message").text_content() == "Устанавливаются Python-зависимости"
         assert "python" in page.locator("#update-phase").text_content()
         assert "pip: 42%" in page.locator("#update-live-output").text_content()

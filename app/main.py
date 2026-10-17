@@ -892,16 +892,17 @@ def get_user_menu(user_id: int, user: dict | None = None):
     builder.button(text="🆘 Поддержка", callback_data="menu:support")
     if user:
         builder.button(text="🎟 Код приглашения", callback_data="menu:invite")
+        builder.button(text="👨‍👩‍👧‍👦 Семейный доступ", callback_data="menu:family")
     personal_cabinet_url = get_personal_cabinet_url(user_id, user) if active else ""
     if personal_cabinet_url:
         builder.button(text="👤 Кабинет на сайте", url=personal_cabinet_url)
     if user_id in config.ADMIN_IDS:
         builder.button(text="🛠 Админ-панель", callback_data="menu:admin")
-        builder.adjust(2, 2, 1, 1, 1)
+        builder.adjust(2, 2, 1, 1, 1, 1)
     elif personal_cabinet_url:
-        builder.adjust(2, 2, 1, 1)
+        builder.adjust(2, 2, 1, 1, 1)
     elif user:
-        builder.adjust(2, 2, 1)
+        builder.adjust(2, 2, 1, 1)
     else:
         builder.adjust(2, 2)
     if not active:
@@ -1180,6 +1181,38 @@ async def cmd_start(msg: Message, state: FSMContext):
     payload = args[1].strip() if len(args) > 1 else ""
     current_user = await asyncio.to_thread(db_get_user, int(msg.from_user.id))
 
+    # A family invite can be accepted before the PIN check. Membership alone
+    # grants no VPN entitlement; the existing registration gate remains in
+    # force for all other bot features and linked-account broadcasts.
+    if payload.startswith("family_"):
+        try:
+            if not current_user:
+                await asyncio.to_thread(
+                    registration_access.ensure_user_registration_state_sync,
+                    int(msg.from_user.id),
+                    getattr(msg.from_user, "username", None),
+                    getattr(msg.from_user, "full_name", None),
+                )
+            owner = await asyncio.to_thread(
+                billing.approve_profile_link_sync, payload[len("family_"):].strip(),
+                int(msg.from_user.id), config.DB_PATH,
+            )
+            status = await asyncio.to_thread(
+                registration_access.registration_state_sync, int(msg.from_user.id)
+            )
+            if status and status.status == registration_access.ACTIVE:
+                answer = f"✅ Аккаунт добавлен к семейному профилю Telegram ID {owner}. Для этого профиля применяется общая подписка."
+            else:
+                answer = f"✅ Аккаунт привязан к семейному профилю Telegram ID {owner}. После проверки PIN-кода вы сможете пользоваться подпиской и получать рассылки FargoVPN. Повторно открывать ссылку не нужно."
+            await msg.answer(answer)
+            try:
+                await bot.send_message(owner, f"✅ К вашему семейному профилю привязан Telegram аккаунт {int(msg.from_user.id)}.")
+            except Exception as notify_error:
+                logger.info("Не удалось уведомить владельца о привязке семейного аккаунта: owner=%s error=%s", owner, notify_error)
+        except Exception as error:
+            await msg.answer(f"❌ Не удалось привязать аккаунт: {html.escape(str(error)[:300])}", parse_mode="HTML")
+        return
+
     # The update-level invitation middleware is the authoritative access gate.
     # This defensive branch exists so a partially broken startup cannot turn
     # /start (including deep links) into an access bypass.
@@ -1293,14 +1326,6 @@ async def cmd_start(msg: Message, state: FSMContext):
                 f"❌ Не удалось выполнить привязку: {html.escape(str(error)[:400])}",
                 parse_mode="HTML",
             )
-        return
-    if payload.startswith("family_"):
-        token = payload[len("family_"):].strip()
-        try:
-            owner = await asyncio.to_thread(billing.approve_profile_link_sync, token, int(msg.from_user.id), config.DB_PATH)
-            await msg.answer(f"✅ Аккаунт добавлен к семейному профилю Telegram ID {owner}. Для этого профиля применяется общая подписка.")
-        except Exception as error:
-            await msg.answer(f"❌ Не удалось привязать аккаунт: {html.escape(str(error)[:300])}", parse_mode="HTML")
         return
     await state.clear()
     await asyncio.to_thread(ensure_referral_code, int(msg.from_user.id))
@@ -1450,6 +1475,27 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
                 int(call.from_user.id), user, call.from_user.username, call.from_user.full_name
             ))
         return
+    if action == "family":
+        profile_id = await asyncio.to_thread(billing.profile_owner, user_id, config.DB_PATH)
+        if profile_id != user_id:
+            await call.message.answer("Этот аккаунт уже использует семейную подписку. Управлять участниками может владелец профиля.")
+            return
+        accounts = await asyncio.to_thread(billing.profile_accounts, user_id, config.DB_PATH)
+        builder = InlineKeyboardBuilder()
+        if len(accounts) < 4:
+            builder.button(text="➕ Создать ссылку привязки на 30 минут", callback_data="family:create")
+        for account in accounts:
+            member_id = int(account["tg_id"])
+            if member_id != user_id:
+                member_name = ("@" + str(account.get("username") or member_id))[:40]
+                builder.button(text=f"❌ Отвязать {member_name}", callback_data=f"family:remove:{member_id}")
+        builder.button(text="🏠 Главное меню", callback_data="menu:home")
+        builder.adjust(1)
+        await call.message.answer(
+            f"<b>👨‍👩‍👧‍👦 Семейный доступ</b>\n\nВ профиле {len(accounts)} из 4 аккаунтов. Дополнительные аккаунты получают ту же подписку и рассылки FargoVPN.",
+            parse_mode="HTML", reply_markup=builder.as_markup(),
+        )
+        return
     if action == "home":
         await state.clear()
         await send_home(call.message, user_id)
@@ -1498,6 +1544,52 @@ async def connection_platform_callbacks(call: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=_connection_app_markup(int(call.from_user.id), platform=platform),
     )
+
+
+@dp.callback_query(F.data.startswith("family:"))
+async def family_callbacks(call: CallbackQuery):
+    await safe_callback_answer(call)
+    if not call.message or not call.from_user:
+        return
+    user_id = int(call.from_user.id)
+    action = str(call.data or "").split(":")
+    try:
+        owner = await asyncio.to_thread(billing.profile_owner, user_id, config.DB_PATH)
+        if owner != user_id:
+            raise ValueError("Управлять семейным профилем может только его владелец")
+        if len(action) >= 2 and action[1] == "create":
+            token = await asyncio.to_thread(billing.create_profile_link_request_sync, user_id, config.DB_PATH, 1800)
+            me = await bot.get_me()
+            link = f"https://t.me/{me.username}?start=family_{token}"
+            await call.message.answer(
+                "🔗 Одноразовая ссылка привязки действует 30 минут. Отправьте её человеку, которого хотите добавить. Он должен открыть бота по ссылке и пройти проверку PIN-кода.\n\n" + link,
+                disable_web_page_preview=True,
+            )
+            return
+        if len(action) == 3 and action[1] == "remove":
+            member_id = int(action[2])
+            await asyncio.to_thread(billing.unlink_profile_member_sync, user_id, member_id, config.DB_PATH)
+            await call.message.answer(f"✅ Аккаунт {member_id} отвязан от семейного профиля.")
+            try:
+                await bot.send_message(member_id, "ℹ️ Владелец отвязал ваш Telegram аккаунт от семейного профиля FargoVPN.")
+            except Exception as notify_error:
+                logger.info("Не удалось уведомить отвязанного участника: member=%s error=%s", member_id, notify_error)
+            accounts = await asyncio.to_thread(billing.profile_accounts, user_id, config.DB_PATH)
+            builder = InlineKeyboardBuilder()
+            if len(accounts) < 4:
+                builder.button(text="➕ Создать ссылку привязки на 30 минут", callback_data="family:create")
+            for account in accounts:
+                member = int(account["tg_id"])
+                if member != user_id:
+                    name = ("@" + str(account.get("username") or member))[:40]
+                    builder.button(text=f"❌ Отвязать {name}", callback_data=f"family:remove:{member}")
+            builder.button(text="🏠 Главное меню", callback_data="menu:home")
+            builder.adjust(1)
+            await call.message.answer(f"Участников: {len(accounts)} из 4.", reply_markup=builder.as_markup())
+            return
+        raise ValueError("Неизвестное действие семейного профиля")
+    except Exception as error:
+        await call.message.answer(f"❌ {html.escape(str(error)[:300])}", parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("faq:"))
 async def faq_callbacks(call: CallbackQuery, state: FSMContext):

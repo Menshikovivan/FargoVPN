@@ -26,8 +26,8 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.22"] * 2
-    assert "## 5.1.22" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.23"] * 2
+    assert "## 5.1.23" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
@@ -55,9 +55,8 @@ def test_progress_contract():
     source=(ROOT/"webapp.py").read_text(encoding="utf-8")
     css=(ROOT/"static/panel.css").read_text(encoding="utf-8")
     assert "update-phase" in source and "update-elapsed" in source
-    assert "shownProgress=Math.max(shownProgress,nextProgress)" in source
-    assert "shownProgress=Math.min(serverProgress" in source
-    assert ".progress span.active" in css and "update-progress-flow" in css
+    assert "softCaps" not in source
+    assert "serverProgress" in source and ".progress span.active" in css and "update-progress-flow" in css
 
 
 def test_main_sync_builds_exact_tree_without_base_tree(monkeypatch):
@@ -263,8 +262,8 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.22"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.22"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.23"
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.23"
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
     assert "5.1.20 всегда используется полный профиль" in installer
 

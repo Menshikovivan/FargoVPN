@@ -176,11 +176,17 @@ def _recipients() -> list[dict[str, Any]]:
     try:
         rows = connection.execute(
             """
-            SELECT tg_id, COALESCE(username,'') AS username
-            FROM users
-            WHERE tg_id>0 AND COALESCE(telegram_available,1)<>0
-            GROUP BY tg_id
-            ORDER BY tg_id
+            SELECT u.tg_id, COALESCE(u.username,'') AS username
+            FROM users u
+            LEFT JOIN telegram_profile_links l ON l.telegram_id=u.tg_id
+            WHERE u.tg_id>0 AND COALESCE(u.telegram_available,1)<>0
+              AND COALESCE(u.registration_status,'active')='active'
+              AND (l.telegram_id IS NULL OR l.profile_tg_id=u.tg_id OR EXISTS (
+                  SELECT 1 FROM telegram_profile_links owner_link
+                  WHERE owner_link.telegram_id=l.profile_tg_id
+                    AND owner_link.profile_tg_id=l.profile_tg_id
+              ))
+            ORDER BY u.tg_id
             """
         ).fetchall()
     finally:

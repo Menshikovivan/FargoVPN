@@ -12,7 +12,8 @@ def test_terminal_telegram_errors_mark_chat_unavailable_and_next_broadcast_skips
     assert '"bot was blocked"' in worker
     assert '"chat not found"' in worker
     assert "telegram_available=0" in worker
-    assert "COALESCE(telegram_available,1)<>0" in manager
+    assert "COALESCE(u.telegram_available,1)<>0" in manager
+    assert "l.profile_tg_id=u.tg_id OR EXISTS" in manager
 
 def test_incoming_message_reactivates_telegram_delivery():
     source = read("user_events.py")

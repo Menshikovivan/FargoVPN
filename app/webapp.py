@@ -2884,7 +2884,7 @@ def user_detail_page(request: Request, tg_id: int):
         ).fetchall()
     linked_html = ''.join(f'<li>TG {int(x[0])} · @{html.escape(str(x[1] or "нет"))}</li>' for x in linked_rows) or '<li>Дополнительных аккаунтов нет</li>'
     price_value = str(row.get("custom_payment_price") or "")
-    family_link_html = f'<div class="setting"><label>Семейные Telegram аккаунты</label><p>Каждый аккаунт должен самостоятельно открыть одноразовую ссылку и пройти проверку PIN. Аккаунт с собственной VPN подпиской привязать нельзя.</p><ul>{linked_html}</ul><form method="post" action="/users/id/{int(tg_id)}/family-link"><button class="secondary">Создать ссылку привязки на 30 минут</button></form></div>'
+    family_link_html = f'<div class="setting"><label>Семейные Telegram аккаунты</label><p>Каждый аккаунт должен самостоятельно открыть одноразовую ссылку и пройти проверку PIN. Аккаунт с собственной VPN подпиской привязать нельзя.</p><ul>{linked_html}</ul><form method="post" action="/users/id/{int(tg_id)}/family-link"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><button class="secondary" type="submit">Создать ссылку привязки на 30 минут</button></form></div>'
     billing_html = f'<div class="card" style="margin-top:14px"><h2>Оплата и семейный тариф</h2><p>Статус: <b>{html.escape(profile_status)}</b> · Telegram аккаунтов: <b>{profile_links}</b> · сумма за период: <b>{profile_price} ₽</b></p><p>Индивидуальная сумма заменяет автоматический тариф. Пустое поле снова включает расчёт по числу аккаунтов.</p><form method="post" action="/users/id/{int(tg_id)}/payment-price"><div class="setting"><label for="custom-payment-price">Индивидуальная сумма, ₽</label><input id="custom-payment-price" name="amount" type="number" min="1" max="100000000" step="1" value="{html.escape(price_value, quote=True)}" placeholder="Автоматически"></div><button>Сохранить сумму</button></form></div>' + family_link_html
     # Opening the conversation is the read action. Clear the compact counter
     # before rendering even if an imported/older database contains a stale
@@ -3058,27 +3058,55 @@ def user_payment_price_update(request: Request, tg_id: int, amount: str = Form("
 
 
 @app.post("/users/id/{tg_id}/family-link")
-def user_family_link_request(request: Request, tg_id: int):
-    require_auth(request)
+def user_family_link_request(request: Request, tg_id: int, csrf_token: str = Form("")):
+    require_auth(request, csrf_token)
     row = get_user(tg_id)
     if not row or str(row.get("registration_status") or "active") != "active":
         raise HTTPException(400, "Основной аккаунт должен пройти проверку PIN-кода")
+    if int(tg_id) <= 0:
+        raise HTTPException(400, "Ссылка доступна только для Telegram-пользователя с положительным ID")
     if billing.profile_owner(int(tg_id), config.DB_PATH) != int(tg_id):
         raise HTTPException(400, "Ссылку можно создать только для основного профиля")
-    token = secrets.token_urlsafe(32)
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    now = int(time.time())
-    with database() as connection:
-        connection.execute("DELETE FROM telegram_profile_link_requests WHERE expires_at<? OR consumed_at IS NOT NULL", (now,))
-        connection.execute(
-            "INSERT INTO telegram_profile_link_requests(token_hash,profile_tg_id,created_at,expires_at,created_by) VALUES(?,?,?,?,?)",
-            (digest, int(tg_id), now, now + 1800, int(tg_id)),
-        )
     username = _telegram_bot_username()
-    if not username:
-        raise HTTPException(502, "Не удалось определить Telegram-бота")
-    set_flash(request, f"Передайте дополнительному пользователю одноразовую ссылку (30 минут): https://t.me/{username}?start=family_{token}", "good")
-    audit(str(request.session.get("user", "web")), "family_link_request_created", str(tg_id))
+    token_value = str(getattr(config, "BOT_TOKEN", "") or "").strip()
+    if not username or not token_value:
+        set_flash(request, "Не удалось создать ссылку: проверьте токен и username Telegram-бота в настройках.", "bad")
+        return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
+    try:
+        # Use the same owner-scoped transaction lock and four-account check
+        # as bot-created invitations, so concurrent panel/bot requests agree.
+        token = billing.create_profile_link_request_sync(int(tg_id), config.DB_PATH, 1800)
+    except ValueError as error:
+        set_flash(request, str(error), "bad")
+        return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
+    deep_link = f"https://t.me/{username}?start=family_{token}"
+    try:
+        response = httpx.post(
+            f"https://api.telegram.org/bot{token_value}/sendMessage",
+            json={
+                "chat_id": int(tg_id),
+                "text": (
+                    "🔗 Ссылка для привязки дополнительного Telegram-аккаунта к вашему профилю FargoVPN.\n"
+                    "Отправьте её этому человеку. Ссылка одноразовая и действует 30 минут:\n"
+                    f"{deep_link}"
+                ),
+                "disable_web_page_preview": True,
+            },
+            timeout=10.0,
+            trust_env=False,
+        )
+        payload = response.json()
+        delivered = response.is_success and bool(payload.get("ok"))
+        telegram_error = str(payload.get("description") or f"HTTP {response.status_code}")
+    except Exception as error:
+        delivered = False
+        telegram_error = str(error)[:180] or error.__class__.__name__
+    if delivered:
+        set_flash(request, "Одноразовая ссылка привязки отправлена основному пользователю в Telegram. Срок действия — 30 минут.", "good")
+        audit(str(request.session.get("user", "web")), "family_link_request_sent", str(tg_id))
+    else:
+        set_flash(request, f"Не удалось отправить ссылку в Telegram ({telegram_error}). Ссылка на 30 минут: {deep_link}", "bad")
+        audit(str(request.session.get("user", "web")), "family_link_request_send_failed", str(tg_id))
     return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
 
 
@@ -5808,7 +5836,7 @@ const stateLabels={idle:'Ожидание',queued:'В очереди',checking:'
 let rememberedUpdateJob='';try{rememberedUpdateJob=sessionStorage.getItem('fargovpn_update_job')||'';}catch(_){}let lastStatus=initial||{};let lastState=String(lastStatus.state||'idle');let currentJob=String(lastStatus.job_id||rememberedUpdateJob||'');let watchedJob='';try{watchedJob=sessionStorage.getItem('fargovpn_update_watch_job')||'';}catch(_){}let serverProgress=Math.max(0,Math.min(100,Number(lastStatus.progress||0)));let shownProgress=serverProgress;let reloadScheduled=false;let recoveryInFlight=false;
 const bar=document.getElementById('update-progress-bar');const value=document.getElementById('update-progress-value');const note=document.getElementById('update-connection-note');const phase=document.getElementById('update-phase');const elapsed=document.getElementById('update-elapsed');let progressStartedAt=0;
 function paintProgress(){if(bar)bar.style.width=shownProgress.toFixed(2)+'%';if(value)value.textContent=Math.floor(shownProgress)+'%';}
-const softCaps={queue:4,check:8,download:30,verify:32,extract:48,dependencies:58,'stop-services':62,backup:68,files:73,python:83,database:91,services:95,restart:98,health:99,github:99,restore:99};function animateProgress(){if(lastState&&busyStates.has(lastState)&&serverProgress<100){const now=Date.now();if(!progressStartedAt)progressStartedAt=now;const seconds=Math.max(0,Math.floor((now-progressStartedAt)/1000));if(elapsed)elapsed.textContent='Идёт '+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');const phaseName=String(lastStatus.phase||'').toLowerCase();const softCap=Math.max(serverProgress,Number(softCaps[phaseName]||Math.min(99,serverProgress+4)));if(shownProgress<serverProgress)shownProgress=Math.min(serverProgress,shownProgress+Math.max(0.35,(serverProgress-shownProgress)*0.18));else if(shownProgress<softCap)shownProgress=Math.min(softCap,shownProgress+Math.max(0.03,(softCap-shownProgress)*0.012));}else if(shownProgress>serverProgress&&serverProgress<100)shownProgress=serverProgress;paintProgress();requestAnimationFrame(animateProgress);}
+function animateProgress(){if(lastState&&busyStates.has(lastState)&&serverProgress<100){const now=Date.now();if(!progressStartedAt)progressStartedAt=now;const seconds=Math.max(0,Math.floor((now-progressStartedAt)/1000));if(elapsed)elapsed.textContent='Идёт '+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');}shownProgress=serverProgress;paintProgress();requestAnimationFrame(animateProgress);}
 function setRequestError(text){const error=document.getElementById('update-error');if(error){error.textContent=text||'';error.style.display=text?'block':'none';}if(note&&text)note.textContent='Задача не была подтверждена сервером. Исправьте указанную ошибку и повторите запуск.';}
 function rememberJob(job){if(job){try{sessionStorage.setItem('fargovpn_update_job',job)}catch(_){}}}
 function showReconnect(message){let box=document.getElementById('update-reconnect');if(!box){box=document.createElement('div');box.id='update-reconnect';box.className='update-reconnect card';box.innerHTML='<strong>Веб-панель перезапускается</strong><span></span>';document.body.appendChild(box)}const span=box.querySelector('span');if(span)span.textContent=message||'Соединение будет восстановлено автоматически.';box.classList.add('visible')}
