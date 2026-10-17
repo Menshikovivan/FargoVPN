@@ -19,8 +19,8 @@ def submit_receipt_sync(tg_id: int, username: str, file_id: str, amount: int,
             return int(existing[0]), False
         cursor = connection.execute(
             """INSERT INTO payments
-                (tg_id,username,telegram_file_id,amount,ocr_status,purchase_token)
-                VALUES (?,?,?,?,'not_checked',?)""",
-            (int(tg_id), username, file_id, int(amount), purchase_token),
+                (tg_id,username,telegram_file_id,amount,expected_amount,ocr_status,purchase_token)
+                VALUES (?,?,?,?,?,'not_checked',?)""",
+            (int(tg_id), username, file_id, int(amount), int(amount), purchase_token),
         )
         return int(cursor.lastrowid), True

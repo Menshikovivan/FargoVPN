@@ -204,7 +204,12 @@ def get_user(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | 
 
 
 def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
-    user = get_user(tg_id, db_path)
+    with _connect(db_path) as db:
+        mapping = db.execute(
+            "SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (int(tg_id),)
+        ).fetchone()
+    profile_tg_id = int(mapping[0]) if mapping and int(mapping[0] or 0) > 0 else int(tg_id)
+    user = get_user(profile_tg_id, db_path)
     if user:
         return user
     # Cabinet authentication is local and fast; do not run a live 3x-ui scan here.

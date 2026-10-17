@@ -17,6 +17,7 @@ from pathlib import Path
 from aiogram import Bot
 
 import config
+from services import billing
 import message_journal
 import user_events
 from services.xui_api import fetch_and_sync
@@ -61,14 +62,14 @@ def _record_reminder(tg_id: int, username: str, days: int, expiry: int) -> None:
         logger.debug("Не удалось записать reminder_sent в audit_log: %s", error)
 
 
-def _reminder_text(days: int) -> str:
+def _reminder_text(days: int, tg_id: int = 0) -> str:
     if days == 0:
         remaining = "Подписка заканчивается сегодня."
     elif days == 1:
         remaining = "До окончания подписки остался <b>1 день</b>."
     else:
         remaining = f"До окончания подписки осталось <b>{days} дн.</b>"
-    price = int(getattr(config, "PAYMENT_PRICE", 0) or 0)
+    price = billing.expected_payment_amount(int(tg_id), config.DB_PATH) if int(tg_id) > 0 else int(getattr(config, "PAYMENT_PRICE", 0) or 0)
     period = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
     price_line = f"\n💳 Продление: <b>{price} ₽ / {period} дней</b>" if price > 0 else ""
     return (
@@ -102,7 +103,7 @@ async def run() -> int:
             if days is None or days not in configured or int(last_sent if last_sent is not None else -1) == days:
                 continue
             try:
-                reminder_text = _reminder_text(days)
+                reminder_text = _reminder_text(days, int(tg_id))
                 delivered = await bot.send_message(int(tg_id), reminder_text, parse_mode="HTML", reply_markup=_reminder_markup())
                 message_journal.record_outgoing_sync(
                     int(tg_id), username=str(username or ""), event_type="subscription_reminder", text=reminder_text,

@@ -70,6 +70,7 @@ from services.telegram_events import (
 )
 from services.receipt_ocr import ReceiptAnalysis, analyze_payment_receipt
 from services.payment_submission import submit_receipt_sync
+from services import billing
 from services.subscription_status import has_subscription, has_active_subscription
 from telegram_registration_middleware import InvitationAccessMiddleware, PendingInviteCodeFilter, send_registration_prompt
 import registration_access
@@ -925,7 +926,8 @@ async def get_user_menu_async(
             )
         except Exception as error:
             logger.debug("Не удалось синхронно обновить identity меню %s: %s", user_id, error)
-        user = await asyncio.to_thread(db_get_user, int(user_id))
+        profile_id = await asyncio.to_thread(billing.payment_profile_id, int(user_id), config.DB_PATH)
+        user = await asyncio.to_thread(db_get_user, profile_id)
     elif user is None:
         user = await asyncio.to_thread(db_get_user, int(user_id))
     return get_user_menu(int(user_id), user)
@@ -1036,7 +1038,8 @@ async def resolve_user(user_id: int, username: str | None) -> dict | None:
 
 
 async def send_home(message: Message, user_id: int) -> None:
-    user = await resolve_user(user_id, getattr(message.from_user, "username", None))
+    profile_id = await asyncio.to_thread(billing.payment_profile_id, user_id, config.DB_PATH)
+    user = await resolve_user(profile_id, None)
     summary = ""
     if user:
         client = await get_client_from_panel(str(user.get("email") or ""))
@@ -1044,35 +1047,29 @@ async def send_home(message: Message, user_id: int) -> None:
         expiry = int(source.get("expiry_time") or 0)
         enabled = bool(source.get("enable", True))
         now_ms = int(time.time() * 1000)
-        if not has_subscription(source):
-            summary = "ℹ️ Активной подписки нет"
+        label = billing.subscription_label({**user, **source}, now_ms)
+        status = "🔴" if label in {"Подписка не оплачена", "Не прошёл проверку PIN-кода", "Заблокирован", "Доступ отключён", "Подписка истекла"} else "🟢"
+        if expiry > 0 and has_subscription(source):
+            until = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
+            summary = f"{status} {label} · до <code>{until}</code>"
         else:
-            if not enabled:
-                status = "🔴 Доступ отключён"
-            elif expiry > 0 and expiry <= now_ms:
-                status = "🔴 Подписка истекла"
-            else:
-                status = "🟢 Подписка активна"
-            if expiry > 0:
-                until = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
-                summary = f"{status} · до <code>{until}</code>"
-            else:
-                summary = f"{status} · <b>бессрочно</b>"
+            summary = f"{status} {label}"
         if client:
             user = {**user, **client}
     else:
-        summary = "ℹ️ Активной подписки нет"
+        summary = "ℹ️ Подписка не оплачена"
     await message.answer(
         home_text(summary=summary),
         parse_mode="HTML",
         reply_markup=await get_user_menu_async(
-            user_id, user, getattr(message.from_user, "username", None), getattr(message.from_user, "full_name", None)
+            profile_id, user
         ),
     )
 
 
 async def send_user_stats(message: Message, user_id: int, username: str | None) -> None:
-    u = await resolve_user(user_id, username)
+    profile_id = await asyncio.to_thread(billing.payment_profile_id, user_id, config.DB_PATH)
+    u = await resolve_user(profile_id, None)
     panel_client = await get_client_from_panel(str(u.get("email") or "")) if u else None
     source = panel_client or u
     if not has_active_subscription(source):
@@ -1138,9 +1135,10 @@ async def send_user_stats(message: Message, user_id: int, username: str | None) 
 
 
 def payment_text() -> str:
+    amount = int(round(float(getattr(config, "PAYMENT_PRICE", 0) or 0)))
     return (
         f"<b>💳 Оплата подписки {html.escape(str(config.SERVICE_NAME))}</b>\n\n"
-        f"• Цена: <code>{int(config.PAYMENT_PRICE)}</code> ₽ / {SUBSCRIPTION_DAYS} дней\n"
+        f"• Цена: <code>{amount}</code> ₽ / {SUBSCRIPTION_DAYS} дней\n"
         f"• Номер: <code>{html.escape(str(config.PAYMENT_PHONE))}</code>\n"
         f"• Банк: <b>{html.escape(str(config.PAYMENT_BANK))}</b>\n"
         f"• Получатель: <b>{html.escape(str(config.PAYMENT_RECEIVER))}</b>\n\n"
@@ -1150,9 +1148,22 @@ def payment_text() -> str:
 
 
 async def start_purchase(message: Message, state: FSMContext) -> None:
-    await state.update_data(purchase_token=secrets.token_hex(24))
+    profile_id = await asyncio.to_thread(billing.payment_profile_id, int(message.from_user.id), config.DB_PATH)
+    amount = await asyncio.to_thread(billing.expected_payment_amount, profile_id, config.DB_PATH)
+    await state.update_data(purchase_token=secrets.token_hex(24), expected_amount=amount, billing_tg_id=profile_id)
     await state.set_state(FSMStates.wait_for_receipt)
-    await message.answer(payment_text(), parse_mode="HTML")
+    await message.answer(payment_text_for_user(amount), parse_mode="HTML")
+
+
+def payment_text_for_user(amount: int) -> str:
+    return (
+        f"<b>💳 Оплата подписки {html.escape(str(config.SERVICE_NAME))}</b>\n\n"
+        f"• Цена: <code>{int(amount)}</code> ₽ / {SUBSCRIPTION_DAYS} дней\n"
+        f"• Номер: <code>{html.escape(str(config.PAYMENT_PHONE))}</code>\n"
+        f"• Банк: <b>{html.escape(str(config.PAYMENT_BANK))}</b>\n"
+        f"• Получатель: <b>{html.escape(str(config.PAYMENT_RECEIVER))}</b>\n\n"
+        "После перевода сразу пришлите скриншот чека как фото или файл изображения. Бот проверит чек и сообщит результат."
+    )
 
 
 async def start_support(message: Message, state: FSMContext) -> None:
@@ -1282,6 +1293,14 @@ async def cmd_start(msg: Message, state: FSMContext):
                 f"❌ Не удалось выполнить привязку: {html.escape(str(error)[:400])}",
                 parse_mode="HTML",
             )
+        return
+    if payload.startswith("family_"):
+        token = payload[len("family_"):].strip()
+        try:
+            owner = await asyncio.to_thread(billing.approve_profile_link_sync, token, int(msg.from_user.id), config.DB_PATH)
+            await msg.answer(f"✅ Аккаунт добавлен к семейному профилю Telegram ID {owner}. Для этого профиля применяется общая подписка.")
+        except Exception as error:
+            await msg.answer(f"❌ Не удалось привязать аккаунт: {html.escape(str(error)[:300])}", parse_mode="HTML")
         return
     await state.clear()
     await asyncio.to_thread(ensure_referral_code, int(msg.from_user.id))
@@ -1543,11 +1562,11 @@ async def user_stats(msg: Message):
 async def buy_vpn(msg: Message, state: FSMContext):
     await start_purchase(msg, state)
 
-def receipt_ocr_options() -> dict:
+def receipt_ocr_options(minimum_amount: float | None = None) -> dict:
     return {
         "receiver": str(getattr(config, "PAYMENT_RECEIVER", "")),
         "phone": str(getattr(config, "PAYMENT_PHONE", "")),
-        "minimum_amount": float(getattr(config, "RECEIPT_MIN_AMOUNT", 150)),
+        "minimum_amount": float(getattr(config, "RECEIPT_MIN_AMOUNT", 150) if minimum_amount is None else minimum_amount),
         "max_age_hours": int(getattr(config, "RECEIPT_MAX_AGE_HOURS", 24)),
         "aliases": getattr(config, "RECEIPT_RECEIVER_ALIASES", ""),
         "allow_masked_phone": bool(getattr(config, "RECEIPT_ALLOW_MASKED_PHONE", True)),
@@ -1669,9 +1688,13 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         )
         return
 
+    expected_amount = int((await state.get_data()).get("expected_amount") or 0)
+    if expected_amount <= 0:
+        expected_amount = await asyncio.to_thread(billing.expected_payment_amount, int(msg.from_user.id), config.DB_PATH)
+    billing_tg_id = int((await state.get_data()).get("billing_tg_id") or await asyncio.to_thread(billing.payment_profile_id, int(msg.from_user.id), config.DB_PATH))
     payment_id, created = await asyncio.to_thread(
-        submit_receipt_sync, msg.from_user.id, msg.from_user.username or "",
-        file_id, config.PAYMENT_PRICE, purchase_token, config.DB_PATH,
+        submit_receipt_sync, billing_tg_id, msg.from_user.username or "",
+        file_id, expected_amount, purchase_token, config.DB_PATH,
     )
     if not created:
         await msg.answer("ℹ️ Заявка на оплату уже принята. Дождитесь результата проверки; повторный чек не создаёт новую оплату.")
@@ -1681,7 +1704,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     # Telegram receipt delivery remains unchanged and is handled below.
     try:
         admin_username = str(getattr(config, "WEB_USERNAME", "admin") or "admin").strip()
-        payment_amount = int(round(float(getattr(config, "PAYMENT_PRICE", 0) or 0)))
+        payment_amount = expected_amount
         payer_username = str(msg.from_user.username or "нет")
         payment_url = str(getattr(config, "WEB_PUBLIC_PREFIX", "") or "") + "/payments"
         _schedule_panel_push(
@@ -1712,7 +1735,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
                 config.DB_PATH,
                 payment_id,
                 content,
-                **receipt_ocr_options(),
+                **receipt_ocr_options(expected_amount),
             )
             if analysis.passed and bool(getattr(config, "RECEIPT_AUTO_APPROVE", True)):
                 approval = await asyncio.to_thread(
@@ -2223,8 +2246,12 @@ async def crmview_card(call: CallbackQuery):
     builder.button(text=f"➖ Урезать {SUBSCRIPTION_DAYS} дней", callback_data=f"crmmod_-{SUBSCRIPTION_DAYS}_{tg_id}")
     builder.button(text="🗑 Полностью удалить", callback_data=f"crmdel_{tg_id}")
     builder.adjust(2, 1)
-    date_str = "Бессрочно" if u["expiry_time"] <= 0 else panel_from_timestamp(u["expiry_time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
-    card = f"<b>👤 КЛИЕНТ CRM:</b>\n\n🆔 TG ID: <code>{tg_id}</code>\n👤 Ник: @{u['username'] or 'нет'}\n📧 Email: <code>{u['email']}</code>\n📅 До: <code>{date_str}</code>"
+    date_str = billing.subscription_label(u)
+    if billing.has_subscription(u) and int(u.get("expiry_time") or 0) > 0:
+        date_str += " · " + panel_from_timestamp(u["expiry_time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    amount = await asyncio.to_thread(billing.expected_payment_amount, tg_id, config.DB_PATH)
+    linked = await asyncio.to_thread(billing.linked_count, tg_id, config.DB_PATH)
+    card = f"<b>👤 КЛИЕНТ CRM:</b>\n\n🆔 TG ID: <code>{tg_id}</code>\n👤 Ник: @{u['username'] or 'нет'}\n📧 Email: <code>{u['email']}</code>\n📅 Статус: <code>{html.escape(date_str)}</code>\n👨‍👩‍👧 Telegram аккаунтов: <code>{linked}</code>\n💳 Платёж за период: <code>{amount}</code> ₽"
     await call.message.answer(card, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("crmmod_"))

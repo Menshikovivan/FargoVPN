@@ -40,6 +40,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
 import config
+from services import billing
 import auth_security
 import cabinet_service
 import referral_codes
@@ -770,6 +771,14 @@ def remaining_label(expiry_ms: int, now_ms: int | None = None) -> str:
     return f"{int(days)} дн."
 
 
+def user_subscription_label(user: dict[str, Any], now_ms: int | None = None) -> str:
+    return billing.subscription_label(user, now_ms)
+
+
+def user_subscription_label(user: dict[str, Any], now_ms: int | None = None) -> str:
+    return billing.subscription_label(user, now_ms)
+
+
 def status_badge(active: bool, text_on: str = "Активен", text_off: str = "Отключён") -> str:
     css = "good" if active else "bad"
     return f'<span class="badge {css}">{html.escape(text_on if active else text_off)}</span>'
@@ -1085,6 +1094,8 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
         item = {
             **client,
             "registered_at": row.get("registered_at") or "",
+            "registration_status": str(row.get("registration_status") or "active"),
+            "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
             "username": str(row.get("username") or "") or email_key.rsplit("_", 1)[0] or "Без имени",
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
@@ -1122,6 +1133,8 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
         remaining = remaining_days(expiry, now_ms)
         merged.append({
             "registered_at": row.get("registered_at") or "",
+            "registration_status": str(row.get("registration_status") or "active"),
+            "custom_payment_price": row.get("custom_payment_price"),
             "email": str(row.get("email") or ""),
             "uuid": str(row.get("uuid") or ""),
             "sub_id": str(row.get("sub_id") or ""),
@@ -1143,7 +1156,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "remaining_days": remaining,
             "source_stale": bool(snapshot.get("stale")),
         })
-    return merged, snapshot
+    return billing.apply_registration_filter(merged, config.DB_PATH), snapshot
 
 
 def get_user(tg_id: int) -> dict[str, Any] | None:
@@ -1246,7 +1259,17 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     expiry = int(user.get("expiry_time") or 0)
     now_ms = int(time.time() * 1000)
     disabled = not bool(user.get("enable", True))
-    if expiry <= 0:
+    status_label = str(user.get("registration_status") or "active").lower()
+    if status_label in {"new", "awaiting_invite"}:
+        status_label = "Не прошёл проверку PIN-кода"
+    elif not any(str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id")):
+        status_label = "Подписка не оплачена"
+    else:
+        status_label = user_subscription_label(user, now_ms)
+    has_vpn_subscription = any(str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id"))
+    if not has_vpn_subscription:
+        expiry_text, remaining = status_label, "—"
+    elif expiry <= 0:
         expiry_text, remaining = "Бессрочно", "∞"
     else:
         expiry_text = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
@@ -1255,8 +1278,11 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     used = up + down
     quota = "Без лимита" if total <= 0 else f"{bytes_to_gb(max(0, total-used))} GB осталось"
     online = bool(user.get("online"))
-    if disabled: status, status_cls = "Отключена", "bad"
+    if status_label == "Не прошёл проверку PIN-кода": status, status_cls = status_label, "warn"
+    elif status_label == "Подписка не оплачена": status, status_cls = status_label, "warn"
+    elif disabled: status, status_cls = "Отключена", "bad"
     elif expiry > 0 and expiry <= now_ms: status, status_cls = "Истекла", "warn"
+    elif expiry <= 0 and billing.has_subscription(user): status, status_cls = "Бессрочная", "good"
     else: status, status_cls = "Активна", "good"
     username_clean = html.escape(username or str(user.get("username") or "Пользователь"))
     sub_escaped = html.escape(sub_url, quote=True)
@@ -2401,7 +2427,7 @@ def users_page(
     try:
         with database_adapter.connect(config.DB_PATH, timeout=10) as _conn:
             _conn.row_factory = sqlite3.Row
-            _ref_rows = _conn.execute("SELECT u.tg_id,u.referred_by_tg_id,COALESCE(r.username,'') AS referred_by_username,COALESCE(u.telegram_available,1) AS telegram_available,u.telegram_unavailable_reason,u.registered_at FROM users u LEFT JOIN users r ON r.tg_id=u.referred_by_tg_id WHERE u.tg_id>0").fetchall()
+            _ref_rows = _conn.execute("SELECT u.tg_id,u.referred_by_tg_id,COALESCE(r.username,'') AS referred_by_username,COALESCE(u.telegram_available,1) AS telegram_available,u.telegram_unavailable_reason,u.registered_at,u.registration_status,u.custom_payment_price FROM users u LEFT JOIN users r ON r.tg_id=u.referred_by_tg_id WHERE u.tg_id>0").fetchall()
         _ref_map = {int(r['tg_id']): dict(r) for r in _ref_rows}
         for _user in users:
             _extra = _ref_map.get(int(_user.get('tg_id') or 0), {})
@@ -2410,6 +2436,8 @@ def users_page(
             _user['referred_by_username'] = str(_extra.get('referred_by_username') or '')
             _user['telegram_available'] = bool(_extra.get('telegram_available', 1))
             _user['telegram_unavailable_reason'] = str(_extra.get('telegram_unavailable_reason') or '')[:240]
+            _user['registration_status'] = str(_extra.get('registration_status') or 'active')
+            _user['custom_payment_price'] = _extra.get('custom_payment_price')
     except Exception as _error:
         LOGGER.debug("Referral enrichment skipped: %s", _error)
     # Клиентская фильтрация остаётся для мгновенной реакции, но здесь есть
@@ -2468,6 +2496,7 @@ def users_page(
         unread_preview = " ".join(str(unread.get("preview") or "").split())[:180]
         preview_hidden = "" if unread_count and unread_preview else "hidden"
         quota = "∞" if item["quota_remaining"] is None else fmt_bytes(item["quota_remaining"])
+        payment_status = user_subscription_label(item, now_ms)
         display_name = str(item.get("comment") or item.get("username") or item.get("email") or "Без Telegram-привязки")
         base_button_label = "Открыть чат" if tg_id > 0 else "Открыть карточку"
         button_label = base_button_label
@@ -2509,7 +2538,7 @@ def users_page(
             f'''<article class="user-row" data-user-tg-id="{tg_id}" data-user-registered="{html.escape(registered_day, quote=True)}" data-user-search="{html.escape(search_blob, quote=True)}" data-user-status="{row_status}" data-user-online="{1 if item.get('online') else 0}" data-user-remaining="{remaining_sort}" data-user-last-online="{int(item.get('last_online_ts') or 0)}" data-user-traffic="{int(item.get('traffic_used') or 0)}" data-user-quota="{html.escape(quota_sort, quote=True)}" data-user-name="{html.escape(display_name.casefold(), quote=True)}">
 <div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{html.escape(display_name)}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
 <div class="user-status">{status_badge(item["active"])}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
-<div class="user-stat"><small>Срок</small><b>{remaining_label(item["expiry_time"], now_ms)}</b><span>{fmt_date(item["expiry_time"])}</span></div>
+<div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
 <div class="user-stat"><small>Лимит</small><b>{quota}</b><span>{"безлимит" if item["quota_remaining"] is None else "осталось"}</span></div>
 <div class="user-actions"><a class="button small secondary" href="/users/id/{tg_id}" data-chat-button data-base-label="{base_button_label}">{button_label}</a><details class="row-more"><summary aria-label="Дополнительные действия">•••</summary><div class="row-more-menu"><form class="inline" method="post" action="/users/{tg_id}/days"><input name="days" type="number" value="30" min="-3650" max="3650" step="1" aria-label="Изменение срока в днях" title="Изменить дни"><button class="small" title="Изменить дни">Срок</button></form><form method="post" action="/users/{tg_id}/toggle"><button class="small secondary">{"Блокировать" if item["enable"] else "Включить"}</button></form><form method="post" action="/users/{tg_id}/delete" onsubmit="return confirm('Удалить пользователя из базы и 3x-ui?')"><button class="small danger">Удалить</button></form></div></details></div>
@@ -2845,6 +2874,18 @@ def user_detail_page(request: Request, tg_id: int):
     except Exception as error:
         LOGGER.warning("Не удалось получить реферальную статистику TG ID %s: %s", tg_id, error)
         referral_stat = {"invited": 0, "paid": 0, "rewards": 0, "days": 0}
+    profile_status = user_subscription_label(row)
+    profile_price = billing.expected_payment_amount(int(tg_id), config.DB_PATH)
+    profile_links = billing.linked_count(int(tg_id), config.DB_PATH)
+    with database() as connection:
+        linked_rows = connection.execute(
+            "SELECT l.telegram_id,COALESCE(u.username,'') AS username FROM telegram_profile_links l LEFT JOIN users u ON u.tg_id=l.telegram_id WHERE l.profile_tg_id=? AND l.telegram_id<>? ORDER BY l.telegram_id",
+            (int(tg_id), int(tg_id)),
+        ).fetchall()
+    linked_html = ''.join(f'<li>TG {int(x[0])} · @{html.escape(str(x[1] or "нет"))}</li>' for x in linked_rows) or '<li>Дополнительных аккаунтов нет</li>'
+    price_value = str(row.get("custom_payment_price") or "")
+    family_link_html = f'<div class="setting"><label>Семейные Telegram аккаунты</label><p>Каждый аккаунт должен самостоятельно открыть одноразовую ссылку и пройти проверку PIN. Аккаунт с собственной VPN подпиской привязать нельзя.</p><ul>{linked_html}</ul><form method="post" action="/users/id/{int(tg_id)}/family-link"><button class="secondary">Создать ссылку привязки на 30 минут</button></form></div>'
+    billing_html = f'<div class="card" style="margin-top:14px"><h2>Оплата и семейный тариф</h2><p>Статус: <b>{html.escape(profile_status)}</b> · Telegram аккаунтов: <b>{profile_links}</b> · сумма за период: <b>{profile_price} ₽</b></p><p>Индивидуальная сумма заменяет автоматический тариф. Пустое поле снова включает расчёт по числу аккаунтов.</p><form method="post" action="/users/id/{int(tg_id)}/payment-price"><div class="setting"><label for="custom-payment-price">Индивидуальная сумма, ₽</label><input id="custom-payment-price" name="amount" type="number" min="1" max="100000000" step="1" value="{html.escape(price_value, quote=True)}" placeholder="Автоматически"></div><button>Сохранить сумму</button></form></div>' + family_link_html
     # Opening the conversation is the read action. Clear the compact counter
     # before rendering even if an imported/older database contains a stale
     # cursor. A message committed after this transaction is counted normally.
@@ -2922,6 +2963,7 @@ def user_detail_page(request: Request, tg_id: int):
     media_limit = max(1, int(getattr(config, "CHAT_MEDIA_MAX_MB", 100)))
     display_label = str(xui_comment or row.get("username") or row.get("email") or "Пользователь").strip() or "Пользователь"
     body = f'''<header><div><h1>{html.escape(display_label)}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
+{billing_html}
 <div class="chat-layout"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
 {('<div class="notice">Сначала восстановите или укажите положительный Telegram ID. Ник сам по себе не позволяет боту написать пользователю.</div>' if disabled else '')}
 <div id="chat-window" class="chat-window">{event_html or '<div class="empty-state">История пока пуста. Новые сообщения и действия появятся здесь.</div>'}</div>
@@ -2997,6 +3039,47 @@ if(bindSearchButton)bindSearchButton.addEventListener('click',async()=>{{
 }});
 }})();</script>'''
     return page(request, "Пользователь", body, "users", script)
+
+
+@app.post("/users/id/{tg_id}/payment-price")
+def user_payment_price_update(request: Request, tg_id: int, amount: str = Form("")):
+    require_auth(request)
+    try:
+        clean = str(amount or "").strip()
+        parsed = None if not clean else int(clean)
+        if parsed is not None and not 1 <= parsed <= 100_000_000:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Введите сумму от 1 до 100 000 000 рублей или оставьте поле пустым")
+    with database() as connection:
+        connection.execute("UPDATE users SET custom_payment_price=? WHERE tg_id=?", (parsed, int(tg_id)))
+    audit(str(request.session.get("user", "web")), "user_payment_price_update", f"{tg_id}: {parsed if parsed is not None else 'automatic'}")
+    return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
+
+
+@app.post("/users/id/{tg_id}/family-link")
+def user_family_link_request(request: Request, tg_id: int):
+    require_auth(request)
+    row = get_user(tg_id)
+    if not row or str(row.get("registration_status") or "active") != "active":
+        raise HTTPException(400, "Основной аккаунт должен пройти проверку PIN-кода")
+    if billing.profile_owner(int(tg_id), config.DB_PATH) != int(tg_id):
+        raise HTTPException(400, "Ссылку можно создать только для основного профиля")
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    now = int(time.time())
+    with database() as connection:
+        connection.execute("DELETE FROM telegram_profile_link_requests WHERE expires_at<? OR consumed_at IS NOT NULL", (now,))
+        connection.execute(
+            "INSERT INTO telegram_profile_link_requests(token_hash,profile_tg_id,created_at,expires_at,created_by) VALUES(?,?,?,?,?)",
+            (digest, int(tg_id), now, now + 1800, int(tg_id)),
+        )
+    username = _telegram_bot_username()
+    if not username:
+        raise HTTPException(502, "Не удалось определить Telegram-бота")
+    set_flash(request, f"Передайте дополнительному пользователю одноразовую ссылку (30 минут): https://t.me/{username}?start=family_{token}", "good")
+    audit(str(request.session.get("user", "web")), "family_link_request_created", str(tg_id))
+    return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
 
 
 @app.post("/users/id/{tg_id}/comment")
