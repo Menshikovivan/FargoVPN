@@ -96,7 +96,7 @@ def _server_score(server: str) -> int:
     # The L4 router's primary HTTPS host can listen ONLY on the Unix socket.
     # Its local 9443 fallback can be a separate virtual host.
     unix_https = bool(re.search(r"(?m)^\s*listen\s+unix:[^;]*\bssl(?:\s|;)", server))
-    score = (100 if domain and domain in names else 0)
+    score = (10000 if domain and domain in names else 0)
     score += 200 if unix_https else 0
     # The router's primary masked site carries the xHTTP location; the CDN
     # and DNS hosts can use the same Unix listener and even share panel paths.
@@ -121,12 +121,14 @@ def public_domain_from_nginx_text(text: str, p: str | None = None) -> str:
         names = _server_names(server)
         if not names:
             continue
-        listens_https = bool(re.search(r"(?m)^\s*listen\s+[^;]*(?:ssl|proxy_protocol)", server))
-        listens_9443 = bool(re.search(r"(?m)^\s*listen\s+127\.0\.0\.1:9443(?:\s|;)", server))
+        host_score = _server_score(server)
+        if host_score < 0:
+            continue
         has_route = bool(exact.search(server))
-        score = (1000 if has_route else 0) + (100 if listens_9443 else 0) + (50 if listens_https else 0)
-        if score:
-            candidates.append((score, names[0]))
+        # Reuse the same host selection as insertion; a 9443 fallback must not
+        # override the explicitly configured host on the primary Unix socket.
+        score = (100000 if has_route else 0) + host_score
+        candidates.append((score, names[0]))
     if not candidates:
         return ""
     candidates.sort(key=lambda item: item[0], reverse=True)
@@ -191,11 +193,17 @@ def block(p, socket_path):
         # page-specific inline controllers. Hide it and emit exactly one policy
         # matching the application, so browser behaviour is deterministic.
         proxy_hide_header Content-Security-Policy;
+        # Local add_header disables inheritance from the parent TLS server.
+        # Keep HSTS even for gateway-generated 502/504 responses.
+        proxy_hide_header Strict-Transport-Security;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header Content-Security-Policy "{csp}" always;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # This is the trusted edge after L4 PROXY protocol real-IP handling.
+        # Replace any browser-supplied chain before passing to the Unix backend.
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Prefix {p};

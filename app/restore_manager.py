@@ -23,7 +23,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,10 @@ PROTECTED_CONFIG = {
     "WEB_SOCKET_PATH", "WEB_SOCKET_GROUP", "PUSH_VAPID_PRIVATE_KEY_PATH", "INSTALL_PROFILE",
     "UPDATE_DIR", "CHAT_MEDIA_CACHE_DIR", "BROADCAST_DIR", "SUBSCRIPTION_REFRESH_DIR",
     "RESTORE_STATE_PATH", "RESTORE_LOCK_PATH", "RESTORE_LOG_PATH",
+}
+RESTORABLE_CONFIG = {
+    "SERVICE_NAME", "PAYMENT_PRICE", "PAYMENT_PHONE", "PAYMENT_BANK",
+    "PAYMENT_RECEIVER", "REMINDER_DAYS", "WEB_TIMEZONE", "RECEIPT_TIMEZONE",
 }
 PROTECTED_XUI_ENV = {
     "XUI_DB_DSN", "XUI_DB_TYPE", "XUI_DB_HOST", "XUI_DB_PORT", "XUI_DB_NAME", "XUI_DB_USER", "XUI_DB_PASSWORD",
@@ -157,8 +161,8 @@ def _validate_regular_name(name: str) -> str:
 def _archive_limits() -> tuple[int, int, int]:
     return (
         max(100, int(_cfg("RESTORE_ARCHIVE_MAX_MEMBERS", ARCHIVE_MAX_MEMBERS))),
-        max(1024 * 1024, int(_cfg("RESTORE_ARCHIVE_MAX_UNPACKED_MB", ARCHIVE_MAX_UNPACKED_BYTES // (1024 * 1024)))) * 1024 * 1024,
-        max(1024 * 1024, int(_cfg("RESTORE_ARCHIVE_MAX_FILE_MB", ARCHIVE_MAX_FILE_BYTES // (1024 * 1024)))) * 1024 * 1024,
+        max(1, int(_cfg("RESTORE_ARCHIVE_MAX_UNPACKED_MB", ARCHIVE_MAX_UNPACKED_BYTES // (1024 * 1024)))) * 1024 * 1024,
+        max(1, int(_cfg("RESTORE_ARCHIVE_MAX_FILE_MB", ARCHIVE_MAX_FILE_BYTES // (1024 * 1024)))) * 1024 * 1024,
     )
 
 
@@ -170,7 +174,23 @@ def _tar_members(archive: Path) -> list[tarfile.TarInfo]:
     max_members, max_total, max_file = _archive_limits()
     try:
         with tarfile.open(archive, "r:gz") as bundle:
-            members = bundle.getmembers()
+            members = []
+            running_total = 0
+            for member in bundle:
+                # Reject a huge payload before tarfile seeks/decompresses through
+                # it to find the next header.
+                if member.isfile():
+                    size = int(member.size or 0)
+                    if size < 0 or size > max_file:
+                        raise RuntimeError(f"Слишком большой файл в архиве: {member.name}")
+                    running_total += size
+                    if running_total > max_total:
+                        raise RuntimeError("Распакованный размер архива превышает лимит")
+                elif not member.isdir():
+                    raise RuntimeError(f"Недопустимый тип файла в архиве: {member.name}")
+                members.append(member)
+                if len(members) > max_members:
+                    raise RuntimeError(f"Архив содержит более {max_members} элементов")
     except (tarfile.TarError, OSError) as exc:
         raise RuntimeError(f"Не удалось открыть tar.gz: {exc}") from exc
     if len(members) > max_members:
@@ -525,7 +545,7 @@ def compatible_plain_dump(dump: Path, server_version: int):
         yield output if removed else dump
 
 
-def restore_dump(dump: Path, dsn: str) -> None:
+def _restore_trusted_schema(dump: Path, dsn: str) -> None:
     if shutil.which("psql") is None:
         raise RuntimeError("Команда psql не установлена")
     command_dsn, env = dsn_password_and_cli(dsn)
@@ -543,6 +563,156 @@ def restore_dump(dump: Path, dsn: str) -> None:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "неизвестная ошибка").strip()
         raise RuntimeError(f"Восстановление PostgreSQL dump не прошло: {detail[-3000:]}") from exc
+
+
+
+def _copy_header(header: str) -> tuple[str, list[str]]:
+    """Parse a COPY-data envelope, never SQL expressions or executable SQL."""
+    identifier = r'(?:"(?:[^"\x00]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
+    match = re.fullmatch(r'COPY\s+(' + identifier + r')\s*\.\s*(' + identifier + r')\s*\((.*?)\)\s+FROM\s+stdin\s*;', header, re.S | re.I)
+    if not match:
+        raise RuntimeError("Неподдерживаемый COPY-заголовок в backup")
+    def decode(value):
+        return value[1:-1].replace('""', '"') if value.startswith('"') else value.lower()
+    schema, table = decode(match[1]), decode(match[2])
+    if schema != 'public':
+        raise RuntimeError("Backup COPY поддерживает только схему public")
+    columns = []
+    rest = match[3].strip()
+    while rest:
+        item = re.match(identifier, rest)
+        if not item:
+            raise RuntimeError("Неподдерживаемое имя колонки COPY")
+        columns.append(decode(item[0]))
+        rest = rest[item.end():].lstrip()
+        if rest:
+            if not rest.startswith(','):
+                raise RuntimeError("Недопустимый список колонок COPY")
+            rest = rest[1:].lstrip()
+            if not rest:
+                raise RuntimeError("Пустая колонка COPY")
+    if not columns or len(set(columns)) != len(columns):
+        raise RuntimeError("Пустые или повторные колонки COPY")
+    return table, columns
+
+
+def _copy_data_blocks(dump: Path):
+    """Yield strict COPY headers and bounded raw data blocks; skip SQL metadata.
+
+    SQL, psql meta-commands, DDL, functions and sequence statements are NEVER
+    executed. Only a separately constructed psycopg COPY FROM STDIN receives data.
+    """
+    seen = set()
+    with dump.open('rb') as source:
+        while True:
+            line = source.readline(65537)
+            if not line:
+                break
+            if not re.match(rb'^COPY\s', line, re.I):
+                # Skip unexecuted SQL metadata in bounded chunks, including a
+                # single hostile multi-hundred-MiB line.
+                while not line.endswith(b'\n'):
+                    line = source.readline(65537)
+                    if not line:
+                        break
+                continue
+            header = line
+            while not header.rstrip().endswith(b';'):
+                part = source.readline(65537)
+                if not part or len(header) + len(part) > 65536:
+                    raise RuntimeError("Неполный или слишком длинный COPY-заголовок")
+                header += part
+            if len(header) > 65536:
+                raise RuntimeError("Слишком длинный COPY-заголовок")
+            table, columns = _copy_header(header.decode('utf-8', errors='strict').strip())
+            if table in seen:
+                raise RuntimeError("Повторный COPY-блок таблицы в backup")
+            seen.add(table)
+            def rows():
+                while True:
+                    row = source.readline(16 * 1024 * 1024 + 1)
+                    if not row:
+                        raise RuntimeError("COPY-блок не завершен")
+                    if row in (b'\\.\n', b'\\.\r\n'):
+                        return
+                    if len(row) > 16 * 1024 * 1024:
+                        raise RuntimeError("Строка COPY превышает 16 MiB")
+                    yield row
+            data = rows()
+            yield table, columns, data
+            # Consumers must finish each stream before requesting the next block.
+            for _ in data:
+                pass
+    if not seen:
+        raise RuntimeError("Backup не содержит поддерживаемых COPY-блоков")
+
+
+def _clone_live_schema(schema_dsn: str, staging_dsn: str, *, section: str = "pre-data") -> None:
+    """Only locally generated live schema is executable, never archive schema."""
+    if section not in {"pre-data", "post-data"}:
+        raise ValueError("Недопустимая секция доверенной схемы")
+    import psycopg
+    for dsn in (schema_dsn, staging_dsn):
+        with psycopg.connect(raw_dsn(dsn)) as conn:
+            elevated = conn.execute('SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
+            if not elevated or elevated[0]:
+                raise RuntimeError("Restore требует PostgreSQL роль без SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS")
+    if shutil.which('pg_dump') is None:
+        raise RuntimeError("Команда pg_dump не установлена")
+    if pg_parts(schema_dsn)[0] == pg_parts(staging_dsn)[0]:
+        raise RuntimeError("Staging база должна отличаться от текущей базы")
+    if section == "pre-data":
+        with psycopg.connect(raw_dsn(staging_dsn)) as conn:
+            if conn.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='public'").fetchone()[0]:
+                raise RuntimeError("Staging база должна быть пустой")
+            conn.execute('DROP SCHEMA IF EXISTS public CASCADE')
+    command_dsn, env = dsn_password_and_cli(schema_dsn)
+    with tempfile.TemporaryDirectory(prefix='fargovpn_trusted_schema_') as directory:
+        schema = Path(directory) / 'schema.sql'
+        subprocess.run(['pg_dump', '--schema-only', '--section=' + section, '--no-owner', '--no-privileges',
+                        '--schema=public', '--dbname', command_dsn, '--file', str(schema)],
+                       env=env, check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        schema.chmod(0o600)
+        _restore_trusted_schema(schema, staging_dsn)
+
+
+def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tuple[str, ...] = ()) -> None:
+    """Restore archive DATA into current trusted schema; never execute archive SQL."""
+    import psycopg
+    from psycopg import sql
+    _clone_live_schema(schema_dsn, dsn)
+    with psycopg.connect(raw_dsn(dsn)) as conn:
+        conn.execute("SET LOCAL statement_timeout = '120s'")
+        with conn.cursor() as cursor:
+            for table in preserve_tables:
+                columns = _table_columns(conn, table)
+                if not columns:
+                    continue
+                with psycopg.connect(raw_dsn(schema_dsn)) as live, live.cursor() as reader:
+                    reader.execute(sql.SQL('SELECT {} FROM {}').format(sql.SQL(', ').join(map(sql.Identifier, columns)), sql.Identifier('public', table)))
+                    query = sql.SQL('COPY {} ({}) FROM STDIN').format(sql.Identifier('public', table), sql.SQL(', ').join(map(sql.Identifier, columns)))
+                    with cursor.copy(query) as writer:
+                        while batch := reader.fetchmany(1000):
+                            for row in batch:
+                                writer.write_row(row)
+                _reset_table_sequences(conn, table, columns)
+            for table, columns, rows in _copy_data_blocks(dump):
+                if table in preserve_tables:
+                    for _ in rows:
+                        pass
+                    continue
+                trusted_columns = _table_columns(conn, table)
+                if not trusted_columns or not set(columns).issubset(trusted_columns):
+                    raise RuntimeError(f"Таблица/колонки backup несовместимы с текущей схемой: {table}")
+                query = sql.SQL('COPY {} ({}) FROM STDIN').format(
+                    sql.Identifier('public', table), sql.SQL(', ').join(map(sql.Identifier, columns)))
+                with cursor.copy(query) as writer:
+                    for row in rows:
+                        writer.write(row)
+                _reset_table_sequences(conn, table, trusted_columns)
+    # pg_dump COPY order is not FK order: trusted indexes/FKs are attached only
+    # after all data arrives, and must validate successfully before any DB swap.
+    _clone_live_schema(schema_dsn, dsn, section="post-data")
 
 
 def app_counts(dsn: str) -> dict[str, int]:
@@ -574,15 +744,17 @@ def _quoted_columns(columns: list[str]) -> str:
 def _sequence_names(conn: Any, table: str, columns: list[str]) -> list[tuple[str, str]]:
     result = []
     for column in columns:
-        row = conn.execute("SELECT pg_get_serial_sequence(%s,%s)", (f"public.{table}", column)).fetchone()
+        row = conn.execute("SELECT pg_get_serial_sequence(%s,%s)", (f'public."{table.replace(chr(34), chr(34)*2)}"', column)).fetchone()
         if row and row[0]:
             result.append((str(row[0]), column))
     return result
 
 
 def _reset_table_sequences(conn: Any, table: str, columns: list[str]) -> None:
-    for sequence, column in _sequence_names(conn, table, columns):
-        seq_sql = sequence.replace("'", "''")
+    original_table = table
+    table = table.replace(chr(34), chr(34) * 2)
+    for sequence, column in _sequence_names(conn, original_table, columns):
+        seq_sql = sequence
         col = '"' + column.replace('"', '""') + '"'
         # setval(..., max(id), true) makes the next INSERT safe. Empty tables are reset to 1.
         conn.execute(
@@ -712,28 +884,43 @@ def _drop_snapshot_schema(target_dsn: str, snapshot_schema: str) -> None:
 def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging_dsn: str) -> None:
     kind, artifact = find_application_artifact(root, manifest)
     if kind == "PostgreSQL":
-        restore_dump(artifact, staging_dsn)
+        restore_dump(artifact, staging_dsn, schema_dsn=str(_cfg("DATABASE_URL", "")))
         return
-    work = Path(tempfile.mkdtemp(prefix="fargovpn_restore_sqlite_"))
+    # SQLite is also untrusted data: never recreate its DDL/defaults/triggers.
+    import psycopg
+    from psycopg import sql
+    _clone_live_schema(str(_cfg("DATABASE_URL", "")), staging_dsn)
+    source = sqlite3.connect(artifact.resolve().as_uri() + '?mode=ro', uri=True)
     try:
-        command = [
-            sys.executable, str(APP_DIR / "migration_tool.py"),
-            "--sqlite", str(artifact), "--dsn", staging_dsn,
-            "--manifest", str(work / "migration_manifest.json"),
-            "--report", str(work / "migration_report.json"),
-            "--failure-report", str(work / "migration_failure.json"),
-            "--reset-target",
-        ]
-        completed = subprocess.run(command, cwd=str(work), capture_output=True, text=True, timeout=1800)
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "неизвестная ошибка").strip()
-            raise RuntimeError(f"Legacy SQLite → PostgreSQL восстановление не прошло: {detail[-3000:]}")
+        source.execute('PRAGMA trusted_schema=OFF')
+        with psycopg.connect(raw_dsn(staging_dsn)) as conn:
+            for (table,) in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                target_columns = _table_columns(conn, table)
+                if not target_columns:
+                    raise RuntimeError(f"SQLite backup содержит неизвестную таблицу: {table}")
+                quoted = '"' + table.replace('"', '""') + '"'
+                columns = [row[1] for row in source.execute('PRAGMA table_info(' + quoted + ')')]
+                if not set(columns).issubset(target_columns):
+                    raise RuntimeError(f"SQLite backup содержит неизвестные колонки: {table}")
+                query = sql.SQL('INSERT INTO {} ({}) VALUES ({})').format(
+                    sql.Identifier('public', table), sql.SQL(', ').join(map(sql.Identifier, columns)),
+                    sql.SQL(', ').join(sql.Placeholder() for _ in columns))
+                with conn.cursor() as cursor:
+                    rows = source.execute('SELECT ' + _quoted_columns(columns) + ' FROM ' + quoted)
+                    while batch := rows.fetchmany(1000):
+                        cursor.executemany(query, batch)
+                _reset_table_sequences(conn, table, target_columns)
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        source.close()
+    _clone_live_schema(str(_cfg("DATABASE_URL", "")), staging_dsn, section="post-data")
 
 
 def parse_literal_config(path: Path) -> dict[str, Any]:
+    if path.stat().st_size > 1024 * 1024:
+        raise RuntimeError("Архивная конфигурация превышает 1 MiB")
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    if sum(1 for _ in ast.walk(tree)) > 20000:
+        raise RuntimeError("Архивная конфигурация содержит слишком много элементов")
     result: dict[str, Any] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -751,11 +938,19 @@ def merge_config(target: Path, source: Path) -> None:
     source_values = parse_literal_config(source)
     text = target.read_text(encoding="utf-8") if target.is_file() else "import aiohttp\n"
     for name, value in source_values.items():
-        if name in PROTECTED_CONFIG or name.upper().startswith("NGINX_"):
+        if name not in RESTORABLE_CONFIG:
             continue
+        if name == 'PAYMENT_PRICE':
+            if type(value) is not int or not 0 <= value <= 10_000_000:
+                raise RuntimeError("Недопустимая цена в backup")
+        elif name == 'REMINDER_DAYS':
+            if not isinstance(value, (list, tuple)) or len(value) > 100 or any(type(day) is not int or not 0 <= day <= 3650 for day in value):
+                raise RuntimeError("Недопустимое расписание напоминаний в backup")
+        elif not isinstance(value, str) or len(value) > 1000:
+            raise RuntimeError(f"Недопустимое текстовое значение backup: {name}")
         line = f"{name} = {value!r}"
         pattern = rf"(?m)^{re.escape(name)}\s*=.*$"
-        text = re.sub(pattern, line, text) if re.search(pattern, text) else text.rstrip() + "\n" + line + "\n"
+        text = re.sub(pattern, lambda _match: line, text) if re.search(pattern, text) else text.rstrip() + "\n" + line + "\n"
     compile(text, str(target), "exec")
     target.write_text(text.rstrip() + "\n", encoding="utf-8")
     os.chmod(target, 0o600)
@@ -1005,69 +1200,16 @@ def _restore_fargo_config_from_archive(root: Path) -> None:
     if not source.is_file():
         raise RuntimeError("Полный архив не содержит bot/config.py")
     merge_config(APP_DIR / "config.py", source)
-    env_source = root / "configs/application.env"
-    if not env_source.is_file():
-        env_source = root / "bot/.env"
-    env_target = APP_DIR / ".env"
-    if env_source.is_file():
-        env_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(env_source, env_target)
-        os.chmod(env_target, 0o600)
+    # Never restore process environment, private keys or executable service config.
 
 
 def _restore_system_configs(root: Path, *, xui_target: Path = Path("/etc/x-ui")) -> None:
-    # 4.6.13 stored this directory as etc-x-ui; 4.6.14 backups use the same
-    # canonical spelling. Keep the alternate legacy spelling accepted as well.
-    xui_source = next(
-        (candidate for candidate in (root / "system" / "etc-x-ui", root / "system" / "etc-xui") if candidate.is_dir()),
-        None,
-    )
-    if xui_source is None:
-        raise RuntimeError("Полный архив не содержит system/etc-x-ui")
-    # Config restoration must not remove the database already swapped above.
-    db_path = Path(str(_cfg("XUI_DB_PATH", "/etc/x-ui/x-ui.db"))).expanduser()
-    with tempfile.TemporaryDirectory(prefix="fargovpn_xui_config_") as directory:
-        preserved = Path(directory)
-        saved = []
-        if db_path.parent == xui_target and xui_target.is_dir():
-            for item in xui_target.iterdir():
-                if item.is_file() and (item.name == db_path.name or item.name in {db_path.name + suffix for suffix in ("-wal", "-shm", "-journal")} or item.name.startswith(db_path.name + ".pre_restore_")):
-                    shutil.copy2(item, preserved / item.name)
-                    saved.append(item.name)
-        try:
-            if xui_target.exists():
-                shutil.rmtree(xui_target)
-            xui_target.mkdir(parents=True, exist_ok=True)
-            _copy_tree_safe(xui_source, xui_target)
-        finally:
-            xui_target.mkdir(parents=True, exist_ok=True)
-            for name in saved:
-                shutil.copy2(preserved / name, xui_target / name)
+    """Keep installed Xray/3x-ui config, paths, environment and private keys.
 
-    xray_source = root / "system" / "etc-xray"
-    xray_target = Path("/etc/xray")
-    manifest_data = _load_json_file(root / "manifest.json", "manifest.json")
-    archived_xray_expected = bool((manifest_data.get("components") or {}).get("xray_config"))
-    if xray_source.is_dir():
-        if xray_target.exists():
-            shutil.rmtree(xray_target)
-        xray_target.mkdir(parents=True, exist_ok=True)
-        _copy_tree_safe(xray_source, xray_target)
-    elif archived_xray_expected:
-        raise RuntimeError("Полный архив заявляет Xray-конфигурацию, но system/etc-xray отсутствует")
-    env_source = root / "configs/x-ui-default.env"
-    if env_source.is_file():
-        target_env = Path(str(_cfg("XUI_DB_ENV_FILE", "/etc/default/x-ui"))).expanduser()
-        # DB connection values are local deployment settings and must not be
-        # replaced by a backup from another server; all other x-ui environment
-        # settings are restored.
-        merge_xui_env(target_env, env_source)
-    vapid = root / "runtime/vapid_private.pem"
-    if vapid.is_file():
-        target = Path(str(_cfg("PUSH_VAPID_PRIVATE_KEY_PATH", "/var/lib/vpn-service/vapid_private.pem"))).expanduser()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(vapid, target)
-        os.chmod(target, 0o600)
+    Archived files can contain active directives, arbitrary log paths or loader
+    settings. They are inventory only, not safe data for a root service.
+    """
+    logger.info("Data-only restore: installed service configuration is retained")
 
 
 def _normalize_unit_path(text: str) -> str:
@@ -1080,23 +1222,8 @@ def _normalize_unit_path(text: str) -> str:
 
 
 def _restore_systemd_units(root: Path) -> None:
-    systemd = root / "systemd"
-    if not systemd.is_dir():
-        raise RuntimeError("Полный архив не содержит systemd-конфигурацию")
-    destination = Path("/etc/systemd/system")
-    destination.mkdir(parents=True, exist_ok=True)
-    for item in systemd.iterdir():
-        # Old backups must not resurrect the retired configuration-writing guard.
-        if item.name == "vpn-service-nginx-guard.service":
-            continue
-        if not item.is_file():
-            continue
-        if item.name.startswith("vpn-service-") or item.name in {"x-ui.service", "3x-ui.service", "xray.service"}:
-            text = item.read_text(encoding="utf-8")
-            destination_path = destination / item.name
-            destination_path.write_text(_normalize_unit_path(text), encoding="utf-8")
-            os.chmod(destination_path, 0o644)
-    subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True, text=True, timeout=60)
+    """Archived units are executable content and must never be installed."""
+    logger.info("Data-only restore: installed systemd units are retained")
 
 
 def _db_swap_begin(target_dsn: str, staging_name: str) -> tuple[str, str]:
@@ -1148,7 +1275,37 @@ def _sqlite_xui_swap(root: Path, archive_db: Path, current_db: Path, suffix: str
     if current_db.exists():
         _sqlite_snapshot(current_db, rollback)
     temp = current_db.with_name(f"{current_db.name}.restore_tmp_{os.getpid()}")
-    _sqlite_snapshot(archive_db, temp)
+    if not rollback.is_file():
+        raise RuntimeError("Data-only restore требует установленную SQLite схему 3x-ui")
+    _sqlite_snapshot(rollback, temp)
+    try:
+        with closing(sqlite3.connect(archive_db.resolve().as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(temp)) as target, target:
+            source.execute('PRAGMA trusted_schema=OFF')
+            target.execute('PRAGMA trusted_schema=OFF')
+            trusted = {row[0] for row in target.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            for (table,) in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                if table in {'settings', 'setting'}:
+                    continue  # Active 3x-ui/Xray settings belong to this installation.
+                if table not in trusted:
+                    raise RuntimeError(f"Несовместимая таблица 3x-ui backup: {table}")
+                quoted = '"' + table.replace('"', '""') + '"'
+                columns = [r[1] for r in source.execute('PRAGMA table_info(' + quoted + ')')]
+                current_columns = [r[1] for r in target.execute('PRAGMA table_info(' + quoted + ')')]
+                if not set(columns).issubset(current_columns):
+                    raise RuntimeError(f"Несовместимые колонки 3x-ui backup: {table}")
+                target.execute('DELETE FROM ' + quoted)
+                query = 'INSERT INTO ' + quoted + ' (' + _quoted_columns(columns) + ') VALUES (' + ','.join('?' for _ in columns) + ')'
+                rows = source.execute('SELECT ' + _quoted_columns(columns) + ' FROM ' + quoted)
+                while batch := rows.fetchmany(1000):
+                    target.executemany(query, batch)
+            # SQLite integrity_check does not validate foreign keys. Validate the
+            # complete imported dataset before replacing the live database; leave
+            # enforcement deferred during loading because dump table order varies.
+            if target.execute('PRAGMA foreign_key_check').fetchone() is not None:
+                raise RuntimeError("SQLite backup нарушает внешние ключи текущей схемы 3x-ui")
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     _sqlite_remove_sidecars(current_db)
     os.replace(temp, current_db)
     integrity = _sqlite_integrity(current_db)
@@ -1172,7 +1329,7 @@ def _sqlite_xui_rollback(current_db: Path, rollback: Path) -> None:
 def _xui_pg_swap(root: Path, manifest: dict[str, Any], target_dsn: str, suffix: str) -> tuple[str, str]:
     staging_dsn, staging_name = make_staging_db(target_dsn, suffix)
     try:
-        restore_dump(Path(manifest["_xui_artifact"]), staging_dsn)
+        restore_dump(Path(manifest["_xui_artifact"]), staging_dsn, schema_dsn=target_dsn, preserve_tables=("settings", "setting"))
         # At least one public table is required for a real 3x-ui dump.
         command_dsn, env = dsn_password_and_cli(staging_dsn)
         probe = subprocess.run(
@@ -1314,7 +1471,7 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
             _xui_target, xui_rollback_name = _xui_pg_swap(root, manifest, xui_dsn, suffix)
         else:
             xui_rollback_file = _sqlite_xui_swap(root, Path(manifest["_xui_artifact"]), xui_current_db, suffix)
-        write_restore_state(job_id="", status="running", phase="configuration", progress=58, message="Конфигурации FargoVPN/3x-ui/Xray применяются", mode="full")
+        write_restore_state(job_id="", status="running", phase="configuration", progress=58, message="Данные подготовлены; применяются безопасные настройки сервиса", mode="full")
 
         _restore_fargo_config_from_archive(root)
         _restore_system_configs(root)

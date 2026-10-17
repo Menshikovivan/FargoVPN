@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import tempfile
 
 import pytest
@@ -41,7 +42,7 @@ def test_real_browser_publish_button_upload_progress_and_live_log():
     <script>window.confirm=()=>true;window.panelToast=(m)=>window.lastToast=m;window.__lastPoll=0;window.fetch=(u)=>Promise.resolve({ok:true,status:200,json:async()=>({state:'completed',progress:100,version:'5.1.20',github_tag:'v5.1.20',message:'GitHub Release подтверждён',output:'2026-10-08 [INFO] [pub-browser-1] GitHub Release подтверждён'})});class FakeXHR{constructor(){this.upload={};this.status=0;this.responseText='';}open(m,u){this.method=m;this.url=u;}setRequestHeader(){}send(){window.__xhr={method:this.method,url:this.url};if(this.upload.onprogress)this.upload.onprogress({lengthComputable:true,loaded:10,total:10});setTimeout(()=>{this.status=202;this.responseText=JSON.stringify({ok:true,job:{job_id:'pub-browser-1'},status:{state:'queued',progress:2,version:'5.1.20'}});this.onload&&this.onload();},30);}}window.XMLHttpRequest=FakeXHR;</script>
     <script>""" + _updates_script() + """</script></body>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -71,7 +72,7 @@ def test_real_browser_logs_switch_refresh_and_filter():
     <script>window.fetch=(url)=>Promise.resolve({ok:true,status:200,headers:new Headers({'content-type':'application/json'}),json:async()=>({service:'github-publish',lines:100,text:'github stage\\n[ERROR] mock error'}),text:async()=>JSON.stringify({service:'github-publish',lines:100,text:'github stage\n[ERROR] mock error'})});</script>
     <script>""" + _logs_script() + """</script></body>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -95,7 +96,7 @@ def test_real_browser_update_progress_and_live_log_survive_status_poll():
     <script>window.confirm=()=>true;window.__polls=0;window.fetch=(u)=>{window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({job_id:'upd-browser-1',state:'installing',progress:42,phase:'python',message:'Устанавливаются Python-зависимости',installed_version:'5.1.20',output:'2026-10-08 22:00:00 [INFO] pip: 42%'})});};</script>
     <script>""" + _updates_script() + """</script></body>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -127,7 +128,7 @@ def test_real_browser_messages_send_does_not_reload_and_echoes_event_511():
     <script>window.fetch=(url,opts)=>{if(opts&&opts.method==='POST')window.__send={url:String(url),method:opts.method,headers:opts.headers};return Promise.resolve({ok:true,status:200,json:async()=>({ok:true,event:{id:9001,tg_id:123,direction:'out',message_kind:'message',delivery_status:'delivered',display_username:'tester',created_at:'2026-10-08 22:10:00',text:'Привет'}})});};</script>
     <script>""" + _messages_script_511() + """</script></body>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors=[]; navigations=[]
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -166,7 +167,7 @@ def test_real_browser_github_authorization_button_is_ajax_and_visible_511():
     # DOM they expect so the authorization handler can run independently.
     html=html.replace("__VERSION__", "5.1.20")
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+        browser=pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=['--no-sandbox'])
         page=browser.new_page(); errors=[]
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.set_content(html, wait_until='domcontentloaded')
@@ -187,7 +188,7 @@ def test_real_browser_messages_receives_incoming_without_navigation_512():
     <script>window.__polls=0;window.fetch=(url,opts)=>{if(String(url).includes('/api/panel/messages/feed')){window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({next_after_id:9100,unread:{total:1,items:[{tg_id:123,count:1}]},dialogs:[{tg_id:123,username:'tester',incoming_events:2,outgoing_events:1,last_event_id:9100}],selected_events:window.__polls===1?[{id:9100,tg_id:123,direction:'in',message_kind:'message',delivery_status:'received',display_username:'tester',created_at:'2026-10-09 00:30:00',text:'Входящее без перезагрузки'}]:[]})});}return Promise.reject(new Error('unexpected fetch '+url));};</script>
     <script>""" + _messages_script_511() + """</script></body>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page(); errors=[]; navigations=[]
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('framenavigated', lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)

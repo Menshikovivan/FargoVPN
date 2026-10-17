@@ -44,8 +44,9 @@
       const on=b.dataset.tab===name;
       b.classList.toggle('active',on);
       b.setAttribute('aria-selected',on?'true':'false');
+      b.tabIndex=on?0:-1;
     });
-    sections.forEach(s=>s.classList.toggle('active',s.dataset.tabSection===name));
+    sections.forEach(s=>{const on=s.dataset.tabSection===name;s.classList.toggle('active',on);s.hidden=!on;});
     if(clicked){
       const url=new URL(location.href);url.searchParams.set('tab',name);url.hash='';
       try{history.replaceState(null,'',url);}catch(_){}
@@ -53,6 +54,17 @@
     }
   };
   buttons.forEach(b=>b.addEventListener('click',(e)=>{e.preventDefault();activate(b.dataset.tab,true);}));
+  root.addEventListener('keydown', event=>{
+    const index=buttons.indexOf(document.activeElement);
+    if(index<0) return;
+    let next=index;
+    if(event.key==='ArrowRight') next=(index+1)%buttons.length;
+    else if(event.key==='ArrowLeft') next=(index-1+buttons.length)%buttons.length;
+    else if(event.key==='Home') next=0;
+    else if(event.key==='End') next=buttons.length-1;
+    else return;
+    event.preventDefault();activate(buttons[next].dataset.tab,true);buttons[next].focus();
+  });
   let name=new URLSearchParams(location.search).get('tab')||'';
   if(!name){try{name=decodeURIComponent(location.hash.slice(1));}catch(_){}}
   activate(buttons.some(b=>b.dataset.tab===name)?name:(buttons[0]?.dataset.tab||''));

@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 client=TestClient(w.app)
 assert client.post('/qa-panel/api/diagnostics/collect').status_code==401
-cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'user':'qa','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
+cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'auth_version':w.auth_credentials_version(),'user':'qa','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
 assert client.post('/qa-panel/api/diagnostics/collect').status_code==403
 r=client.post('/qa-panel/api/diagnostics/collect',headers={'X-CSRF-Token':'csrf'});assert r.status_code==200,r.text;job=r.json()['job']
 for _ in range(60):

@@ -58,6 +58,11 @@ def main():
         return
     import uvicorn
     socket_path = options['socket_path']
+    # Both listeners below are Unix sockets, restricted by the systemd socket's
+    # owner/group permissions. Uvicorn represents an unnamed Unix peer as None,
+    # so a loopback IP allowlist silently ignores Nginx's forwarded metadata.
+    # Trust metadata from socket-authorized peers; this launcher never binds TCP.
+    forwarded_peers = '*'
     # In production systemd owns the listening Unix socket. This removes the
     # short "socket absent" window during web-service restarts: the external reverse
     # proxy can keep connecting to the socket while systemd activates/restarts this service.
@@ -65,7 +70,7 @@ def main():
     listen_fds = int(os.environ.get('LISTEN_FDS', '0') or 0)
     if listen_pid == os.getpid() and listen_fds >= 1:
         config = uvicorn.Config('webapp:app', fd=3, workers=1,
-                    proxy_headers=True, forwarded_allow_ips='127.0.0.1,::1',
+                    proxy_headers=True, forwarded_allow_ips=forwarded_peers,
                     timeout_keep_alive=30, timeout_graceful_shutdown=10)
     else:
         Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +81,7 @@ def main():
         except IsADirectoryError:
             raise RuntimeError(f'WEB_SOCKET_PATH points to a directory: {socket_path}')
         config = uvicorn.Config('webapp:app', uds=socket_path, workers=1,
-                    proxy_headers=True, forwarded_allow_ips='127.0.0.1,::1',
+                    proxy_headers=True, forwarded_allow_ips=forwarded_peers,
                     timeout_keep_alive=30, timeout_graceful_shutdown=10)
     server = uvicorn.Server(config)
     server.run()

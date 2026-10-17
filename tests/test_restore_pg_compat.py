@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory() as directory:
         raise subprocess.CalledProcessError(3, command, stderr='deliberate SQL error')
     with patch.object(m.shutil, 'which', return_value='/usr/bin/psql'), patch.object(m, 'dsn_password_and_cli', return_value=('postgresql://localhost/test', {})), patch.object(m.subprocess, 'run', side_effect=run):
         try:
-            m.restore_dump(dump, 'mock')
+            m._restore_trusted_schema(dump, 'mock')
         except RuntimeError as exc:
             assert 'deliberate SQL error' in str(exc)
         else:

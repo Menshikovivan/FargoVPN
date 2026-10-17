@@ -18,6 +18,7 @@ if [[ -z "$VERSION" || ! "$VERSION" =~ ^[0-9]+\.[0-9]+([.][0-9]+)?([.-][0-9A-Za-
 fi
 TMP=""
 PREUPDATE_BACKUP=""
+PREUPDATE_DATABASE=""
 PREUPDATE_BACKUP_PART=""
 PREUPDATE_SYSTEMD_DIR=""
 NONINTERACTIVE=0
@@ -199,6 +200,7 @@ preflight() {
     exit 1
   fi
   bash -n "$SRC/scripts/setup_postgresql.sh"
+  [[ -f "$SRC/postgresql_rollback.py" ]] || { echo 'Неполный пакет: отсутствует postgresql_rollback.py' >&2; exit 1; }
 
   python3 - <<'PY'
 import sys
@@ -536,6 +538,7 @@ PY
 cleanup() {
   [[ -z ${PREUPDATE_BACKUP_PART:-} ]] || rm -f -- "$PREUPDATE_BACKUP_PART"
   [[ -z $TMP ]] || rm -rf "$TMP"
+  [[ -z ${RESTORE_PREP:-} ]] || rm -rf "$RESTORE_PREP"
 }
 
 restart_unit_family() {
@@ -569,6 +572,35 @@ restart_existing_services() {
   restart_unit_family vpn-service-reminders.timer fargovpn-reminders.timer
 }
 
+# Stop activation sources before processes, then fail closed if a writer survives.
+# Do not stop update@ units: the current installer may itself run inside one.
+quiesce_application() {
+  local unit state instances
+  local -a units=(
+    vpn-service-web.socket fargovpn-web.socket
+    vpn-service-backup.timer fargovpn-backup.timer
+    vpn-service-reminders.timer fargovpn-reminders.timer
+    vpn-service-web.service fargovpn-web.service
+    vpn-service-bot.service fargovpn-bot.service
+    vpn-service-backup.service fargovpn-backup.service
+    vpn-service-reminders.service fargovpn-reminders.service
+  )
+  instances=$(systemctl list-units --all --plain --no-legend 'vpn-service-broadcast@*.service' 'fargovpn-broadcast@*.service') || return 1
+  while read -r unit _; do
+    [[ -z "$unit" ]] || units+=("$unit")
+  done <<< "$instances"
+  for unit in "${units[@]}"; do
+    if systemctl cat "$unit" >/dev/null 2>&1; then
+      run_with_timeout 60 systemctl stop "$unit" || return 1
+      state=$(systemctl show "$unit" -p ActiveState --value) || return 1
+      case "$state" in
+        inactive|failed) ;;
+        *) echo "Не удалось остановить writer $unit (state=$state)" >&2; return 1 ;;
+      esac
+    fi
+  done
+}
+
 on_error() {
   local code=${3:-1}
   local line=${1:-неизвестно}
@@ -580,9 +612,12 @@ on_error() {
   if [[ -n ${PREUPDATE_BACKUP:-} && -f $PREUPDATE_BACKUP \
         && -n ${TARGET:-} && $TARGET == /* && $TARGET != / && ${#TARGET} -gt 5 ]]; then
     write_update_status "rolling-back" "Ошибка установки; восстанавливается предыдущая версия" "${VPN_UPDATE_PROGRESS:-50}" "rollback"
-    for unit in vpn-service-bot.service vpn-service-web.service vpn-service-web.socket vpn-service-backup.timer vpn-service-reminders.timer; do
-      systemctl stop "$unit" >/dev/null 2>&1 || true
-    done
+    if ! quiesce_application; then
+      rollback_note=" Откат отменен: не удалось остановить все процессы записи. Снимок: $PREUPDATE_BACKUP"
+      write_update_status "failed" "$rollback_note" "${VPN_UPDATE_PROGRESS:-50}" "failed"
+      echo "$rollback_note" >&2
+      exit "$code"
+    fi
     rm -rf -- "$TARGET"
     mkdir -p "$(dirname "$TARGET")"
     if tar -xzf "$PREUPDATE_BACKUP" -C "$(dirname "$TARGET")"; then
@@ -599,6 +634,13 @@ on_error() {
           /etc/systemd/system/vpn-service-broadcast@.service
         cp -a "$PREUPDATE_SYSTEMD_DIR"/. /etc/systemd/system/ 2>/dev/null || true
       fi
+      local database_restored=1
+      if [[ -n ${PREUPDATE_DATABASE:-} ]]; then
+        python3 "$PREUPDATE_ROLLBACK_HELPER" restore "$PREUPDATE_DATABASE" || database_restored=0
+      fi
+      if [[ $database_restored -eq 0 ]]; then
+        rollback_note=" Файлы восстановлены, но откат PostgreSQL не удался; службы оставлены остановленными. Снимок: $PREUPDATE_DATABASE"
+      else
       restart_existing_services
       if [[ -f /etc/systemd/system/vpn-service-web.service && ! -f /etc/systemd/system/vpn-service-web.socket ]]; then
         rollback_note=" Предыдущая версия восстановлена, но критический vpn-service-web.socket отсутствует."
@@ -606,6 +648,7 @@ on_error() {
         rollback_note=" Предыдущая версия и systemd-службы автоматически восстановлены из $PREUPDATE_BACKUP; web socket проверен."
       else
         rollback_note=" Предыдущая версия и systemd-службы автоматически восстановлены из $PREUPDATE_BACKUP."
+      fi
       fi
     else
       rollback_note=" Автоматический откат из $PREUPDATE_BACKUP не удался; требуется ручное восстановление."
@@ -839,14 +882,13 @@ EOF_MENU
     ask RESTORE_DIR 'Путь к папке с резервной копией (обе части .part001/.part002)'
     [[ -d $RESTORE_DIR ]] || { echo 'Каталог резервной копии не найден.' >&2; exit 1; }
     RESTORE_PREP=$(mktemp -d /tmp/fargovpn_restore_prepare.XXXXXX)
-    trap 'rm -rf "${RESTORE_PREP:-}"' EXIT
-    python3 "$SRC/restore_manager.py" --prepare-dir "$RESTORE_DIR" --work-dir "$RESTORE_PREP" --json >/tmp/fargovpn_restore_prepare.json
+    python3 "$SRC/restore_manager.py" --prepare-dir "$RESTORE_DIR" --work-dir "$RESTORE_PREP" --json >"$RESTORE_PREP/prepare.json"
     RESTORE="$RESTORE_PREP/backup.tar.gz"
     RESTORE_ROOT="$RESTORE_PREP/extracted/vpn_service_backup"
     echo
     echo 'Что восстановить:'
     echo '1) Только пользователи и их подписки (users/payments/referral_rewards)'
-    echo '2) Полностью: базы FargoVPN/3x-ui + настройки + Xray + systemd'
+    echo '2) Все данные FargoVPN/3x-ui и разрешенные параметры FargoVPN'
     read -rp 'Выберите вариант [1-2]: ' RESTORE_CHOICE
     case "$RESTORE_CHOICE" in
       1) RESTORE_MODE=users-only ;;
@@ -874,7 +916,9 @@ PY_RESTORE_INFO
     if [[ "$RESTORE_MODE" == "users-only" ]]; then
       echo 'Будут заменены только users, payments и referral_rewards. Аудит, безопасность, Push и служебные таблицы FargoVPN сохранятся.'
     else
-      echo 'Будут заменены PostgreSQL FargoVPN, 3x-ui DB, настройки FargoVPN, /etc/x-ui, /etc/xray, VAPID и FargoVPN/3x-ui systemd units. Внешний Nginx/L4 не изменяется.'
+      echo 'Будут заменены данные FargoVPN и 3x-ui; применятся название сервиса, реквизиты оплаты, дни напоминаний и часовые пояса из архива.'
+      echo 'Текущие подключения, доступы и настройки 3x-ui сохраняются. Для нового сервера их нужно настроить отдельно.'
+      echo 'Код, systemd, Xray, VAPID и окружение из архива не применяются.'
     fi
     read -rp 'Подтвердить выбранное восстановление? Введите YES: ' RESTORE_CONFIRM
     [[ "$RESTORE_CONFIRM" == "YES" ]] || { echo 'Восстановление отменено пользователем.'; exit 0; }
@@ -944,22 +988,7 @@ chmod 700 /var/lib/vpn-service/updates /var/lib/vpn-service/broadcasts /var/cach
 VPN_UPDATE_PROGRESS=60
 summary_running stop-services "Останавливаются службы перед безопасной заменой файлов"
 write_update_status "installing" "Останавливаются службы перед безопасной заменой файлов" "$VPN_UPDATE_PROGRESS" "stop-services"
-for unit in \
-  fargovpn-bot fargovpn-web fargovpn-backup fargovpn-reminders \
-  vpn-service-bot vpn-service-web vpn-service-backup.service vpn-service-backup.timer \
-  vpn-service-reminders.service vpn-service-reminders.timer; do
-  # SSE/WebSocket-подобные долгоживущие HTTP-соединения могут удерживать
-  # Uvicorn при graceful shutdown. Во время обновления это недопустимо:
-  # веб-служба не должна блокировать замену файлов десятки секунд.
-  if [[ "$unit" == "vpn-service-web" || "$unit" == "vpn-service-web.service" || "$unit" == "fargovpn-web" || "$unit" == "fargovpn-web.service" ]]; then
-    run_with_timeout 6 systemctl stop "$unit" 2>/dev/null || {
-      systemctl kill "$unit" --kill-who=all --signal=SIGKILL 2>/dev/null || true
-      sleep 1
-    }
-  else
-    systemctl stop "$unit" 2>/dev/null || true
-  fi
-done
+quiesce_application
 VPN_UPDATE_PROGRESS=62
 write_update_status "installing" "Службы остановлены; подготавливается резервная копия" "$VPN_UPDATE_PROGRESS" "stop-services"
 summary_ok stop-services "Службы освобождены для замены файлов"
@@ -981,11 +1010,18 @@ summary_running backup "Создаётся резервная копия тек�
 write_update_status "installing" "Создаётся резервная копия текущей установки" "$VPN_UPDATE_PROGRESS" "backup"
 if [[ -n $OLD ]]; then
   stamp=$(date +%Y%m%d_%H%M%S)
+  # Keep the current helper outside TARGET: self-updates may replace SRC too.
+  PREUPDATE_ROLLBACK_HELPER="$TMP/postgresql_rollback.py"
+  install -m 0600 "$SRC/postgresql_rollback.py" "$PREUPDATE_ROLLBACK_HELPER"
+  database_snapshot="$BACKUP/pre_update_${stamp}.postgresql"
+  python3 "$PREUPDATE_ROLLBACK_HELPER" snapshot "$database_snapshot" --app "$OLD"
+  PREUPDATE_DATABASE="$database_snapshot"
   completed_backup="$BACKUP/pre_update_${stamp}.tar.gz"
   PREUPDATE_BACKUP_PART="${completed_backup}.part"
   rm -f -- "$PREUPDATE_BACKUP_PART"
+  (umask 077; : > "$PREUPDATE_BACKUP_PART")
+  # Rollback replaces TARGET completely; retain its working Python environment.
   tar -czf "$PREUPDATE_BACKUP_PART" \
-    --exclude="$(basename "$OLD")/.venv" \
     --exclude="$(basename "$OLD")/__pycache__" \
     --exclude="$(basename "$OLD")/*/__pycache__" \
     --exclude="$(basename "$OLD")/*.pyc" \
@@ -1004,6 +1040,7 @@ if [[ -n $OLD ]]; then
     systemd_files+=("$(basename "$unit_file")")
   done < <(find "$PREUPDATE_SYSTEMD_DIR" -maxdepth 1 -type f -print0)
   if ((${#systemd_files[@]})); then
+    (umask 077; : > "$systemd_part")
     tar -czf "$systemd_part" -C "$PREUPDATE_SYSTEMD_DIR" "${systemd_files[@]}"
     tar -tzf "$systemd_part" >/dev/null
     chmod 600 "$systemd_part"
@@ -1129,8 +1166,8 @@ if [[ -f "$TARGET/config.py" ]] && ! config_is_valid "$TARGET/config.py"; then
 fi
 if [[ ! -f "$TARGET/config.py" || $CONFIG_FORCE_REBUILD -eq 1 ]]; then
   if [[ "$MODE" == "3" && "$RESTORE_MODE" == "full" ]]; then
-    # Recovery on a clean server must not ask for production credentials that
-    # are already inside the archive. Seed only a neutral bootstrap config;
+    # Recovery never imports executable configuration or credentials from an
+    # archive. Seed a neutral config; ask for fresh panel credentials below.
     # setup_postgresql.sh creates a fresh local application database, then the
     # transactional restore replaces it with the archived database.
     [[ -f "$SRC/config.example.py" ]] || { echo 'В архиве восстановления отсутствует config.example.py.' >&2; exit 1; }
@@ -1163,7 +1200,7 @@ compile(text, str(path), "exec")
 path.write_text(text, encoding="utf-8")
 PY_RECOVERY_BOOTSTRAP
     mkdir -p "$TARGET/data"
-    echo '✓ Для чистого сервера создан нейтральный bootstrap config; учётные данные будут восстановлены из архива после подготовки локального PostgreSQL.'
+    echo '✓ Для чистого сервера создан нейтральный bootstrap config; задайте новые учётные данные панели, затем будут восстановлены только разрешённые данные.'
   else
     [[ $NONINTERACTIVE -eq 0 ]] || { echo 'При неинтерактивном обновлении не найден корректный config.py и безопасное восстановление невозможно.' >&2; exit 1; }
     echo
@@ -2330,7 +2367,7 @@ if [[ "$MODE" == "3" ]]; then
   write_update_status "restoring" "Восстанавливается проверенный архив: $RESTORE_MODE" "$VPN_UPDATE_PROGRESS" "restore"
   echo
   echo 'Перед восстановлением автоматически создаётся страховочный полный бэкап текущего состояния.'
-  echo 'При сбое restore_manager выполняет откат баз, конфигурации и systemd.'
+  echo 'При сбое restore_manager возвращает исходные данные и текущую конфигурацию.'
   RESTORE_SAFETY_JSON=$(target_python "$TARGET/restore_manager.py" --safety-backup --json) || abort_install 'не удалось создать/проверить страховочный бэкап перед восстановлением'
   RESTORE_SAFETY_ARCHIVE=$(printf '%s\n' "$RESTORE_SAFETY_JSON" | target_python -c 'import json,sys; print(json.load(sys.stdin)["archive"])')
   [[ -f "$RESTORE_SAFETY_ARCHIVE" ]] || abort_install 'страховочный архив перед восстановлением не найден'
@@ -2343,8 +2380,8 @@ if [[ "$MODE" == "3" ]]; then
     target_python "$TARGET/restore_manager.py" --full "$RESTORE" --safety-archive "$RESTORE_SAFETY_ARCHIVE" --no-safety
   fi
   if [[ "$RESTORE_MODE" == "full" && "$PROFILE" == "full" ]]; then
-    # Full restore restores WEB_PUBLIC_PREFIX/WEB_DOMAIN from the archive.
-    # Re-sync only FargoVPN's dedicated location in the already installed
+    # Data-only restore retains the current web routing configuration.
+    # Re-check FargoVPN's dedicated location in the already installed
     # external Nginx; the external L4/L7 configuration is never replaced.
     setup_existing_nginx_route
     if [[ -f /etc/systemd/system/vpn-service-nginx-guard.service ]]; then
@@ -2352,7 +2389,7 @@ if [[ "$MODE" == "3" ]]; then
     fi
   fi
   echo '✓ Восстановление завершено; выполняется повторная проверка живых служб.'
-  systemctl reset-failed >/dev/null 2>&1 || true
+  systemctl reset-failed vpn-service-bot.service vpn-service-web.service vpn-service-web.socket vpn-service-backup.service vpn-service-reminders.service >/dev/null 2>&1 || true
   BOT_READY=$(target_python -c 'import config; print("1" if str(getattr(config, "BOT_TOKEN", "")).strip() else "0")')
   if [[ "$BOT_READY" == "1" ]]; then
     if ! systemctl is-active --quiet vpn-service-bot.service; then summary_unit vpn-service-bot.service 'Telegram-бот' >&2; abort_install 'бот после восстановления не active'; fi
@@ -2374,7 +2411,7 @@ if [[ "$MODE" == "3" ]]; then
 fi
 
 log_step "Финальная уборка systemd и диагностика"
-run_with_timeout 20 systemctl reset-failed >/dev/null 2>&1 || true
+run_with_timeout 20 systemctl reset-failed vpn-service-bot.service vpn-service-web.service vpn-service-web.socket vpn-service-backup.service vpn-service-reminders.service >/dev/null 2>&1 || true
 PROFILE=full
 PROFILE_STATUS="Полная установка"
 PANEL_PUBLIC_URL=$(run_with_timeout 25 target_python "$TARGET/nginx_panel_guard.py" --print-url 2>/dev/null || true)

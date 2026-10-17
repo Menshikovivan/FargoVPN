@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory() as directory:
         m._restore_system_configs(config_root,xui_target=current.parent)
     assert rows(current) == [('restored WAL data',)]
     assert rollback.is_file()
-    assert (current.parent/'settings').read_text() == 'restored'
+    assert not (current.parent/'settings').exists()  # Active archive configs are never applied
     m._sqlite_xui_rollback(current,rollback)
     assert rows(current) == [('original WAL data',)]
     archived.close()

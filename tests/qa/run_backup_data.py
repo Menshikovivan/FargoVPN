@@ -48,11 +48,11 @@ from starlette.requests import Request
 out=private/'rendered';out.mkdir(exist_ok=True);os.chmod(out,0o700)
 results={}
 for name,fn in [('users',w.users_page),('messages',w.messages_page),('payments',w.payments),('audit',w.audit_page),('reminders',w.reminders_page),('settings',w.settings)]:
- req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications','headers':[],'session':{'auth':True,'user':'menshikovivan','csrf_token':'offline-csrf'},'scheme':'https','server':('offline.invalid',443)})
+ req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications','headers':[],'session':{'auth':True,'auth_version':w.auth_credentials_version(),'user':'menshikovivan','csrf_token':'offline-csrf'},'scheme':'https','server':('offline.invalid',443)})
  if name=='settings':w.inbound_selection_status_sync=lambda **kw:{'ok':False,'items':[],'selected':[],'missing':[],'error':'Offline backup: live API disabled'}
  w.service_state=lambda *a:'unknown'
  html=fn(req);(out/(name+'.html')).write_text(html);os.chmod(out/(name+'.html'),0o600);results[name]='render passed'
-req=Request({'type':'http','method':'GET','path':'/api/panel/push/logs','headers':[],'session':{'auth':True,'user':'menshikovivan'},'scheme':'https','server':('offline.invalid',443)})
+req=Request({'type':'http','method':'GET','path':'/api/panel/push/logs','headers':[],'session':{'auth':True,'auth_version':w.auth_credentials_version(),'user':'menshikovivan'},'scheme':'https','server':('offline.invalid',443)})
 logs=w.panel_push_logs(req);assert logs['ok'] and isinstance(logs['logs'],list)
 results['push_logs']='passed; rows='+str(len(logs['logs']))
 assert w.user_events.count_events()>0

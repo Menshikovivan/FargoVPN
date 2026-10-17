@@ -51,7 +51,7 @@ config.BACKUP_DIR=str(Path(sys.argv[2]).parent/'backup')
 from starlette.requests import Request
 out=Path(sys.argv[2]);out.mkdir(parents=True,exist_ok=True)
 for name,fn,kw in [('login',w.login_page,{}),('dashboard',w.dashboard,{}),('settings',w.settings,{}),('users',w.users_page,{'q':'User 1','status':'active'}),('user-detail',w.user_detail_page,{'tg_id':1}),('new-user',w.new_user_page,{}),('monitoring',w.monitoring,{}),('updates',w.updates_page,{}),('messages',w.messages_page,{}),('broadcast',w.broadcast_page,{}),('payments',w.payments,{}),('backups',w.backups,{}),('logs',w.logs,{}),('audit',w.audit_page,{}),('reminders',w.reminders_page,{}),('diagnostics',w.diagnostics,{}),('subscription-tools',w.subscription_tools_page,{})]:
- req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications' if name=='settings' else b'','headers':[],'session':{'auth':True,'user':'admin','csrf_token':'csrf'},'scheme':'https','server':('panel.example.test',443)})
+ req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications' if name=='settings' else b'','headers':[],'session':{'auth':True,'auth_version':w.auth_credentials_version(),'user':'admin','csrf_token':'csrf'},'scheme':'https','server':('panel.example.test',443)})
  try:text=fn(req,**kw)
  except Exception as e:raise RuntimeError(f'{name}: {e}') from e
  (out/(name+'.html')).write_text(text)

@@ -26,8 +26,8 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.20"] * 2
-    assert "## 5.1.20" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.21"] * 2
+    assert "## 5.1.21" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
@@ -263,8 +263,8 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.20"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.20"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.21"
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.21"
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
     assert "5.1.20 всегда используется полный профиль" in installer
 
@@ -299,3 +299,15 @@ def test_github_auth_check_has_ajax_json_contract_511():
     assert 'return JSONResponse(payload, status_code=200)' in block
     assert 'return JSONResponse({"ok": False' in block
     assert 'github_validate_configuration()' in block
+
+
+def test_release_unix_line_endings():
+    for relative in ('VERSION', 'static/VERSION', 'install.sh', 'scripts/setup_postgresql.sh'):
+        assert b'\r' not in (ROOT / relative).read_bytes(), relative
+
+
+def test_client_build_version_matches_runtime():
+    import re
+    script = (ROOT / 'static/panel.js').read_text(encoding='utf-8')
+    match = re.search(r"const PANEL_BUILD_VERSION = '([^']+)';", script)
+    assert match and match.group(1) == (ROOT / 'VERSION').read_text().strip()

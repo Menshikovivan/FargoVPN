@@ -40,7 +40,7 @@ push._validate_push_endpoint=lambda endpoint:None
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 client=TestClient(w.app)
-cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'user':'qa','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
+cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'auth_version':w.auth_credentials_version(),'user':'qa','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
 headers={'X-CSRF-Token':'csrf'}
 if hasattr(w,'diagnostic_read_only_api'):
  def readonly():

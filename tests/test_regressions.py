@@ -153,7 +153,7 @@ def post(url,**kw):
 web.httpx.post=post
 client=TestClient(web.app)
 assert client.get('/test-panel/api/users/1/events/7/media').status_code==401
-cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'user':'admin','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
+cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'auth_version':web.auth_credentials_version(),'user':'admin','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
 r=client.post('/test-panel/users/1/message',data={'message':'caption'},files={'media':('photo.tiff',file.getvalue(),'image/tiff')},headers={'Accept':'application/json','X-CSRF-Token':'csrf'})
 assert r.status_code==200,r.text
 assert r.json()['event']['metadata']['media']['url']=='/test-panel/api/users/1/events/7/media'

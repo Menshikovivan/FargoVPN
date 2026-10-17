@@ -70,7 +70,7 @@ for session_user, configured_user, expected in (
 ):
     config.WEB_USERNAME = configured_user
     cookie = TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({
-        "auth": True, "user": session_user, "csrf_token": "test-csrf"
+        "auth": True, "auth_version": web.auth_credentials_version(), "user": session_user, "csrf_token": "test-csrf"
     }).encode())).decode()
     client.cookies.set("session", cookie)
     assert manager.publisher_enabled() == (configured_user == "test-publisher")
@@ -102,7 +102,7 @@ def capture_settings(values):
     raise PersistenceReached()
 web.save_config_values = capture_settings
 for actor, target, denied in (("admin", "admin", False), ("admin", "test-publisher", True), ("test-publisher", "test-publisher", False)):
-    request = Request({"type": "http", "method": "POST", "path": "/settings", "headers": [], "session": {"auth": True, "user": actor}})
+    request = Request({"type": "http", "method": "POST", "path": "/settings", "headers": [], "session": {"auth": True, "auth_version": web.auth_credentials_version(), "user": actor}})
     form = {"service_name": "TestVPN", "web_username": target, "reminder_days": "7,3,1,0"}
     try:
         web._save_settings(request, form)

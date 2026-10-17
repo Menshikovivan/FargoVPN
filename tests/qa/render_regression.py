@@ -44,7 +44,7 @@ from starlette.requests import Request
 out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
 w.httpx.get=lambda *a,**kw:NS(json=lambda:{'ok':False,'description':'isolated QA; Telegram unavailable'})
 for name,fn,kw in [('dashboard',w.dashboard,{}),('settings',w.settings,{}),('users',w.users_page,{'q':'User 1','status':'active'}),('monitoring',w.monitoring,{}),('updates',w.updates_page,{}),('messages',w.messages_page,{}),('broadcast',w.broadcast_page,{}),('payments',w.payments,{}),('backups',w.backups,{}),('logs',w.logs,{}),('audit',w.audit_page,{}),('reminders',w.reminders_page,{}),('diagnostics',w.diagnostics,{}),('subscription-tools',getattr(w,'subscription_tools_page',w.users_page),{})]:
- req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications' if name=='settings' else b'','headers':[],'session':{'auth':True,'user':'admin','csrf_token':'csrf'},'scheme':'https','server':('panel.example.test',443)})
+ req=Request({'type':'http','method':'GET','path':'/'+name,'query_string':b'tab=notifications' if name=='settings' else b'','headers':[],'session':{'auth':True,'auth_version':w.auth_credentials_version(),'user':'admin','csrf_token':'csrf'},'scheme':'https','server':('panel.example.test',443)})
  try:text=w.rewrite_public_markup(fn(req,**kw))
  except Exception as e:raise RuntimeError(f'{name}: {e}') from e
  (out/(name+'.html')).write_text(text,encoding='utf8')
