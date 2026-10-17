@@ -43,6 +43,7 @@ import rate_limit
 import user_events
 import message_journal
 import push_service
+import broadcast_manager
 from init_db import migrate as migrate_database
 from backup import request_backup_now
 from services.xui_api import (
@@ -1148,12 +1149,32 @@ def payment_text() -> str:
     )
 
 
-async def start_purchase(message: Message, state: FSMContext) -> None:
-    profile_id = await asyncio.to_thread(billing.payment_profile_id, int(message.from_user.id), config.DB_PATH)
+async def start_purchase(
+    message: Message,
+    state: FSMContext,
+    payer_tg_id: int | None = None,
+) -> None:
+    # CallbackQuery.message.from_user is the bot itself. For purchases opened
+    # from an inline button, pass CallbackQuery.from_user.id explicitly.
+    payer_id = int(payer_tg_id if payer_tg_id is not None else message.from_user.id)
+    profile_id = await asyncio.to_thread(billing.payment_profile_id, payer_id, config.DB_PATH)
     amount = await asyncio.to_thread(billing.expected_payment_amount, profile_id, config.DB_PATH)
     await state.update_data(purchase_token=secrets.token_hex(24), expected_amount=amount, billing_tg_id=profile_id)
     await state.set_state(FSMStates.wait_for_receipt)
     await message.answer(payment_text_for_user(amount), parse_mode="HTML")
+
+
+def purchase_quote_changed(
+    previous_profile_id: int,
+    previous_amount: int,
+    current_profile_id: int,
+    current_amount: int,
+) -> bool:
+    """Return whether payer ownership or the quoted subscription price changed."""
+    return (
+        int(previous_profile_id) != int(current_profile_id)
+        or int(previous_amount) != int(current_amount)
+    )
 
 
 def payment_text_for_user(amount: int) -> str:
@@ -1503,7 +1524,7 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
         await state.clear()
         await send_user_stats(call.message, user_id, call.from_user.username)
     elif action == "buy":
-        await start_purchase(call.message, state)
+        await start_purchase(call.message, state, payer_tg_id=user_id)
     elif action == "support":
         await start_support(call.message, state)
     elif action == "faq":
@@ -1765,6 +1786,37 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     purchase_token = str((await state.get_data()).get("purchase_token") or "")
     if not purchase_token:
         await msg.answer("ℹ️ Если чек уже отправлен, заявка принята. Для новой оплаты откройте «Купить подписку» в меню.")
+        return
+
+    # A family member may have joined or left after the payment instructions
+    # were shown. Requote against the payer's current owner and price before
+    # the receipt is recorded, so no check is reviewed against stale billing.
+    purchase_data = await state.get_data()
+    payer_id = int(msg.from_user.id)
+    current_profile_id = await asyncio.to_thread(
+        billing.payment_profile_id, payer_id, config.DB_PATH
+    )
+    current_amount = await asyncio.to_thread(
+        billing.expected_payment_amount, current_profile_id, config.DB_PATH
+    )
+    previous_profile_id = int(purchase_data.get("billing_tg_id") or 0)
+    previous_amount = int(purchase_data.get("expected_amount") or 0)
+    if purchase_quote_changed(
+        previous_profile_id, previous_amount, current_profile_id, current_amount
+    ):
+        purchase_token = secrets.token_hex(24)
+        await state.update_data(
+            purchase_token=purchase_token,
+            expected_amount=current_amount,
+            billing_tg_id=current_profile_id,
+        )
+        await msg.answer(
+            "⚠️ Состав профиля или сумма подписки изменилась после показа реквизитов. "
+            "Чек не принят и заявка на оплату не создана.\n\n"
+            f"Актуальная сумма: <b>{current_amount} ₽</b>. "
+            "Оплатите эту сумму и отправьте новый чек.",
+            parse_mode="HTML",
+        )
         return
 
     submit_limit = await asyncio.to_thread(
@@ -2268,21 +2320,15 @@ async def broad_proc(msg: Message, state: FSMContext):
         await state.clear()
         return await msg.answer("❌ Рассылка успешно отменена.", reply_markup=get_admin_menu())
     await state.clear()
-    def _list_broadcast_users() -> list[tuple[int]]:
-        conn = database_adapter.connect(config.DB_PATH)
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT tg_id FROM users")
-            return cursor.fetchall()
-        finally:
-            conn.close()
-    users = await asyncio.to_thread(_list_broadcast_users)
+    # Reuse the same recipient policy as the web-panel broadcast path: active
+    # PIN status, reachable Telegram chats, and valid family-profile members.
+    users = await asyncio.to_thread(broadcast_manager._recipients)
     await msg.answer(f"🚀 Запуск рассылки по базе из {len(users)} записей...")
     cnt = 0
     failed = 0
     for row in users:
         try:
-            target_id = int(row[0])
+            target_id = int(row["tg_id"])
             if target_id <= 0:
                 continue
             with message_journal.service_message():
@@ -2301,7 +2347,7 @@ async def broad_proc(msg: Message, state: FSMContext):
             await asyncio.sleep(max(0.02, float(getattr(config, "BROADCAST_SEND_DELAY_SECONDS", 0.04))))
         except Exception as error:
             failed += 1
-            logger.debug("Рассылка пользователю %s не доставлена: %s", row[0], error)
+            logger.debug("Рассылка пользователю %s не доставлена: %s", row.get("tg_id"), error)
     await asyncio.to_thread(
         user_events.safe_record_event,
         msg.from_user.id,

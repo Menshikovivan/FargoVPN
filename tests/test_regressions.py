@@ -32,7 +32,7 @@ def test_concurrent_different_receipts_and_approved_duplicate(tmp_path, monkeypa
     from services import payment_submission as payments
     path = tmp_path / 'payments.db'
     with sqlite3.connect(path) as connection:
-        connection.execute("CREATE TABLE payments (id INTEGER PRIMARY KEY,tg_id INTEGER,username TEXT,telegram_file_id TEXT,amount INTEGER,ocr_status TEXT,purchase_token TEXT UNIQUE,status TEXT DEFAULT 'pending')")
+        connection.execute("CREATE TABLE payments (id INTEGER PRIMARY KEY,tg_id INTEGER,username TEXT,telegram_file_id TEXT,amount INTEGER,expected_amount INTEGER,ocr_status TEXT,purchase_token TEXT UNIQUE,status TEXT DEFAULT 'pending')")
     lock = threading.Lock()
     class Connection:
         def __init__(self, *args): self.conn = sqlite3.connect(path)
@@ -77,10 +77,11 @@ def test_new_user_menu_and_stats():
         pytest.skip("aiogram is not installed in this isolated QA environment")
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from services.subscription_status import has_active_subscription
+    billing_stub = types.SimpleNamespace(payment_profile_id=lambda tg_id, _path: tg_id)
     ns = functions('main.py', ['get_user_menu', 'send_user_stats'], {
-        'Message': object, 'InlineKeyboardBuilder': InlineKeyboardBuilder,
+        'Message': object, 'InlineKeyboardBuilder': InlineKeyboardBuilder, 'asyncio': asyncio,
+        'billing': billing_stub, 'config': types.SimpleNamespace(ADMIN_IDS=[], DB_PATH='unused'),
         'has_active_subscription': has_active_subscription,
-        'config': types.SimpleNamespace(ADMIN_IDS=[]),
         'get_personal_cabinet_url': lambda *args: '',
         'resolve_user': AsyncMock(return_value={'enable': 1, 'expiry_time': 0}),
         'get_client_from_panel': AsyncMock(return_value=None),
@@ -195,8 +196,13 @@ assert 'client_max_body_size 1026m;' in guard.block('/test-panel','/tmp/test.soc
 
 def test_home_for_registered_user_without_vpn():
     from services.subscription_status import has_subscription
+    billing_stub = types.SimpleNamespace(
+        payment_profile_id=lambda tg_id, _path: tg_id,
+        subscription_label=lambda _user, _now: 'Подписка не оплачена',
+    )
     ns = functions('main.py', ['send_home'], {
-        'Message': object, 'has_subscription': has_subscription,
+        'Message': object, 'has_subscription': has_subscription, 'asyncio': asyncio,
+        'billing': billing_stub, 'config': types.SimpleNamespace(DB_PATH='unused'),
         'time': types.SimpleNamespace(time=lambda: 1),
         'resolve_user': AsyncMock(return_value={'enable': 1, 'expiry_time': 0}),
         'get_client_from_panel': AsyncMock(return_value=None),
@@ -205,5 +211,5 @@ def test_home_for_registered_user_without_vpn():
     })
     message = types.SimpleNamespace(answer=AsyncMock(), from_user=types.SimpleNamespace(username='alice', full_name='Alice'))
     asyncio.run(ns['send_home'](message, 1))
-    assert 'Активной подписки нет' in message.answer.call_args.args[0]
+    assert 'Подписка не оплачена' in message.answer.call_args.args[0]
     assert 'бессрочно' not in message.answer.call_args.args[0].lower()

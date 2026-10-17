@@ -223,6 +223,7 @@ async def test_prompt_retries_after_transient_send_failure(monkeypatch):
     aiogram = types.ModuleType("aiogram")
     exceptions = types.ModuleType("aiogram.exceptions")
     filters = types.ModuleType("aiogram.filters")
+    aiogram_types = types.ModuleType("aiogram.types")
     class BaseMiddleware: pass
     class BaseFilter: pass
     class TelegramBadRequest(Exception): pass
@@ -230,6 +231,7 @@ async def test_prompt_retries_after_transient_send_failure(monkeypatch):
     class TelegramRetryAfter(Exception):
         retry_after = 0.01
     aiogram.BaseMiddleware = BaseMiddleware
+    aiogram_types.Message = object
     exceptions.TelegramBadRequest = TelegramBadRequest
     exceptions.TelegramForbiddenError = TelegramForbiddenError
     exceptions.TelegramRetryAfter = TelegramRetryAfter
@@ -237,6 +239,7 @@ async def test_prompt_retries_after_transient_send_failure(monkeypatch):
     monkeypatch.setitem(sys.modules, "aiogram", aiogram)
     monkeypatch.setitem(sys.modules, "aiogram.exceptions", exceptions)
     monkeypatch.setitem(sys.modules, "aiogram.filters", filters)
+    monkeypatch.setitem(sys.modules, "aiogram.types", aiogram_types)
 
     import importlib
     middleware = importlib.import_module("telegram_registration_middleware")

@@ -438,9 +438,8 @@ body.panel-page>main>*:nth-child(2){animation-delay:.035s}body.panel-page>main>*
   .resources-grid,.quick-actions-grid,.dashboard-rail{grid-template-columns:1fr!important}
   .dashboard-rail .system-card{grid-column:auto}
   .quick-action{min-height:72px!important}
-}
-  .global-search{grid-column:1/-1}
-  .header-tools{grid-template-columns:minmax(0,1fr) 42px 42px 42px}
+  .header-tools{display:grid!important;grid-template-columns:minmax(0,1fr) repeat(3,42px);width:100%}
+  .global-search{grid-column:auto;width:100%;min-width:0}
 }
 @keyframes fv42-pulse{0%{box-shadow:0 0 0 0 rgba(139,124,255,0)}35%{box-shadow:0 0 0 7px rgba(139,124,255,.11)}100%{box-shadow:0 0 0 0 rgba(139,124,255,0)}}
 .fv42-pulse{animation:fv42-pulse .42s ease-out}
@@ -502,3 +501,50 @@ button[aria-busy="true"]{cursor:wait;opacity:.65}
 button[aria-busy="true"]::after{content:"";display:inline-block;width:12px;height:12px;margin-left:8px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:middle;animation:fargovpn-request-spin .7s linear infinite}
 @keyframes fargovpn-request-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){button[aria-busy="true"]::after{animation:none;border-right-color:currentColor}}
+
+/* UI polish: keep the new billing/family controls legible and the
+   dense admin views balanced between tablet and desktop widths. */
+:root{
+  --ui-panel:#0c1421;
+  --ui-stroke:rgba(153,176,219,.15);
+  --ui-glow:rgba(139,124,255,.14);
+}
+body.panel-page{font-size:14px;line-height:1.5;letter-spacing:0}
+body.panel-page>main{min-width:0}
+.page-header h1{line-height:1.12}
+.card{overflow-wrap:anywhere}
+@media(hover:hover) and (pointer:fine){
+  .card:hover{transform:none!important;border-color:var(--42-line-strong)!important;box-shadow:0 20px 48px rgba(0,0,0,.22)!important}
+}
+.table-wrap{border-color:var(--ui-stroke);box-shadow:0 15px 42px rgba(0,0,0,.15)}
+.table-wrap table{margin:0}
+th{font-weight:750;line-height:1.35}
+td{line-height:1.45}
+.setting label{font-weight:650;line-height:1.4}
+.setting p{max-width:78ch;line-height:1.55}
+form[action$="/payment-price"]{display:grid;grid-template-columns:minmax(220px,1fr) auto;align-items:end;gap:12px}
+form[action$="/payment-price"]>.setting{margin:0}
+.setting:has(form[action$="/family-link"]){padding:15px;border:1px solid var(--ui-stroke);border-radius:16px;background:linear-gradient(145deg,rgba(15,23,37,.92),rgba(8,14,23,.88))}
+.setting:has(form[action$="/family-link"])>label{display:block;margin:0 0 7px;color:var(--text);font-size:14px;font-weight:750}
+.setting:has(form[action$="/family-link"])>p{margin:0 0 10px;color:var(--muted);font-size:12px}
+.setting:has(form[action$="/family-link"])>ul{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:7px;margin:0 0 12px;padding:0;list-style:none}
+.setting:has(form[action$="/family-link"])>ul>li{min-width:0;padding:9px 11px;border:1px solid var(--ui-stroke);border-radius:11px;background:rgba(255,255,255,.025);overflow-wrap:anywhere}
+.setting:has(form[action$="/family-link"]) form{margin:0}
+.setting:has(form[action$="/family-link"]) button{max-width:100%}
+.badge,.system-state{max-width:100%;overflow-wrap:anywhere}
+@media(min-width:901px) and (max-width:1120px){
+  .dash-layout{grid-template-columns:minmax(0,1fr)!important}
+  .dashboard-rail{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .resources-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .user-row{grid-template-columns:minmax(0,1.5fr) minmax(100px,.7fr) repeat(2,minmax(72px,.55fr)) minmax(108px,.7fr)!important}
+}
+@media(max-width:600px){
+  form[action$="/payment-price"]{grid-template-columns:minmax(0,1fr);gap:8px}
+  form[action$="/payment-price"]>button{width:100%}
+  .setting:has(form[action$="/family-link"]){padding:13px}
+  .setting:has(form[action$="/family-link"])>ul{grid-template-columns:minmax(0,1fr)}
+}
+/* Keep the expanded navigation rail clear of content on compact desktop screens. */
+@media(min-width:901px) and (max-width:1120px){
+  body.panel-page>main{width:calc(100% - 252px)!important;margin-left:252px!important}
+}

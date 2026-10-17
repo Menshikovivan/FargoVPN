@@ -179,14 +179,6 @@ class InvitationAccessMiddleware(BaseMiddleware):
             logger.info("Blocked Telegram update from banned tg_id=%s event=%s", tg_id, type(source).__name__)
             return None
 
-        now = int(time.time())
-        if state.blocked_until > now:
-            target = prompt_chat_id(event, user, chat, source)
-            await _answer_callback(source)
-            if target:
-                await send_registration_prompt(data.get("bot"), target, blocked_until=state.blocked_until)
-            return None
-
         # The only ordinary-user update allowed through the gate is a plain
         # 4-digit message. Deep links, callbacks, media, commands, inline
         # queries and all other update types remain blocked until activation.
@@ -204,6 +196,18 @@ class InvitationAccessMiddleware(BaseMiddleware):
             and re.fullmatch(r"/start(?:@\w+)?\s+family_[A-Za-z0-9_-]{20,100}", start_text)
         ):
             return await handler(event, data)
+
+        # PIN throttling restricts registration-code attempts and normal bot
+        # access, but must not prevent an existing Telegram user from joining
+        # a profile they were explicitly invited to. The family-link handler
+        # does not activate PIN-gated users or grant VPN access.
+        now = int(time.time())
+        if state.blocked_until > now:
+            target = prompt_chat_id(event, user, chat, source)
+            await _answer_callback(source)
+            if target:
+                await send_registration_prompt(data.get("bot"), target, blocked_until=state.blocked_until)
+            return None
 
         target = prompt_chat_id(event, user, chat, source)
         await _answer_callback(source)

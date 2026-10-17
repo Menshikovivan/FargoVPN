@@ -99,6 +99,16 @@ def profile_accounts(tg_id: int, db_path: str | None = None) -> list[dict[str, A
     return [{"tg_id": int(row[0]), "username": str(row[1] or "")} for row in rows]
 
 
+def _has_own_vpn_identity(user_row: Any) -> bool:
+    """Whether a Telegram account already owns a separate VPN identity.
+
+    Legacy rows can retain a positive expiry timestamp after a client was
+    removed. Expiry alone is not a credential and should not block an invited
+    account from joining a family profile.
+    """
+    return any(str(user_row[index] or "").strip() for index in (2, 3, 4))
+
+
 def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None = None) -> int:
     """Consume a short-lived request only when the invited account starts the bot."""
     import hashlib, time
@@ -126,13 +136,27 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
             raise ValueError("Оба аккаунта должны начать диалог с ботом")
         if str(by_id[owner][1]).lower() != 'active':
             raise ValueError("Основной аккаунт должен пройти проверку PIN-кода")
+        existing = connection.execute(
+            "SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (int(telegram_id),)
+        ).fetchone()
+        if existing:
+            if int(existing[0]) != owner:
+                raise ValueError("Этот аккаунт уже связан с другим профилем")
+            # A new, valid invite from the same owner is safe to acknowledge
+            # for an already-linked member, even when the family is full.
+            # Consume only after ownership has been confirmed.
+            connection.execute(
+                "UPDATE telegram_profile_link_requests SET consumed_at=? WHERE token_hash=? AND consumed_at IS NULL",
+                (int(time.time()), digest),
+            )
+            return owner
         count = connection.execute(
             "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=?", (owner,)
         ).fetchone()
         if int(count[0] or 0) >= 4:
             raise ValueError("В одном профиле может быть не более 4 Telegram аккаунтов")
         alias = by_id[int(telegram_id)]
-        if str(alias[2] or '').strip() or str(alias[3] or '').strip() or str(alias[4] or '').strip() or int(alias[5] or 0) > 0:
+        if _has_own_vpn_identity(alias):
             raise ValueError("У дополнительного аккаунта уже есть данные VPN-подписки; сначала разберите профиль в панели")
         connection.execute(
             "INSERT INTO telegram_profile_links(telegram_id,profile_tg_id,linked_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(telegram_id) DO NOTHING",
