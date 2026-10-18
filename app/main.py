@@ -1050,7 +1050,7 @@ async def send_home(message: Message, user_id: int) -> None:
         enabled = bool(source.get("enable", True))
         now_ms = int(time.time() * 1000)
         label = billing.subscription_label({**user, **source}, now_ms)
-        status = "🔴" if label in {"Подписка не оплачена", "Не прошёл проверку PIN-кода", "Заблокирован", "Доступ отключён", "Подписка истекла"} else "🟢"
+        status = billing.subscription_status_emoji(label)
         if expiry > 0 and has_subscription(source):
             until = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
             summary = f"{status} {label} · до <code>{until}</code>"
@@ -1059,12 +1059,12 @@ async def send_home(message: Message, user_id: int) -> None:
         if client:
             user = {**user, **client}
     else:
-        summary = "ℹ️ Подписка не оплачена"
+        summary = "🟡 Не зарегистрирован"
     await message.answer(
         home_text(summary=summary),
         parse_mode="HTML",
         reply_markup=await get_user_menu_async(
-            profile_id, user
+            user_id, user
         ),
     )
 
@@ -1074,13 +1074,15 @@ async def send_user_stats(message: Message, user_id: int, username: str | None) 
     u = await resolve_user(profile_id, None)
     panel_client = await get_client_from_panel(str(u.get("email") or "")) if u else None
     source = panel_client or u
+    status_label = billing.subscription_label(source)
     if not has_active_subscription(source):
         builder = InlineKeyboardBuilder()
         builder.button(text="💳 Купить подписку", callback_data="menu:buy")
         builder.button(text="🏠 Главное меню", callback_data="menu:home")
         builder.adjust(1)
         await message.answer(
-            "ℹ️ Активной подписки нет. Сначала оплатите подписку, чтобы получить доступ к VPN.",
+            f"{billing.subscription_status_emoji(status_label)} {status_label}. "
+            "Активной подписки нет. Сначала оплатите подписку, чтобы получить доступ к VPN.",
             reply_markup=builder.as_markup(),
         )
         return
@@ -1508,7 +1510,7 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
         for account in accounts:
             member_id = int(account["tg_id"])
             if member_id != user_id:
-                member_name = ("@" + str(account.get("username") or member_id))[:40]
+                member_name = str(account.get("label") or f"ID {member_id}")[:40]
                 builder.button(text=f"❌ Отвязать {member_name}", callback_data=f"family:remove:{member_id}")
         builder.button(text="🏠 Главное меню", callback_data="menu:home")
         builder.adjust(1)
@@ -1602,7 +1604,7 @@ async def family_callbacks(call: CallbackQuery):
             for account in accounts:
                 member = int(account["tg_id"])
                 if member != user_id:
-                    name = ("@" + str(account.get("username") or member))[:40]
+                    name = str(account.get("label") or f"ID {member}")[:40]
                     builder.button(text=f"❌ Отвязать {name}", callback_data=f"family:remove:{member}")
             builder.button(text="🏠 Главное меню", callback_data="menu:home")
             builder.adjust(1)
@@ -2019,18 +2021,41 @@ async def send_crm_list(message: Message) -> None:
     def _load_crm_users():
         with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
             return connection.execute(
-                "SELECT tg_id,username,enable,expiry_time FROM users ORDER BY LOWER(COALESCE(username, '')), tg_id LIMIT 100"
+                """SELECT tg_id,
+                          COALESCE(NULLIF(u.username,''),(
+                              SELECT NULLIF(e.username,'') FROM user_events e
+                               WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
+                               ORDER BY e.id DESC LIMIT 1
+                          ),'') AS username,
+                          display_name,enable,expiry_time,uuid,email,sub_id,
+                          registration_status
+                     FROM users u
+                    ORDER BY LOWER(COALESCE(NULLIF(u.username,''),NULLIF(u.display_name,''),'')),u.tg_id
+                    LIMIT 100"""
             ).fetchall()
     rows = await asyncio.to_thread(_load_crm_users)
     if not rows:
         await message.answer("📉 База пользователей пуста.", reply_markup=get_admin_menu())
         return
-    now_ms = int(time.time() * 1000)
+    family_profiles = await asyncio.to_thread(billing.family_profile_map, config.DB_PATH)
     builder = InlineKeyboardBuilder()
-    for tg_id, username, enabled, expiry in rows:
-        active = bool(enabled) and (int(expiry or 0) <= 0 or int(expiry or 0) > now_ms)
-        label = f"{'🟢' if active else '🔴'} @{username}" if username else f"{'🟢' if active else '🔴'} ID {tg_id}"
-        builder.button(text=label[:48], callback_data=f"crmv_{tg_id}")
+    for tg_id, username, display_name, enabled, expiry, uuid_value, email, sub_id, registration in rows:
+        account = {
+            "tg_id": int(tg_id),
+            "username": str(username or ""),
+            "display_name": str(display_name or ""),
+            "registration_status": str(registration or "active"),
+            "enable": bool(enabled),
+            "expiry_time": int(expiry or 0),
+            "uuid": str(uuid_value or ""),
+            "email": str(email or ""),
+            "sub_id": str(sub_id or ""),
+        }
+        account.update(family_profiles.get(int(tg_id), {}))
+        state = billing.subscription_label(account)
+        icon = billing.subscription_status_emoji(state)
+        label = billing.telegram_identity_label(int(tg_id), account["username"], account["display_name"])
+        builder.button(text=f"{icon} {label} · {state}"[:48], callback_data=f"crmv_{tg_id}")
     builder.button(text="⬅ Админ-меню", callback_data="menu:admin")
     builder.adjust(2)
     await message.answer(
@@ -2083,25 +2108,67 @@ def admin_summary_text() -> str:
 def subscription_report_text() -> str:
     with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
         users = connection.execute(
-            "SELECT username,tg_id,expiry_time,last_reminder_days,enable FROM users ORDER BY expiry_time"
+            """SELECT COALESCE(NULLIF(u.username,''),(
+                          SELECT NULLIF(e.username,'') FROM user_events e
+                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
+                           ORDER BY e.id DESC LIMIT 1
+                      ),'') AS username,
+                      u.display_name,u.tg_id,u.expiry_time,u.last_reminder_days,
+                      u.enable,u.uuid,u.email,u.sub_id,u.registration_status,
+                      l.profile_tg_id,p.uuid,p.email,p.sub_id,p.expiry_time,p.enable,
+                      p.last_reminder_days
+                 FROM users u
+                 LEFT JOIN telegram_profile_links l ON l.telegram_id=u.tg_id
+                 LEFT JOIN users p ON p.tg_id=l.profile_tg_id
+                ORDER BY COALESCE(p.expiry_time,u.expiry_time),u.tg_id"""
         ).fetchall()
     if not users:
-        return "📭 Пользователи с подписками не найдены."
+        return "📭 Пользователи не найдены."
     now_ms = int(time.time() * 1000)
     lines = ["📋 <b>Подписки и уведомления</b>\n"]
-    for username, tg_id, expiry_time, last_reminder, enabled in users:
-        mention = f"@{html.escape(str(username))}" if username else f"ID <code>{tg_id}</code>"
-        expiry_value = int(expiry_time or 0)
-        if not enabled:
-            state = "заблокирован ⛔"
-        elif expiry_value <= 0:
-            state = "бессрочно ♾"
-        elif expiry_value <= now_ms:
-            state = "истёк ❌"
+    for row in users:
+        username, display_name, tg_id = row[:3]
+        family_owner = row[10] is not None
+        owner_profile = row[11:15]
+        account = {
+            "tg_id": int(tg_id),
+            "username": str(username or ""),
+            "display_name": str(display_name or ""),
+            "registration_status": str(row[9] or "active"),
+            "enable": bool(row[5]),
+            "expiry_time": int(row[3] or 0),
+            "uuid": str(row[6] or ""),
+            "email": str(row[7] or ""),
+            "sub_id": str(row[8] or ""),
+            "family_subscription": family_owner,
+            "family_owner_tg_id": int(row[10] or 0),
+            "family_owner_has_subscription": any(str(value or "").strip() for value in owner_profile[:3]),
+            "family_owner_expiry_time": int(row[14] or 0) if family_owner else 0,
+            "family_owner_enable": bool(row[15]) if family_owner and row[15] is not None else False,
+        }
+        if family_owner:
+            account["enable"] = account["family_owner_enable"]
+        mention = html.escape(
+            billing.telegram_identity_label(int(tg_id), str(username or ""), str(display_name or ""))
+        )
+        label = billing.subscription_label(account, now_ms)
+        if label in {"Не зарегистрирован", "Без подписки", "Семейная · без подписки"}:
+            state = f"{label} {billing.subscription_status_emoji(label)}"
+        elif label == "Заблокирован" or "отключён" in label.lower():
+            state = f"{label} {billing.subscription_status_emoji(label)}"
+        elif label.endswith("бессрочная подписка"):
+            state = f"{label} {billing.subscription_status_emoji(label)} ♾"
         else:
-            days_left = max(0, (local_date_from_timestamp(expiry_value / 1000) - now_local().date()).days)
-            reminder = "не отправлялось" if int(last_reminder or -1) == -1 else f"за {last_reminder} дн."
-            state = f"{days_left} дн. · уведомление {reminder}"
+            expiry_value = int(row[14] or 0) if family_owner else int(row[3] or 0)
+            last_reminder = row[16] if family_owner else row[4]
+            expiry_date = local_date_from_timestamp(expiry_value / 1000).strftime("%d.%m.%Y")
+            prefix = "семейная · " if family_owner else ""
+            if expiry_value <= now_ms:
+                state = f"{prefix}истёк {expiry_date} {billing.subscription_status_emoji(label)}"
+            else:
+                days_left = max(0, (local_date_from_timestamp(expiry_value / 1000) - now_local().date()).days)
+                reminder = "не отправлялось" if int(last_reminder or -1) == -1 else f"за {last_reminder} дн."
+                state = f"{prefix}до {expiry_date} · {days_left} дн. · уведомление {reminder} {billing.subscription_status_emoji(label)}"
         lines.append(f"• {mention} — {state}")
     return "\n".join(lines)
 

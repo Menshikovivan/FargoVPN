@@ -7,6 +7,8 @@ import db
 
 
 def has_subscription(user: dict | None) -> bool:
+    if user and user.get('family_subscription'):
+        return bool(user.get('family_owner_has_subscription'))
     return bool(user and any(str(user.get(key) or '').strip()
                              for key in ('uuid', 'email', 'sub_id')))
 
@@ -16,22 +18,76 @@ def subscription_label(user: dict | None, now_ms: int | None = None) -> str:
         return "Нет профиля"
     registration = str(user.get('registration_status') or 'active').strip().lower()
     if registration in {'new', 'awaiting_invite'}:
-        return "Не прошёл проверку PIN-кода"
+        return "Не зарегистрирован"
     if registration == 'banned':
         return "Заблокирован"
+    family = bool(user.get('family_subscription'))
     if not has_subscription(user):
-        return "Подписка не оплачена"
+        return "Семейная · без подписки" if family else "Без подписки"
     try:
-        expiry = int(user.get('expiry_time') or 0)
+        expiry = int(
+            user.get('family_owner_expiry_time')
+            if family else user.get('expiry_time') or 0
+        )
     except (TypeError, ValueError):
         expiry = 0
-    if not bool(user.get('enable', True)):
-        return "Доступ отключён"
+    enabled = user.get('family_owner_enable', True) if family else user.get('enable', True)
+    prefix = "Семейная · " if family else ""
+    if not bool(enabled):
+        return prefix + ("доступ отключён" if family else "Доступ отключён")
     if expiry <= 0:
-        return "Бессрочная подписка"
+        return prefix + ("бессрочная подписка" if family else "Бессрочная подписка")
     import time
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    return "Подписка истекла" if expiry <= now_ms else "Подписка активна"
+    if expiry <= now_ms:
+        return prefix + ("подписка истекла" if family else "Подписка истекла")
+    return prefix + ("подписка активна" if family else "Подписка активна")
+
+
+def subscription_status_tone(label: str | None) -> str:
+    normalized = str(label or "").casefold()
+    if any(marker in normalized for marker in ("заблокирован", "отключён")):
+        return "bad"
+    if any(marker in normalized for marker in ("нет профиля", "не зарегистрирован", "без подписки", "истек")):
+        return "warn"
+    return "good"
+
+
+def subscription_status_emoji(label: str | None) -> str:
+    return {"bad": "🔴", "warn": "🟡", "good": "🟢"}[subscription_status_tone(label)]
+
+
+def telegram_identity_label(tg_id: int, username: str = "", display_name: str = "") -> str:
+    clean_username = str(username or "").strip().lstrip("@")
+    if clean_username:
+        return f"@{clean_username}"
+    clean_display_name = " ".join(str(display_name or "").split())
+    if clean_display_name:
+        return clean_display_name
+    return f"ID {int(tg_id)}" if int(tg_id or 0) > 0 else "Пользователь"
+
+
+def family_profile_map(db_path: str | None = None) -> dict[int, dict[str, Any]]:
+    with db.connect(db_path) as connection:
+        rows = connection.execute(
+            """SELECT l.telegram_id,l.profile_tg_id,
+                      p.uuid,p.email,p.sub_id,p.expiry_time,p.enable
+                 FROM telegram_profile_links l
+                 LEFT JOIN users p ON p.tg_id=l.profile_tg_id"""
+        ).fetchall()
+    profiles: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        profile = {
+            "family_subscription": True,
+            "family_owner_tg_id": int(row[1] or 0),
+            "family_owner_expiry_time": int(row[5] or 0),
+            "family_owner_enable": bool(row[6]) if row[6] is not None else False,
+            "family_owner_has_subscription": any(
+                str(row[index] or "").strip() for index in (2, 3, 4)
+            ),
+        }
+        profiles[int(row[0])] = profile
+    return profiles
 
 
 def profile_owner(tg_id: int, db_path: str | None = None) -> int:
@@ -93,10 +149,28 @@ def profile_accounts(tg_id: int, db_path: str | None = None) -> list[dict[str, A
     owner = profile_owner(tg_id, db_path)
     with db.connect(db_path) as connection:
         rows = connection.execute(
-            "SELECT u.tg_id,u.username FROM telegram_profile_links l JOIN users u ON u.tg_id=l.telegram_id WHERE l.profile_tg_id=? ORDER BY CASE WHEN l.telegram_id=? THEN 0 ELSE 1 END,l.telegram_id",
+            """SELECT u.tg_id,
+                      COALESCE(NULLIF(u.username,''),(
+                          SELECT NULLIF(e.username,'') FROM user_events e
+                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
+                           ORDER BY e.id DESC LIMIT 1
+                      ),'') AS username,
+                      u.display_name
+                 FROM telegram_profile_links l
+                 JOIN users u ON u.tg_id=l.telegram_id
+                WHERE l.profile_tg_id=?
+                ORDER BY CASE WHEN l.telegram_id=? THEN 0 ELSE 1 END,l.telegram_id""",
             (owner, owner),
         ).fetchall()
-    return [{"tg_id": int(row[0]), "username": str(row[1] or "")} for row in rows]
+    return [
+        {
+            "tg_id": int(row[0]),
+            "username": str(row[1] or ""),
+            "display_name": str(row[2] or ""),
+            "label": telegram_identity_label(int(row[0]), str(row[1] or ""), str(row[2] or "")),
+        }
+        for row in rows
+    ]
 
 
 def _has_own_vpn_identity(user_row: Any) -> bool:

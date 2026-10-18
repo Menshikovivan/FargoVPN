@@ -775,13 +775,14 @@ def user_subscription_label(user: dict[str, Any], now_ms: int | None = None) -> 
     return billing.subscription_label(user, now_ms)
 
 
-def user_subscription_label(user: dict[str, Any], now_ms: int | None = None) -> str:
-    return billing.subscription_label(user, now_ms)
-
-
 def status_badge(active: bool, text_on: str = "Активен", text_off: str = "Отключён") -> str:
     css = "good" if active else "bad"
     return f'<span class="badge {css}">{html.escape(text_on if active else text_off)}</span>'
+
+
+def user_subscription_badge(label: str) -> str:
+    css = billing.subscription_status_tone(label)
+    return f'<span class="badge {css}">{html.escape(str(label or ""))}</span>'
 
 
 def api_source_badge(stale: bool) -> str:
@@ -1029,7 +1030,15 @@ def telegram_receipt_file(payment_id: int) -> tuple[bytes, str, str]:
 
 def _local_users() -> list[dict[str, Any]]:
     with database() as connection:
-        rows = connection.execute("SELECT * FROM users").fetchall()
+        rows = connection.execute(
+            """SELECT u.*,
+                      COALESCE(NULLIF(u.username,''),(
+                          SELECT NULLIF(e.username,'') FROM user_events e
+                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
+                           ORDER BY e.id DESC LIMIT 1
+                      ),'') AS latest_username
+                 FROM users u"""
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -1050,6 +1059,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
     local = _local_users()
     by_email = {str(row.get("email") or "").strip().lower(): row for row in local if row.get("email")}
     by_uuid = {str(row.get("uuid") or "").strip().lower(): row for row in local if row.get("uuid")}
+    family_profiles = billing.family_profile_map(config.DB_PATH)
     now_ms = int(time.time() * 1000)
 
     source_clients: list[dict[str, Any]]
@@ -1097,7 +1107,8 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "registration_status": str(row.get("registration_status") or "active"),
             "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
-            "username": str(row.get("username") or "") or email_key.rsplit("_", 1)[0] or "Без имени",
+            "username": str(row.get("username") or row.get("latest_username") or ""),
+            "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
             "expiry_time": expiry,
             "up": up,
@@ -1129,7 +1140,16 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             # Keep old/stale local records visible even if 3x-ui is temporarily
             # unavailable; they can still contain a useful conversation journal.
             pass
-        expiry = int(row.get("expiry_time") or 0)
+        family = family_profiles.get(local_tg_id, {})
+        family_has_subscription = bool(family.get("family_owner_has_subscription"))
+        expiry = int(
+            family.get("family_owner_expiry_time")
+            if family_has_subscription else row.get("expiry_time") or 0
+        )
+        enabled = bool(
+            family.get("family_owner_enable")
+            if family else row.get("enable", 1)
+        )
         remaining = remaining_days(expiry, now_ms)
         merged.append({
             "registered_at": row.get("registered_at") or "",
@@ -1138,8 +1158,10 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "email": str(row.get("email") or ""),
             "uuid": str(row.get("uuid") or ""),
             "sub_id": str(row.get("sub_id") or ""),
+            **family,
             "tg_id": local_tg_id,
-            "username": str(row.get("username") or f"id_{local_tg_id}"),
+            "username": str(row.get("username") or row.get("latest_username") or ""),
+            "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or "")[:255],
             "expiry_time": expiry,
             "up": int(row.get("up") or 0),
@@ -1149,9 +1171,10 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "quota_remaining": None,
             "last_online_ts": int(row.get("last_online_ts") or 0),
             "online": False,
-            "enable": bool(row.get("enable", 1)),
-            "active": bool(row.get("enable", 1))
-            and bool(str(row.get("email") or "").strip() or str(row.get("uuid") or "").strip() or str(row.get("sub_id") or "").strip())
+            "enable": enabled,
+            "active": bool(family_has_subscription if family else
+                           str(row.get("email") or "").strip() or str(row.get("uuid") or "").strip() or str(row.get("sub_id") or "").strip())
+            and enabled
             and (expiry <= 0 or expiry > now_ms),
             "remaining_days": remaining,
             "source_stale": bool(snapshot.get("stale")),
@@ -1259,13 +1282,7 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     expiry = int(user.get("expiry_time") or 0)
     now_ms = int(time.time() * 1000)
     disabled = not bool(user.get("enable", True))
-    status_label = str(user.get("registration_status") or "active").lower()
-    if status_label in {"new", "awaiting_invite"}:
-        status_label = "Не прошёл проверку PIN-кода"
-    elif not any(str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id")):
-        status_label = "Подписка не оплачена"
-    else:
-        status_label = user_subscription_label(user, now_ms)
+    status_label = user_subscription_label(user, now_ms)
     has_vpn_subscription = any(str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id"))
     if not has_vpn_subscription:
         expiry_text, remaining = status_label, "—"
@@ -1278,20 +1295,26 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     used = up + down
     quota = "Без лимита" if total <= 0 else f"{bytes_to_gb(max(0, total-used))} GB осталось"
     online = bool(user.get("online"))
-    if status_label == "Не прошёл проверку PIN-кода": status, status_cls = status_label, "warn"
-    elif status_label == "Подписка не оплачена": status, status_cls = status_label, "warn"
+    if status_label == "Не зарегистрирован": status, status_cls = status_label, "warn"
+    elif status_label == "Без подписки": status, status_cls = status_label, "warn"
     elif disabled: status, status_cls = "Отключена", "bad"
     elif expiry > 0 and expiry <= now_ms: status, status_cls = "Истекла", "warn"
     elif expiry <= 0 and billing.has_subscription(user): status, status_cls = "Бессрочная", "good"
     else: status, status_cls = "Активна", "good"
-    username_clean = html.escape(username or str(user.get("username") or "Пользователь"))
+    username_clean = html.escape(
+        username or billing.telegram_identity_label(
+            int(user.get("tg_id") or 0),
+            str(user.get("username") or ""),
+            str(user.get("display_name") or ""),
+        )
+    )
     sub_escaped = html.escape(sub_url, quote=True)
     bot_username = html.escape(_cabinet_bot_username(), quote=True)
     invite_code = html.escape(referral_codes.ensure_referral_code(config.DB_PATH, int(user.get("tg_id") or 0)))
     cabinet_logout_url = html.escape(public_path("/api/cabinet/logout"), quote=True)
     cabinet_connection_url = html.escape(public_path("/cabinet/connection"), quote=True)
     cabinet_home_url = html.escape(public_path("/cabinet"), quote=True)
-    return f"""<!doctype html><html lang="ru" data-version="{html.escape(update_manager.current_version(), quote=True)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1220"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="manifest" href="{html.escape(public_path("/cabinet/manifest.webmanifest"), quote=True)}?v={html.escape(update_manager.current_version())}"><link rel="apple-touch-icon" href="{html.escape(public_path("/static/icons/icon-192.png"), quote=True)}"><link rel="stylesheet" href="{html.escape(public_path('/static/panel.css'), quote=True)}?v={html.escape(update_manager.current_version())}"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Личный кабинет · {html.escape(str(config.SERVICE_NAME))}</title></head><body class="cabinet-page"><div class="cabinet-shell"><header class="cabinet-head"><div><div class="cabinet-brand">{html.escape(str(config.SERVICE_NAME))}</div><div class="cabinet-subtitle">Личный кабинет</div></div><button type="button" id="cabinet-logout" class="button secondary small">Выйти</button></header><main class="cabinet-main"><section class="cabinet-welcome"><div><div class="cabinet-eyebrow">Здравствуйте</div><h1>@{username_clean}</h1><p>Управляйте подпиской, копируйте ссылку подключения и код приглашения.</p></div><span class="badge {status_cls}">{status}</span></section><section class="cabinet-actions"><a class="button" href="https://t.me/{bot_username}?start=renew">🔄 Продлить подписку</a><a class="button secondary" href="{cabinet_connection_url}">📱 Как подключиться</a></section><section class="cabinet-grid"><div class="card cabinet-card cabinet-primary"><div class="cabinet-card-title"><span>📋 Моя подписка</span><span class="cabinet-online {'is-online' if online else ''}">{'● Онлайн' if online else '○ Не в сети'}</span></div><div class="cabinet-number">{remaining}</div><div class="muted">Осталось</div><div class="cabinet-facts"><div><span>До</span><b>{html.escape(expiry_text)}</b></div><div><span>Использовано</span><b>{bytes_to_gb(used)} GB</b></div><div><span>Лимит</span><b>{quota}</b></div></div></div><div class="card cabinet-card"><h2>🔗 Ссылка подписки</h2><p class="muted">Используйте её в совместимых VPN-клиентах.</p><div class="cabinet-copy"><input id="cabinet-sub-url" value="{sub_escaped}" readonly><button type="button" id="cabinet-copy" class="button">Копировать</button></div><div id="cabinet-copy-result" class="muted cabinet-result"></div></div><div class="card cabinet-card"><h2>📊 Трафик</h2><div class="cabinet-traffic"><div><span>Отдано</span><b>{bytes_to_gb(up)} GB</b></div><div><span>Скачано</span><b>{bytes_to_gb(down)} GB</b></div><div><span>Всего</span><b>{bytes_to_gb(used)} GB</b></div></div></div><div class="card cabinet-card"><h2>🎟 Код приглашения</h2><p class="muted">Приглашённый пользователь должен зарегистрироваться по коду и хотя бы один раз успешно оплатить подписку. После первой подтверждённой оплаты вы получите +10 бесплатных дней.</p><div class="cabinet-copy"><input id="cabinet-invite-code" value="{invite_code}" readonly><button type="button" id="cabinet-copy-invite" class="button">Копировать</button></div></div><div class="card cabinet-card"><h2>📱 Подключение</h2><p>Откройте ссылку подписки в VPN-клиенте или инструкции для устройства.</p><a class="button secondary" href="{cabinet_connection_url}">Инструкция по подключению</a><a class="button secondary" href="https://t.me/{bot_username}">Открыть Telegram-бота</a></div></section><section class="card cabinet-support"><h2>Нужна помощь?</h2><p class="muted">Для обращения к администратору используйте Telegram-бота.</p><a class="button" href="https://t.me/{bot_username}">💬 Открыть поддержку в Telegram</a></section></main></div><script>(function(){{const tg=window.Telegram&&window.Telegram.WebApp;try{{if(tg){{tg.ready();tg.expand();if(tg.disableVerticalSwipes)tg.disableVerticalSwipes();}}}}catch(_e){{}}const copy=document.getElementById('cabinet-copy');const input=document.getElementById('cabinet-sub-url');const result=document.getElementById('cabinet-copy-result');copy&&copy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(input.value);result.textContent='✅ Ссылка скопирована';}}catch(e){{input.select();document.execCommand('copy');result.textContent='✅ Ссылка скопирована';}}}});const inviteCopy=document.getElementById('cabinet-copy-invite');const inviteInput=document.getElementById('cabinet-invite-code');inviteCopy&&inviteCopy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(inviteInput.value);inviteCopy.textContent='✅ Скопировано';}}catch(e){{inviteInput.select();document.execCommand('copy');inviteCopy.textContent='✅ Скопировано';}}setTimeout(()=>inviteCopy.textContent='Копировать',1500);}});document.getElementById('cabinet-logout')?.addEventListener('click',async()=>{{try{{await fetch('{cabinet_logout_url}',{{method:'POST',credentials:'same-origin'}});}}finally{{location.href='{cabinet_home_url}';}}}});}})();</script></body></html>"""
+    return f"""<!doctype html><html lang="ru" data-version="{html.escape(update_manager.current_version(), quote=True)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1220"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="manifest" href="{html.escape(public_path("/cabinet/manifest.webmanifest"), quote=True)}?v={html.escape(update_manager.current_version())}"><link rel="apple-touch-icon" href="{html.escape(public_path("/static/icons/icon-192.png"), quote=True)}"><link rel="stylesheet" href="{html.escape(public_path('/static/panel.css'), quote=True)}?v={html.escape(update_manager.current_version())}"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Личный кабинет · {html.escape(str(config.SERVICE_NAME))}</title></head><body class="cabinet-page"><div class="cabinet-shell"><header class="cabinet-head"><div><div class="cabinet-brand">{html.escape(str(config.SERVICE_NAME))}</div><div class="cabinet-subtitle">Личный кабинет</div></div><button type="button" id="cabinet-logout" class="button secondary small">Выйти</button></header><main class="cabinet-main"><section class="cabinet-welcome"><div><div class="cabinet-eyebrow">Здравствуйте</div><h1>{username_clean}</h1><p>Управляйте подпиской, копируйте ссылку подключения и код приглашения.</p></div><span class="badge {status_cls}">{status}</span></section><section class="cabinet-actions"><a class="button" href="https://t.me/{bot_username}?start=renew">🔄 Продлить подписку</a><a class="button secondary" href="{cabinet_connection_url}">📱 Как подключиться</a></section><section class="cabinet-grid"><div class="card cabinet-card cabinet-primary"><div class="cabinet-card-title"><span>📋 Моя подписка</span><span class="cabinet-online {'is-online' if online else ''}">{'● Онлайн' if online else '○ Не в сети'}</span></div><div class="cabinet-number">{remaining}</div><div class="muted">Осталось</div><div class="cabinet-facts"><div><span>До</span><b>{html.escape(expiry_text)}</b></div><div><span>Использовано</span><b>{bytes_to_gb(used)} GB</b></div><div><span>Лимит</span><b>{quota}</b></div></div></div><div class="card cabinet-card"><h2>🔗 Ссылка подписки</h2><p class="muted">Используйте её в совместимых VPN-клиентах.</p><div class="cabinet-copy"><input id="cabinet-sub-url" value="{sub_escaped}" readonly><button type="button" id="cabinet-copy" class="button">Копировать</button></div><div id="cabinet-copy-result" class="muted cabinet-result"></div></div><div class="card cabinet-card"><h2>📊 Трафик</h2><div class="cabinet-traffic"><div><span>Отдано</span><b>{bytes_to_gb(up)} GB</b></div><div><span>Скачано</span><b>{bytes_to_gb(down)} GB</b></div><div><span>Всего</span><b>{bytes_to_gb(used)} GB</b></div></div></div><div class="card cabinet-card"><h2>🎟 Код приглашения</h2><p class="muted">Приглашённый пользователь должен зарегистрироваться по коду и хотя бы один раз успешно оплатить подписку. После первой подтверждённой оплаты вы получите +10 бесплатных дней.</p><div class="cabinet-copy"><input id="cabinet-invite-code" value="{invite_code}" readonly><button type="button" id="cabinet-copy-invite" class="button">Копировать</button></div></div><div class="card cabinet-card"><h2>📱 Подключение</h2><p>Откройте ссылку подписки в VPN-клиенте или инструкции для устройства.</p><a class="button secondary" href="{cabinet_connection_url}">Инструкция по подключению</a><a class="button secondary" href="https://t.me/{bot_username}">Открыть Telegram-бота</a></div></section><section class="card cabinet-support"><h2>Нужна помощь?</h2><p class="muted">Для обращения к администратору используйте Telegram-бота.</p><a class="button" href="https://t.me/{bot_username}">💬 Открыть поддержку в Telegram</a></section></main></div><script>(function(){{const tg=window.Telegram&&window.Telegram.WebApp;try{{if(tg){{tg.ready();tg.expand();if(tg.disableVerticalSwipes)tg.disableVerticalSwipes();}}}}catch(_e){{}}const copy=document.getElementById('cabinet-copy');const input=document.getElementById('cabinet-sub-url');const result=document.getElementById('cabinet-copy-result');copy&&copy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(input.value);result.textContent='✅ Ссылка скопирована';}}catch(e){{input.select();document.execCommand('copy');result.textContent='✅ Ссылка скопирована';}}}});const inviteCopy=document.getElementById('cabinet-copy-invite');const inviteInput=document.getElementById('cabinet-invite-code');inviteCopy&&inviteCopy.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(inviteInput.value);inviteCopy.textContent='✅ Скопировано';}}catch(e){{inviteInput.select();document.execCommand('copy');inviteCopy.textContent='✅ Скопировано';}}setTimeout(()=>inviteCopy.textContent='Копировать',1500);}});document.getElementById('cabinet-logout')?.addEventListener('click',async()=>{{try{{await fetch('{cabinet_logout_url}',{{method:'POST',credentials:'same-origin'}});}}finally{{location.href='{cabinet_home_url}';}}}});}})();</script></body></html>"""
 
 
 def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
@@ -2445,7 +2468,7 @@ def users_page(
     sort = sort if sort in {"remaining", "last_online", "traffic", "quota", "name", "registration"} else "remaining"
     order = order if order in ("asc", "desc") else "asc"
     clean_q = str(q or "").strip().casefold()[:120]
-    clean_status = status if status in {"all", "active", "expired", "blocked", "online"} else "all"
+    clean_status = status if status in {"all", "active", "expired", "blocked", "family", "none", "unregistered", "online"} else "all"
     def registration_day(value: Any) -> str:
         raw = str(value or "").strip()
         if not raw:
@@ -2497,14 +2520,43 @@ def users_page(
         preview_hidden = "" if unread_count and unread_preview else "hidden"
         quota = "∞" if item["quota_remaining"] is None else fmt_bytes(item["quota_remaining"])
         payment_status = user_subscription_label(item, now_ms)
-        display_name = str(item.get("comment") or item.get("username") or item.get("email") or "Без Telegram-привязки")
+        display_name = (
+            billing.telegram_identity_label(
+                tg_id,
+                str(item.get("username") or ""),
+                str(item.get("display_name") or ""),
+            )
+            if tg_id > 0
+            else str(item.get("display_name") or item.get("username") or item.get("email") or "Без Telegram-привязки")
+        )
         base_button_label = "Открыть чат" if tg_id > 0 else "Открыть карточку"
         button_label = base_button_label
         message_button = (
             f'<a class="button small secondary" href="/users/id/{tg_id}" '
             f'data-chat-button data-base-label="{base_button_label}">{button_label}</a>'
         )
-        row_status = "active" if item["active"] else ("blocked" if not item["enable"] else "expired")
+        registration_status = str(item.get("registration_status") or "active").lower()
+        if registration_status in {"new", "awaiting_invite", "unregistered"}:
+            row_status = "unregistered"
+        elif item.get("family_subscription"):
+            family_statuses = ["family"]
+            if not billing.has_subscription(item):
+                family_statuses.append("none")
+            elif not item["enable"]:
+                family_statuses.append("blocked")
+            elif int(item.get("expiry_time") or 0) > 0 and int(item["expiry_time"]) <= now_ms:
+                family_statuses.append("expired")
+            else:
+                family_statuses.append("active")
+            row_status = " ".join(family_statuses)
+        elif not billing.has_subscription(item):
+            row_status = "none"
+        elif not item["enable"]:
+            row_status = "blocked"
+        elif int(item.get("expiry_time") or 0) > 0 and int(item["expiry_time"]) <= now_ms:
+            row_status = "expired"
+        else:
+            row_status = "active"
         referred_by_tg_id = int(item.get("referred_by_tg_id") or 0)
         referred_by_username = str(item.get("referred_by_username") or "").strip()
         referral_note = ""
@@ -2537,7 +2589,7 @@ def users_page(
         cards.append(
             f'''<article class="user-row" data-user-tg-id="{tg_id}" data-user-registered="{html.escape(registered_day, quote=True)}" data-user-search="{html.escape(search_blob, quote=True)}" data-user-status="{row_status}" data-user-online="{1 if item.get('online') else 0}" data-user-remaining="{remaining_sort}" data-user-last-online="{int(item.get('last_online_ts') or 0)}" data-user-traffic="{int(item.get('traffic_used') or 0)}" data-user-quota="{html.escape(quota_sort, quote=True)}" data-user-name="{html.escape(display_name.casefold(), quote=True)}">
 <div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{html.escape(display_name)}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
-<div class="user-status">{status_badge(item["active"])}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
+<div class="user-status">{user_subscription_badge(payment_status)}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
 <div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
 <div class="user-stat"><small>Лимит</small><b>{quota}</b><span>{"безлимит" if item["quota_remaining"] is None else "осталось"}</span></div>
@@ -2549,7 +2601,7 @@ def users_page(
         source_notice = f'<div class="notice">Показан локальный кэш: {html.escape(str(snapshot.get("error") or "3x-ui API недоступна"))}</div>'
     body = f'''<header><div><h1>Пользователи</h1><div class="subtitle">Актуальные сроки, трафик, Telegram-привязки и история общения · {api_source_badge(bool(snapshot.get("stale")))}</div></div><div class="actions"><form id="subscription-refresh-form" class="inline" method="post" action="/users/refresh-subscription-links"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><button id="subscription-refresh-start" class="secondary" type="submit">↻ Обновить ссылки</button></form><a class="button secondary" href="/broadcast">✉ Массовая рассылка</a><a class="button secondary" href="/users/import-identities">Импорт привязок</a><form class="inline" method="post" action="/users/import-to-3xui" onsubmit="return confirm('Синхронизировать зарегистрированных Telegram-пользователей с текущим 3x-ui?')"><button class="secondary" type="submit">⬆ Загрузить в 3x-ui</button></form><a class="button" href="/users/new">＋ Создать пользователя</a></div></header><section id="subscription-refresh-panel" class="card subscription-refresh-panel" style="display:none"><div class="section-title"><h2>Обновление ссылок подписки</h2><span id="subscription-refresh-badge" class="badge">Ожидание</span></div><div class="subscription-refresh-progress"><div class="progress large"><span id="subscription-refresh-progress-bar" style="width:0%"></span></div><div class="progress-meta"><span id="subscription-refresh-progress-text">Подготовка…</span><span id="subscription-refresh-progress-percent">0%</span></div></div><div class="subscription-refresh-stats"><span>Обработано <b id="subscription-refresh-processed">0</b></span><span>Отправлено <b id="subscription-refresh-delivered">0</b></span><span>Пропущено <b id="subscription-refresh-skipped">0</b></span><span>Ошибок <b id="subscription-refresh-failed">0</b></span></div><div class="subscription-refresh-current" id="subscription-refresh-current"></div><details class="subscription-refresh-log" open><summary>Журнал выполнения</summary><pre id="subscription-refresh-log-body">Ожидание запуска…</pre></details></section><div id="subscription-refresh-status" class="notice" style="display:none"></div>{source_notice}
 
-<div class="toolbar"><div class="toolbar-filter" role="search" data-user-filter-form data-initial-status="{html.escape(status, quote=True)}" data-initial-sort="{html.escape(sort, quote=True)}" data-initial-order="{html.escape(order, quote=True)}" data-initial-query="{html.escape(q, quote=True)}" autocomplete="off"><label class="sr-only" for="user-filter-search">Поиск пользователя</label><input id="user-filter-search" value="{html.escape(q)}" placeholder="Имя, TG ID, @username или email" type="search" inputmode="search" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-autocomplete="none" enterkeyhint="search" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" data-purpose="user-search" data-testid="user-search"><select name="status" data-filter-status><option value="all">Все</option><option value="active" {'selected' if status=='active' else ''}>Активные</option><option value="expired" {'selected' if status=='expired' else ''}>Истёкшие</option><option value="blocked" {'selected' if status=='blocked' else ''}>Заблокированные</option><option value="online" {'selected' if status=='online' else ''}>Сейчас онлайн</option></select><select name="sort" data-filter-sort><option value="remaining" {'selected' if sort=='remaining' else ''}>По остатку срока</option><option value="last_online" {'selected' if sort=='last_online' else ''}>По последнему онлайн</option><option value="traffic" {'selected' if sort=='traffic' else ''}>По объёму трафика</option><option value="quota" {'selected' if sort=='quota' else ''}>По остатку лимита</option><option value="name" {'selected' if sort=='name' else ''}>По имени</option><option value="registration" {'selected' if sort=='registration' else ''}>По дате регистрации</option></select><select name="order" data-filter-order><option value="asc" {'selected' if order=='asc' else ''}>По возрастанию</option><option value="desc" {'selected' if order=='desc' else ''}>По убыванию</option></select></div></div><div class="users-list-summary"><span id="users-visible-count">0</span> из <span id="users-total-count">{len(cards)}</span> пользователей</div><div class="actions" data-user-pagination data-initial-page="{max(1, page_number)}"><button type="button" class="secondary" data-page-prev>← Назад</button><span data-page-label></span><button type="button" class="secondary" data-page-next>Далее →</button></div><div class="user-list">{''.join(cards) or '<div class="card">Пользователи не найдены.</div>'}</div>'''
+<div class="toolbar"><div class="toolbar-filter" role="search" data-user-filter-form data-initial-status="{html.escape(status, quote=True)}" data-initial-sort="{html.escape(sort, quote=True)}" data-initial-order="{html.escape(order, quote=True)}" data-initial-query="{html.escape(q, quote=True)}" autocomplete="off"><label class="sr-only" for="user-filter-search">Поиск пользователя</label><input id="user-filter-search" value="{html.escape(q)}" placeholder="Имя, TG ID, @username или email" type="search" inputmode="search" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-autocomplete="none" enterkeyhint="search" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" data-purpose="user-search" data-testid="user-search"><select name="status" data-filter-status><option value="all">Все</option><option value="active" {'selected' if status=='active' else ''}>Активные</option><option value="expired" {'selected' if status=='expired' else ''}>Истёкшие</option><option value="blocked" {'selected' if status=='blocked' else ''}>Заблокированные</option><option value="family" {'selected' if status=='family' else ''}>Семейные</option><option value="none" {'selected' if status=='none' else ''}>Без подписки</option><option value="unregistered" {'selected' if status=='unregistered' else ''}>Не зарегистрированные</option><option value="online" {'selected' if status=='online' else ''}>Сейчас онлайн</option></select><select name="sort" data-filter-sort><option value="remaining" {'selected' if sort=='remaining' else ''}>По остатку срока</option><option value="last_online" {'selected' if sort=='last_online' else ''}>По последнему онлайн</option><option value="traffic" {'selected' if sort=='traffic' else ''}>По объёму трафика</option><option value="quota" {'selected' if sort=='quota' else ''}>По остатку лимита</option><option value="name" {'selected' if sort=='name' else ''}>По имени</option><option value="registration" {'selected' if sort=='registration' else ''}>По дате регистрации</option></select><select name="order" data-filter-order><option value="asc" {'selected' if order=='asc' else ''}>По возрастанию</option><option value="desc" {'selected' if order=='desc' else ''}>По убыванию</option></select></div></div><div class="users-list-summary"><span id="users-visible-count">0</span> из <span id="users-total-count">{len(cards)}</span> пользователей</div><div class="actions" data-user-pagination data-initial-page="{max(1, page_number)}"><button type="button" class="secondary" data-page-prev>← Назад</button><span data-page-label></span><button type="button" class="secondary" data-page-next>Далее →</button></div><div class="user-list">{''.join(cards) or '<div class="card">Пользователи не найдены.</div>'}</div>'''
     scripts = f'<script src="{html.escape(public_path("/static/users.js"), quote=True)}?v={_panel_asset_version()}" defer></script>'
     # This operation now has a dedicated navigation section.  Strip the old
     # control and persistent completed-status card from the Users workspace.
@@ -2879,10 +2931,18 @@ def user_detail_page(request: Request, tg_id: int):
     profile_links = billing.linked_count(int(tg_id), config.DB_PATH)
     with database() as connection:
         linked_rows = connection.execute(
-            "SELECT l.telegram_id,COALESCE(u.username,'') AS username FROM telegram_profile_links l LEFT JOIN users u ON u.tg_id=l.telegram_id WHERE l.profile_tg_id=? AND l.telegram_id<>? ORDER BY l.telegram_id",
+            """SELECT l.telegram_id,COALESCE(u.username,'') AS username,
+                      COALESCE(u.display_name,'') AS display_name
+                 FROM telegram_profile_links l
+                 LEFT JOIN users u ON u.tg_id=l.telegram_id
+                WHERE l.profile_tg_id=? AND l.telegram_id<>?
+                ORDER BY l.telegram_id""",
             (int(tg_id), int(tg_id)),
         ).fetchall()
-    linked_html = ''.join(f'<li>TG {int(x[0])} · @{html.escape(str(x[1] or "нет"))}</li>' for x in linked_rows) or '<li>Дополнительных аккаунтов нет</li>'
+    linked_html = ''.join(
+        f'<li>{html.escape(billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or "")))} · TG {int(x[0])}</li>'
+        for x in linked_rows
+    ) or '<li>Дополнительных аккаунтов нет</li>'
     price_value = str(row.get("custom_payment_price") or "")
     family_link_html = f'<div class="setting"><label>Семейные Telegram аккаунты</label><p>Каждый аккаунт должен самостоятельно открыть одноразовую ссылку и пройти проверку PIN. Аккаунт с собственной VPN подпиской привязать нельзя.</p><ul>{linked_html}</ul><form method="post" action="/users/id/{int(tg_id)}/family-link"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><button class="secondary" type="submit">Создать ссылку привязки на 30 минут</button></form></div>'
     billing_html = f'<div class="card" style="margin-top:14px"><h2>Оплата и семейный тариф</h2><p>Статус: <b>{html.escape(profile_status)}</b> · Telegram аккаунтов: <b>{profile_links}</b> · сумма за период: <b>{profile_price} ₽</b></p><p>Индивидуальная сумма заменяет автоматический тариф. Пустое поле снова включает расчёт по числу аккаунтов.</p><form method="post" action="/users/id/{int(tg_id)}/payment-price"><div class="setting"><label for="custom-payment-price">Индивидуальная сумма, ₽</label><input id="custom-payment-price" name="amount" type="number" min="1" max="100000000" step="1" value="{html.escape(price_value, quote=True)}" placeholder="Автоматически"></div><button>Сохранить сумму</button></form></div>' + family_link_html
@@ -3394,7 +3454,11 @@ def cabinet_page(request: Request, access: str = ""):
         raise HTTPException(404, "Личный кабинет не найден или ссылка недействительна")
     if str(access or "").strip():
         return RedirectResponse(url=public_path("/cabinet"), status_code=303, headers={"Cache-Control":"no-store, no-cache, must-revalidate","Pragma":"no-cache"})
-    username = str(user.get("username") or user.get("tg_id") or "Пользователь").strip().lstrip("@")
+    username = billing.telegram_identity_label(
+        int(user.get("tg_id") or 0),
+        str(user.get("username") or ""),
+        str(user.get("display_name") or ""),
+    )
     sub_id = str(user.get("sub_id") or "").strip()
     sub_url = ""
     if sub_id:
@@ -3420,7 +3484,13 @@ def cabinet_page(request: Request, access: str = ""):
         if not panel_user and uuid_value:
             panel_user = (snapshot.get("by_uuid") or {}).get(uuid_value)
         if panel_user:
-            user = {**user, **dict(panel_user), "tg_id": user.get("tg_id"), "username": user.get("username")}
+            user = {
+                **user,
+                **dict(panel_user),
+                "tg_id": user.get("tg_id"),
+                "username": user.get("username"),
+                "display_name": user.get("display_name"),
+            }
     except Exception as error:
         LOGGER.warning("Лайв-данные 3x-ui для кабинета недоступны: %s", error)
     try:
@@ -3432,7 +3502,7 @@ def cabinet_page(request: Request, access: str = ""):
             '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Личный кабинет</title></head><body style="font-family:system-ui,sans-serif;padding:32px">'
-            f'<h1>👤 Личный кабинет</h1><p>Здравствуйте, @{html.escape(username or str(user.get("tg_id") or "Пользователь"))}.</p>'
+            f'<h1>👤 Личный кабинет</h1><p>Здравствуйте, {html.escape(username or str(user.get("tg_id") or "Пользователь"))}.</p>'
             '<p>Данные кабинета временно обновляются. Попробуйте обновить страницу через несколько секунд.</p>'
             '</body></html>'
         )

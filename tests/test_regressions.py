@@ -77,7 +77,11 @@ def test_new_user_menu_and_stats():
         pytest.skip("aiogram is not installed in this isolated QA environment")
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from services.subscription_status import has_active_subscription
-    billing_stub = types.SimpleNamespace(payment_profile_id=lambda tg_id, _path: tg_id)
+    billing_stub = types.SimpleNamespace(
+        payment_profile_id=lambda tg_id, _path: tg_id,
+        subscription_label=lambda _user: 'Без подписки',
+        subscription_status_emoji=lambda _label: '🟡',
+    )
     ns = functions('main.py', ['get_user_menu', 'send_user_stats'], {
         'Message': object, 'InlineKeyboardBuilder': InlineKeyboardBuilder, 'asyncio': asyncio,
         'billing': billing_stub, 'config': types.SimpleNamespace(ADMIN_IDS=[], DB_PATH='unused'),
@@ -95,7 +99,30 @@ def test_new_user_menu_and_stats():
     asyncio.run(ns['send_user_stats'](types.SimpleNamespace(answer=answer), 1, 'alice'))
     assert 'Активной подписки нет' in answer.call_args.args[0]
     assert 'оплатите' in answer.call_args.args[0]
+    assert answer.call_args.args[0].startswith('🟡 Без подписки.')
     assert answer.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data == 'menu:buy'
+
+
+def test_expired_subscription_stats_uses_the_shared_warning_color():
+    if importlib.util.find_spec("aiogram") is None:
+        import pytest
+        pytest.skip("aiogram is not installed in this isolated QA environment")
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    billing_stub = types.SimpleNamespace(
+        payment_profile_id=lambda tg_id, _path: tg_id,
+        subscription_label=lambda _user: 'Подписка истекла',
+        subscription_status_emoji=lambda _label: '🟡',
+    )
+    ns = functions('main.py', ['send_user_stats'], {
+        'Message': object, 'InlineKeyboardBuilder': InlineKeyboardBuilder, 'asyncio': asyncio,
+        'billing': billing_stub, 'config': types.SimpleNamespace(DB_PATH='unused'),
+        'has_active_subscription': lambda _user: False,
+        'resolve_user': AsyncMock(return_value={'enable': 1, 'expiry_time': 1, 'email': 'expired@example.test'}),
+        'get_client_from_panel': AsyncMock(return_value=None),
+    })
+    answer = AsyncMock()
+    asyncio.run(ns['send_user_stats'](types.SimpleNamespace(answer=answer), 1, 'alice'))
+    assert answer.call_args.args[0].startswith('🟡 Подписка истекла.')
 
 
 def test_release_section_and_no_history():
@@ -198,7 +225,8 @@ def test_home_for_registered_user_without_vpn():
     from services.subscription_status import has_subscription
     billing_stub = types.SimpleNamespace(
         payment_profile_id=lambda tg_id, _path: tg_id,
-        subscription_label=lambda _user, _now: 'Подписка не оплачена',
+        subscription_label=lambda _user, _now: 'Без подписки',
+        subscription_status_emoji=lambda _label: '🟡',
     )
     ns = functions('main.py', ['send_home'], {
         'Message': object, 'has_subscription': has_subscription, 'asyncio': asyncio,
@@ -211,5 +239,30 @@ def test_home_for_registered_user_without_vpn():
     })
     message = types.SimpleNamespace(answer=AsyncMock(), from_user=types.SimpleNamespace(username='alice', full_name='Alice'))
     asyncio.run(ns['send_home'](message, 1))
-    assert 'Подписка не оплачена' in message.answer.call_args.args[0]
+    assert 'Без подписки' in message.answer.call_args.args[0]
     assert 'бессрочно' not in message.answer.call_args.args[0].lower()
+
+
+def test_home_builds_family_cabinet_link_for_the_member_not_the_owner():
+    from services.subscription_status import has_subscription
+    menu = AsyncMock(return_value=None)
+    billing_stub = types.SimpleNamespace(
+        payment_profile_id=lambda _tg_id, _path: 10,
+        subscription_label=lambda _user, _now: 'Семейная · подписка активна',
+        subscription_status_emoji=lambda _label: '🟢',
+    )
+    ns = functions('main.py', ['send_home'], {
+        'Message': object, 'has_subscription': has_subscription, 'asyncio': asyncio,
+        'billing': billing_stub, 'config': types.SimpleNamespace(DB_PATH='unused'),
+        'time': types.SimpleNamespace(time=lambda: 1),
+        'panel_from_timestamp': lambda _value: types.SimpleNamespace(strftime=lambda _format: 'date'),
+        'resolve_user': AsyncMock(return_value={'enable': 1, 'expiry_time': 1000, 'email': 'owner@example.test'}),
+        'get_client_from_panel': AsyncMock(return_value=None),
+        'get_user_menu_async': menu,
+        'home_text': lambda summary: summary,
+    })
+    message = types.SimpleNamespace(answer=AsyncMock())
+
+    asyncio.run(ns['send_home'](message, 20))
+
+    assert menu.await_args.args[0] == 20

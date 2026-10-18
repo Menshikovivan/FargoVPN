@@ -203,6 +203,17 @@ def get_user(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | 
     return dict(row) if row else None
 
 
+def _latest_username(tg_id: int, db_path: str | Path | None = None) -> str:
+    with _connect(db_path) as db:
+        row = db.execute(
+            """SELECT username FROM user_events
+                WHERE tg_id=? AND TRIM(COALESCE(username,''))<>''
+                ORDER BY id DESC LIMIT 1""",
+            (int(tg_id),),
+        ).fetchone()
+    return str(row[0] or "").strip().lstrip("@") if row else ""
+
+
 def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
     with _connect(db_path) as db:
         mapping = db.execute(
@@ -210,10 +221,21 @@ def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> d
         ).fetchone()
     profile_tg_id = int(mapping[0]) if mapping and int(mapping[0] or 0) > 0 else int(tg_id)
     user = get_user(profile_tg_id, db_path)
-    if user:
-        return user
-    # Cabinet authentication is local and fast; do not run a live 3x-ui scan here.
-    return None
+    if not user:
+        return None
+    user = dict(user)
+    if profile_tg_id != int(tg_id):
+        member = get_user(int(tg_id), db_path) or {}
+        user.update(
+            {
+                "tg_id": int(tg_id),
+                "username": str(member.get("username") or _latest_username(int(tg_id), db_path)),
+                "display_name": str(member.get("display_name") or ""),
+            }
+        )
+    elif not str(user.get("username") or "").strip():
+        user["username"] = _latest_username(int(tg_id), db_path)
+    return user
 
 
 def resolve_token(token: str, db_path: str | Path | None = None) -> dict[str, Any] | None:
@@ -240,4 +262,3 @@ def resolve_token(token: str, db_path: str | Path | None = None) -> dict[str, An
     if LEGACY_TOKEN_RE.fullmatch(raw) and verify_token(raw, str(user.get("sub_id") or "")) != tg_id:
         return None
     return user
-

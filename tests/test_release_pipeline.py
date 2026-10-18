@@ -26,8 +26,8 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.24"] * 2
-    assert "## 5.1.24" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.25"] * 2
+    assert "## 5.1.25" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_public_surface_filters_runtime_material():
     m=load_update_module()
@@ -262,8 +262,8 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.24"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.24"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.25"
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.25"
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
     assert "5.1.20 всегда используется полный профиль" in installer
 

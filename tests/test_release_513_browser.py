@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 from tempfile import gettempdir
 import json
+import os
 import re
 import pytest
 
@@ -64,7 +65,7 @@ def extract_publish_handler(source_path: Path) -> str:
 def test_512_messages_reproduce_redirect_when_page_controller_is_blocked():
     panel_js = (ARCHIVE_SRC/'app/static/panel.js').read_text(encoding='utf-8')
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'), args=['--no-sandbox'])
         page = browser.new_page()
         nav = []
         page.on('framenavigated', lambda f: nav.append(f.url) if f == page.main_frame else None)
@@ -87,7 +88,7 @@ def test_513_messages_no_navigation_and_live_echo():
     html = """<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><div data-message-live-feed='1' data-selected-tg-id='123' data-direction='all' data-message-kind='all' data-global-last-id='0' data-messages-path='/messages' data-feed-path='/api/panel/messages/feed'><div data-message-list></div><input data-message-search><div data-message-chat data-selected-tg-id='123'></div><form id='messages-compose-form' data-no-navigation='1' data-ajax-form='1' action='/users/123/message' method='post'><textarea id='messages-compose-text'></textarea><input id='media' type='file'><div id='messages-compose-status' hidden></div><button id='messages-compose-send' type='submit'>Отправить</button><button id='messages-compose-retry' type='button' hidden>Повторить</button></form><div data-message-dialog-count></div></div>"""
     fake = """<script>window.fetch=async(url,opts)=>{if(opts&&opts.method==='POST'){return {ok:true,status:200,type:'basic',url:String(url),headers:new Headers({'content-type':'application/json'}),json:async()=>({ok:true,event:{id:9001,tg_id:123,direction:'out',message_kind:'message',delivery_status:'delivered',display_username:'tester',created_at:'2026-10-09 00:30:00',text:'Привет'}})}};return {ok:true,status:200,type:'basic',url:String(url),headers:new Headers({'content-type':'application/json'}),json:async()=>({next_after_id:0,dialogs:[],selected_events:[],unread:{total:0,items:[]}})}};</script>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'), args=['--no-sandbox'])
         page = browser.new_page(); errors=[]; nav=[]
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('framenavigated', lambda f: nav.append(f.url) if f == page.main_frame else None)
@@ -115,7 +116,7 @@ def test_512_logs_do_not_switch_when_inline_controller_is_missing_and_513_does()
     logs_js=extract_logs_script(ARCHIVE_SRC/'app/webapp.py')
     html = """<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><select id='logs-service'><option value='app'>app</option><option value='github-publish'>github</option></select><select id='logs-lines'><option value='100'>100</option><option value='1000'>1000</option></select><select id='logs-level'><option value=''>Все</option><option value='ERROR'>ERROR</option></select><input id='logs-query'><button id='logs-refresh'>Обновить</button><button id='logs-retry' type='button' hidden>Повторить</button><input id='logs-auto' type='checkbox'><a id='logs-download' href='#'>Скачать</a><span id='logs-loading'></span><pre id='logs-output'></pre><div id='backup-live-panel'><span id='backup-live-status'></span><span id='backup-live-archive'></span><span id='backup-live-phase'></span><span id='backup-live-progress-bar'></span><span id='backup-live-progress-text'></span><div id='backup-live-events'></div></div>"""
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+        browser=pw.chromium.launch(headless=True,executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'),args=['--no-sandbox'])
         # 5.1.12: no page-specific logs controller executes.
         p=browser.new_page(); calls=[]
         p.set_content(html)
@@ -142,7 +143,7 @@ def test_512_github_auth_reproduces_redirect_and_513_stays_in_place():
     handler=extract_github_handler(ARCHIVE_SRC/'app/webapp.py')
     base="""<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><form id='github-test-form' method='post' action='/updates/github/test'><button id='github-test-button' type='submit'>Проверить авторизацию GitHub</button><span id='github-test-status'></span></form>"""
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'), args=['--no-sandbox'])
         p=browser.new_page(); nav=[]; p.on('framenavigated',lambda f: nav.append(f.url) if f==p.main_frame else None)
         p.set_content(base); p.add_script_tag(content=panel_512)
         p.evaluate("window.fetch=async()=>({redirected:true,ok:true,status:200,type:'basic',url:'about:blank#updates',headers:new Headers(),json:async()=>({})})")
@@ -174,7 +175,7 @@ def test_release_client_version_and_nginx_contract_are_present():
 def test_513_client_server_version_mismatch_shows_refresh_banner():
     panel=(CURRENT/'static/panel.js').read_text(encoding='utf-8')
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'), args=['--no-sandbox'])
         page=browser.new_page()
         page.set_content("<meta name='fargovpn-app-version' content='5.1.12'><div id='global-update-slot'></div><main>panel</main>")
         page.add_script_tag(content=panel)
@@ -189,7 +190,7 @@ def test_512_publish_button_is_dead_without_controller_and_513_starts_ajax_uploa
     publish_js=extract_publish_handler(CURRENT/'webapp.py')
     base="""<!doctype html><meta name='fargovpn-csrf-token' content='csrf'><form id='publish-update-form' method='post' action='/updates/publish'><input id='publish-archive' type='file' name='archive'><button id='publish-button' type='BUTTON'>Загрузить обновление в GitHub</button><button id='publish-cancel-button' type='button' disabled>Отменить</button><div id='upload-progress'><span id='upload-progress-bar'></span><span id='upload-progress-text'></span></div><div id='github-publish-progress'><span id='github-publish-progress-bar'></span><span id='github-publish-progress-text'></span><span id='github-publish-progress-value'></span><pre id='github-publish-live-log'></pre></div></form><div id='update-progress-bar'></div><span id='update-progress-value'></span><span id='update-message'></span><span id='update-phase'></span><span id='update-elapsed'></span><div id='update-connection-note'></div><div id='update-error'></div><span id='update-state'></span><span id='update-current-version'></span><pre id='update-live-output'></pre>"""
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+        browser=pw.chromium.launch(headless=True,executable_path=os.environ.get('FARGOVPN_CHROMIUM', '/usr/bin/chromium'),args=['--no-sandbox'])
         p=browser.new_page(); p.set_content(base); p.add_script_tag(content=panel_512)
         p.evaluate("window.__xhrCount=0;window.QAXHR=function(){this.upload={}};window.QAXHR.prototype.open=function(){};window.QAXHR.prototype.setRequestHeader=function(){};window.QAXHR.prototype.send=function(){window.__xhrCount++};window.XMLHttpRequest=window.QAXHR")
         p.locator('#publish-button').click(); p.wait_for_timeout(150)

@@ -27,6 +27,7 @@ from typing import Any, Iterable
 import db as database_adapter
 import config
 import message_journal
+from backup_archive import write_verified_archive
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 from log_security import install_log_redaction
@@ -709,6 +710,8 @@ def _application_row_counts(dsn: str) -> dict[str, int]:
         for table in ("users", "payments", "user_events", "audit_log"):
             if connection.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0]:
                 counts[table] = int(connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+        if "users" not in counts:
+            raise RuntimeError("База FargoVPN не содержит обязательную таблицу users")
         return counts
 
 
@@ -734,7 +737,7 @@ def create_backup() -> Path:
     root = Path(config.BACKUP_DIR)
     root.mkdir(parents=True, exist_ok=True)
     version = (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").is_file() else "unknown"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     archive = root / f"vpn_service_full_backup_{stamp}.tar.gz"
     with tempfile.TemporaryDirectory(prefix="vpn_service_backup_") as temp_name:
         stage = Path(temp_name) / "vpn_service_backup"
@@ -779,6 +782,12 @@ def create_backup() -> Path:
             xui_integrity = _sqlite_integrity(xui_dump)
             if xui_integrity != "ok":
                 raise RuntimeError(f"SQLite 3x-ui integrity_check: {xui_integrity}")
+            with sqlite3.connect(f"file:{xui_dump}?mode=ro", uri=True) as connection:
+                user_tables = connection.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone()[0]
+            if not user_tables:
+                raise RuntimeError("SQLite 3x-ui snapshot не содержит пользовательских таблиц")
         _live_event("database", "Копия базы 3x-ui готова", progress=62)
 
         if env_path.is_file():
@@ -846,56 +855,24 @@ def create_backup() -> Path:
             "includes_venv": bool(getattr(config, "BACKUP_INCLUDE_VENV", False)),
             "includes_external_proxy": False,
             "application_row_counts": app_counts,
+            "application_row_counts_note": "Live counts sampled after the dump; informational only. Restore verifies staged data against the committed import.",
             "xui_integrity": xui_integrity,
             "components": components,
             "inventory": inventory,
             "telegram_delivery": {"part_mb": min(49, max(5, int(getattr(config, "BACKUP_TELEGRAM_PART_MB", 45))))},
             "restore_notes": [
                 "users-only восстанавливает users/payments/referral_rewards и не заменяет security/audit/push/worker состояние.",
-                "full восстанавливает FargoVPN PostgreSQL, 3x-ui database, configs, Xray configs, VAPID key и FargoVPN/3x-ui systemd units.",
+                "full переносит данные FargoVPN и 3x-ui в установленную схему и только разрешенные бизнес-настройки; архивные исходники, .env, конфигурации сервисов, systemd units и VAPID key не применяются.",
+                "Существующие конфигурации и ключи целевого сервера остаются действующими; архивные копии этих файлов являются справочными данными.",
                 "Внешний Nginx/L4 reverse-proxy намеренно не входит в backup/restore.",
-                "Секреты из config.py/.env/x-ui environment являются частью полного восстановления и должны храниться как конфиденциальные данные.",
+                "Архив содержит конфиденциальные резервные копии конфигураций и окружения и должен храниться как secret-bearing data.",
             ],
         }
         (stage / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (stage / "checksums.json").write_text(json.dumps(checksums, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
         _live_event("package", f"Упаковывается архив {archive.name}", progress=84)
-        with tarfile.open(archive, "w:gz", compresslevel=6) as tar:
-            tar.add(stage, arcname="vpn_service_backup", recursive=True)
-        try:
-            with tarfile.open(archive, "r:gz") as tar:
-                members = tar.getmembers()
-                if not any(member.name == "vpn_service_backup/manifest.json" for member in members):
-                    raise RuntimeError("Созданный архив не содержит manifest.json")
-                if not any(member.name == "vpn_service_backup/checksums.json" for member in members):
-                    raise RuntimeError("Созданный архив не содержит checksums.json")
-                total = 0
-                for member in members:
-                    name = member.name.replace("\\", "/")
-                    parts = name.split("/")
-                    # tar.add(stage, arcname="vpn_service_backup") intentionally
-                    # creates a directory member named exactly vpn_service_backup.
-                    # That root entry is safe and must be accepted; every payload
-                    # member still has to stay strictly below it.
-                    if name != "vpn_service_backup" and not name.startswith("vpn_service_backup/"):
-                        raise RuntimeError(f"Созданный архив содержит путь вне корня резервной копии: {name!r}")
-                    if any(part in {"", ".", ".."} for part in parts):
-                        raise RuntimeError(f"Созданный архив содержит небезопасный путь: {name!r}")
-                    if member.issym() or member.islnk() or member.isdev() or not (member.isfile() or member.isdir()):
-                        raise RuntimeError("Созданный архив содержит небезопасные специальные файлы")
-                    if member.isfile():
-                        total += int(member.size or 0)
-                        # Force gzip/tar decompression through the full payload once.
-                        with tar.extractfile(member) as stream:
-                            if stream is not None:
-                                while stream.read(1024 * 1024):
-                                    pass
-                if total <= 0:
-                    raise RuntimeError("Созданный архив пуст")
-        except (tarfile.TarError, OSError) as exc:
-            raise RuntimeError(f"Проверка созданного tar.gz не удалась: {exc}") from exc
-    os.chmod(archive, 0o600)
+        write_verified_archive(stage, archive)
     _live_event("package", "Архив создан и проверен", status="created", progress=100, detail=f"{archive.stat().st_size} байт")
     _write_live_state({**read_live_state(), "archive": str(archive), "status": "created", "phase": "package", "progress": 100})
     logger.info("performance operation=backup_create archive=%s duration_ms=%s size_bytes=%s", archive.name, int((time.monotonic()-started)*1000), archive.stat().st_size)

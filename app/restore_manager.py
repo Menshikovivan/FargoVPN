@@ -348,7 +348,12 @@ def find_xui_artifact(root: Path, manifest: dict[str, Any]) -> tuple[str, Path]:
         if path.suffix.lower() == ".sql":
             return "PostgreSQL", path
         if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} and _sqlite_integrity(path) == "ok":
-            return "SQLite", path
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+                user_tables = int(connection.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone()[0])
+            if user_tables:
+                return "SQLite", path
     raise RuntimeError("В архиве отсутствует допустимая база 3x-ui")
 
 
@@ -715,17 +720,27 @@ def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tupl
     _clone_live_schema(schema_dsn, dsn, section="post-data")
 
 
-def app_counts(dsn: str) -> dict[str, int]:
+def app_counts(dsn: str, tables: tuple[str, ...] = APP_HEALTH_TABLES) -> dict[str, int]:
     import psycopg
     with psycopg.connect(raw_dsn(dsn)) as conn:
         result: dict[str, int] = {}
-        for table in APP_HEALTH_TABLES:
+        for table in tables:
             safe = _pg_identifier(table, "таблицы")
             if conn.execute("SELECT to_regclass(%s)", (f"public.{safe}",)).fetchone()[0]:
                 result[table] = int(conn.execute(f'SELECT count(*) FROM "{safe}"').fetchone()[0])
         if "users" not in result:
             raise RuntimeError("После восстановления не найдена таблица users")
         return result
+
+
+def _verify_imported_counts(source_counts: dict[str, int], restored_counts: dict[str, int]) -> None:
+    for table, expected in source_counts.items():
+        actual = restored_counts.get(table)
+        if actual is None or int(actual) != int(expected):
+            raise RuntimeError(
+                f"Проверка восстановленной таблицы {table} не прошла: "
+                f"ожидалось {expected}, получено {actual}"
+            )
 
 
 def _table_columns(conn: Any, table: str, schema: str = "public") -> list[str]:
@@ -1387,19 +1402,17 @@ def _restore_users_only(root: Path, manifest: dict[str, Any], safety_archive: Pa
         raise RuntimeError("Текущая FargoVPN установка не использует PostgreSQL")
     suffix = time.strftime("%Y%m%d_%H%M%S")
     staging_dsn, staging_name = make_staging_db(target_dsn, suffix)
-    expected = manifest.get("application_row_counts") or {}
     snapshot_schema = ""
     try:
         stop_services(include_xui=False)
         restore_application_to_staging(root, manifest, staging_dsn)
         staged_counts = app_counts(staging_dsn)
-        if expected.get("users") is not None and int(staged_counts.get("users", -1)) != int(expected["users"]):
-            raise RuntimeError(f"Проверка users в архиве не прошла: ожидалось {expected['users']}, получено {staged_counts.get('users')}")
-        result = _selected_restore_with_snapshot(target_dsn, staging_dsn, expected)
+        result = _selected_restore_with_snapshot(target_dsn, staging_dsn, staged_counts)
         snapshot_schema = str(result["snapshot_schema"])
         # The health-check is intentionally done while services are still stopped
         # only after the committed database is verified by row counts.
-        final_counts = app_counts(target_dsn)
+        final_counts = app_counts(target_dsn, USERS_ONLY_TABLES)
+        _verify_imported_counts(result["counts"], final_counts)
         start_services(full=str(getattr(config, "INSTALL_PROFILE", "full")).lower() == "full")
         snapshot_schema = str(result["snapshot_schema"])
         verify_live(str(getattr(config, "INSTALL_PROFILE", "full")).lower() == "full", Path(config.__file__).resolve())
@@ -1457,9 +1470,6 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
 
         restore_application_to_staging(root, manifest, app_staging_dsn)
         staged_counts = app_counts(app_staging_dsn)
-        expected = manifest.get("application_row_counts") or {}
-        if expected.get("users") is not None and int(staged_counts.get("users", -1)) != int(expected["users"]):
-            raise RuntimeError(f"Проверка users после подготовки FargoVPN не прошла: ожидалось {expected['users']}, получено {staged_counts.get('users')}")
         write_restore_state(job_id="", status="running", phase="database", progress=28, message="Базы подготовлены и проверены", mode="full")
 
         _target_name, app_rollback_name = _db_swap_begin(target_dsn, app_staging_name)
@@ -1483,8 +1493,7 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
         # to recreate a missing users table silently because the staged DB was already validated.
         subprocess.run([sys.executable, str(APP_DIR / "init_db.py")], check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         final_counts = app_counts(target_dsn)
-        if expected.get("users") is not None and int(final_counts.get("users", -1)) != int(expected["users"]):
-            raise RuntimeError(f"Контрольная проверка users после полного восстановления не прошла: ожидалось {expected['users']}, получено {final_counts.get('users')}")
+        _verify_imported_counts(staged_counts, final_counts)
         write_restore_state(job_id="", status="running", phase="services", progress=78, message="Конфигурация установлена; запускаются bot/web/3x-ui", mode="full")
         start_services(full=True)
         verify_live(True, target_config)

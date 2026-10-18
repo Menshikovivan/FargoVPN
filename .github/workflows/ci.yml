@@ -30,6 +30,14 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r tests/requirements-dev.txt
 
+      - name: Install Chromium for browser tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m playwright install --with-deps chromium
+          browser_path=$(python -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')
+          echo "FARGOVPN_CHROMIUM=$browser_path" >> "$GITHUB_ENV"
+
       - name: Validate shell syntax
         shell: bash
         run: |

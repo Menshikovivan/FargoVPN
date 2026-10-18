@@ -10,7 +10,8 @@ const apply=()=>{
  const query=norm(search.value),st=status.value,so=sort.value,od=order.value;
  const filtered=all.filter(row=>{
   const matchesQuery=!query||norm(row.dataset.userSearch).includes(query);
-  const matchesStatus=st==='all'||(st==='online'&&row.dataset.userOnline==='1')||row.dataset.userStatus===st;
+  const rowStatuses=String(row.dataset.userStatus||'').split(/\s+/);
+  const matchesStatus=st==='all'||(st==='online'&&row.dataset.userOnline==='1')||rowStatuses.includes(st);
   const day=row.dataset.userRegistered||'';return matchesQuery&&matchesStatus&&(!fromDay||(day&&day>=fromDay))&&(!toDay||(day&&day<=toDay));
  });
  const keys={remaining:'userRemaining',last_online:'userLastOnline',traffic:'userTraffic',quota:'userQuota',name:'userName',registration:'userRegistered'};

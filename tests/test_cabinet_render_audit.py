@@ -1,5 +1,6 @@
 """Render the actual cabinet functions without OS services or production dependencies."""
 import ast
+from contextlib import contextmanager
 import html
 import json
 import os
@@ -38,6 +39,19 @@ def cabinet_functions(sub_url='https://example.test/sub'):
         _cabinet_bot_username=lambda: 'testbot',
         referral_codes=SimpleNamespace(ensure_referral_code=lambda *args: 'TEST'),
         bytes_to_gb=lambda value: 0, remaining_label=lambda *args: '0',
+        billing=SimpleNamespace(
+            telegram_identity_label=lambda tg_id, username, display_name:
+                '@' + username if username else display_name or f'ID {tg_id}',
+            subscription_label=lambda user, now_ms: 'Без подписки',
+            subscription_status_tone=lambda label: (
+                'bad' if 'отключён' in str(label).casefold()
+                else 'warn' if any(marker in str(label).casefold() for marker in (
+                    'нет профиля', 'не зарегистрирован', 'без подписки', 'истек'
+                ))
+                else 'good'
+            ),
+        ),
+        user_subscription_label=lambda user, now_ms: 'Без подписки',
         _cabinet_session_user=lambda *args: {'tg_id': 1, 'sub_id': 'test'},
         current_subscription_url_sync=lambda *args, **kwargs: sub_url,
         HTMLResponse=lambda body, **kwargs: SimpleNamespace(body=body, **kwargs))
@@ -51,6 +65,74 @@ def test_cabinet_stylesheet_and_telegram_script_are_separate_elements():
     tags = Tags(markup).tags
     assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.20'}) in tags
     assert ('script', {'src': 'https://telegram.org/js/telegram-web-app.js'}) in tags
+
+
+def test_cabinet_uses_full_name_when_telegram_username_is_missing():
+    ns = cabinet_functions()
+    markup = ns['_cabinet_markup']('', {'tg_id': 2, 'display_name': 'Иван Петров'}, '')
+    assert '<h1>Иван Петров</h1>' in markup
+    assert '<h1>@ID 2</h1>' not in markup
+
+
+def test_user_subscription_badges_use_yellow_for_no_subscription():
+    tree = ast.parse((ROOT / 'app/webapp.py').read_text(encoding='utf-8'))
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == 'user_subscription_badge'
+    )
+    namespace = {
+        'html': html,
+        'billing': SimpleNamespace(subscription_status_tone=lambda label: (
+            'warn' if any(marker in str(label).casefold() for marker in ('без подписки', 'не зарегистрирован', 'истек'))
+            else 'bad' if any(marker in str(label).casefold() for marker in ('заблокирован', 'отключён'))
+            else 'good'
+        )),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'user_subscription_badge', 'exec'), namespace)
+
+    assert 'badge warn' in namespace['user_subscription_badge']('Без подписки')
+    assert 'badge warn' in namespace['user_subscription_badge']('Семейная · без подписки')
+    assert 'badge warn' in namespace['user_subscription_badge']('Подписка истекла')
+    assert 'badge good' in namespace['user_subscription_badge']('Подписка активна')
+
+
+def test_family_cabinet_keeps_member_identity_and_owner_subscription():
+    tree = ast.parse((ROOT / 'app/cabinet_service.py').read_text(encoding='utf-8'))
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == 'resolve_user_for_cabinet'
+    )
+    members = {
+        10: {'tg_id': 10, 'username': 'owner', 'display_name': 'Owner', 'sub_id': 'owner-sub'},
+        20: {'tg_id': 20, 'username': '', 'display_name': 'Иван Петров'},
+    }
+
+    class Result:
+        def fetchone(self):
+            return (10,)
+
+    class Connection:
+        def execute(self, *_args):
+            return Result()
+
+    @contextmanager
+    def connect(_path):
+        yield Connection()
+
+    namespace = {
+        'Path': Path,
+        'Any': object,
+        '_connect': connect,
+        '_latest_username': lambda *_args: 'membernick',
+        'get_user': lambda tg_id, _path: members.get(tg_id),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'resolve_user_for_cabinet', 'exec'), namespace)
+    user = namespace['resolve_user_for_cabinet'](20, 'unused')
+
+    assert user['tg_id'] == 20
+    assert user['username'] == 'membernick'
+    assert user['display_name'] == 'Иван Петров'
+    assert user['sub_id'] == 'owner-sub'
 
 
 def test_cabinet_interactive_script_parses(tmp_path):
