@@ -2173,10 +2173,51 @@ def subscription_report_text() -> str:
     return "\n".join(lines)
 
 
+def split_subscription_report(text: str, max_length: int = 3900) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines(keepends=True):
+        if len(line.encode("utf-16-le")) // 2 > max_length:
+            parts: list[str] = []
+            part: list[str] = []
+            part_length = 0
+            tokens = re.findall(
+                r"<[^>]*>|&(?:#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);|.",
+                line,
+                re.DOTALL,
+            )
+            for token in tokens:
+                token_length = len(token.encode("utf-16-le")) // 2
+                if token_length > max_length:
+                    raise ValueError("Элемент отчёта о подписках превышает допустимый размер сообщения Telegram")
+                if part and part_length + token_length > max_length:
+                    parts.append("".join(part))
+                    part = []
+                    part_length = 0
+                part.append(token)
+                part_length += token_length
+            if part:
+                parts.append("".join(part))
+        else:
+            parts = [line]
+        for piece in parts:
+            piece_length = len(piece.encode("utf-16-le")) // 2
+            if current and current_length + piece_length > max_length:
+                chunks.append("".join(current))
+                current = []
+                current_length = 0
+            current.append(piece)
+            current_length += piece_length
+    if current:
+        chunks.append("".join(current))
+    return chunks or [text]
+
+
 async def send_subscription_report(message: Message) -> None:
     # Keep the synchronous PostgreSQL query off the Telegram event loop.
     text = await asyncio.to_thread(subscription_report_text)
-    chunks = [text[index:index + 3900] for index in range(0, len(text), 3900)] or [text]
+    chunks = split_subscription_report(text)
     for index, chunk in enumerate(chunks):
         await message.answer(
             chunk,
