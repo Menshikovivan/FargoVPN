@@ -2207,7 +2207,7 @@ def subscription_report_text() -> str:
             state = f"{label} {billing.subscription_status_emoji(label)}"
         elif label == "Заблокирован" or "отключён" in label.lower():
             state = f"{label} {billing.subscription_status_emoji(label)}"
-        elif label.endswith("бессрочная подписка"):
+        elif label.casefold().endswith("бессрочная подписка"):
             state = f"{label} {billing.subscription_status_emoji(label)} ♾"
         else:
             expiry_value = int(row[14] or 0) if family_owner else int(row[3] or 0)

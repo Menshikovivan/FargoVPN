@@ -225,7 +225,14 @@ def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> d
         return None
     user = dict(user)
     if profile_tg_id != int(tg_id):
-        owner_username = str(user.get("username") or _latest_username(profile_tg_id, db_path))
+        placeholder_username = f"id_{profile_tg_id}".casefold()
+        owner_username = str(user.get("username") or "").strip().lstrip("@")
+        if owner_username.casefold() == placeholder_username:
+            owner_username = ""
+        if not owner_username:
+            owner_username = str(_latest_username(profile_tg_id, db_path) or "").strip().lstrip("@")
+            if owner_username.casefold() == placeholder_username:
+                owner_username = ""
         owner_display_name = str(user.get("display_name") or "")
         member = get_user(int(tg_id), db_path) or {}
         user.update(
