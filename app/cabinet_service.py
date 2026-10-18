@@ -225,12 +225,23 @@ def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> d
         return None
     user = dict(user)
     if profile_tg_id != int(tg_id):
+        owner_username = str(user.get("username") or _latest_username(profile_tg_id, db_path))
+        owner_display_name = str(user.get("display_name") or "")
         member = get_user(int(tg_id), db_path) or {}
         user.update(
             {
                 "tg_id": int(tg_id),
                 "username": str(member.get("username") or _latest_username(int(tg_id), db_path)),
                 "display_name": str(member.get("display_name") or ""),
+                "family_subscription": True,
+                "family_owner_tg_id": profile_tg_id,
+                "family_owner_username": owner_username,
+                "family_owner_display_name": owner_display_name,
+                "family_owner_has_subscription": any(
+                    str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id")
+                ),
+                "family_owner_expiry_time": int(user.get("expiry_time") or 0),
+                "family_owner_enable": bool(user.get("enable", True)),
             }
         )
     elif not str(user.get("username") or "").strip():

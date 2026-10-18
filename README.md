@@ -1,6 +1,6 @@
-# FargoVPN 5.1.26
+# FargoVPN 5.1.27
 
-Документация релизной версии 5.1.26. История изменений приведена в [app/CHANGELOG.md](app/CHANGELOG.md).
+Документация релизной версии 5.1.27. История изменений приведена в [app/CHANGELOG.md](app/CHANGELOG.md).
 
 
 
@@ -12,7 +12,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 [![3x-ui](https://img.shields.io/badge/3x--ui-integrated-444444)](https://github.com/MHSanaei/3x-ui)
 
-**Текущая версия: 5.1.26**
+**Текущая версия: 5.1.27**
 
 FargoVPN рассчитан на владельцев VPN-сервисов, которым нужен готовый пользовательский Telegram-бот, административная веб-панель, управление подписками через 3x-ui и безопасное обновление без ручной работы с исходниками.
 
@@ -104,8 +104,8 @@ curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install
 Для новой версии до её первой публикации в GitHub Releases используйте локальный release-архив. Распакуйте его на сервере и запустите корневой `install.sh`: он обнаружит соседний `app/VERSION` и установит именно этот архив, не скачивая старый `latest` из GitHub.
 
 ```bash
-tar -xzf FargoVPN-5.1.26_FULL.tar.gz
-cd FargoVPN-5.1.26
+tar -xzf FargoVPN-5.1.27_FULL.tar.gz
+cd FargoVPN-5.1.27
 sudo ./install.sh
 ```
 

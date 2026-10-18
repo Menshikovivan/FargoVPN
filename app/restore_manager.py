@@ -79,11 +79,79 @@ def _safe_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def read_restore_state() -> dict[str, Any]:
+    state = _read_restore_state_raw()
+    if str(state.get("status") or "") not in {"queued", "validating", "running", "rolling_back"}:
+        return state
+
+    try:
+        updated_at = datetime.fromisoformat(str(state.get("updated_at") or ""))
+        age = time.time() - updated_at.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        age = 31.0
+    if age < 30:
+        return state
+
+    job_id = str(state.get("job_id") or "")
+    if job_id and _restore_worker_active(job_id) is not False:
+        return state
+
+    state.update(
+        {
+            "status": "interrupted",
+            "phase": "interrupted",
+            "message": "Предыдущее восстановление было прервано; активной службы восстановления нет.",
+            "error": "Служба восстановления не активна",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    state.pop("manifest_version", None)
+    _safe_json_write(RESTORE_STATE_PATH, state)
+    logger.warning("Marked stale restore job %s as interrupted", job_id or "<missing>")
+    return state
+
+
+def _read_restore_state_raw() -> dict[str, Any]:
     try:
         data = json.loads(RESTORE_STATE_PATH.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _restore_worker_active(job_id: str) -> bool | None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                f"vpn-service-restore-{job_id}.service",
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--value",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        logger.warning("Could not verify restore worker %s: %s", job_id, error)
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or str(result.returncode)).strip()
+        logger.warning("systemctl could not verify restore worker %s: %s", job_id, detail)
+        return None
+
+    load_state, active_state = (result.stdout.splitlines() + ["", ""])[:2]
+    if load_state != "loaded":
+        return False
+    if active_state in {"active", "activating", "reloading", "deactivating"}:
+        return True
+    if active_state in {"inactive", "failed"}:
+        return False
+    return None
 
 
 def write_restore_state(
@@ -99,7 +167,10 @@ def write_restore_state(
     rollback: bool | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    current = read_restore_state()
+    current = _read_restore_state_raw()
+    if job_id and str(current.get("job_id") or "") != str(job_id):
+        current.pop("error", None)
+        current.pop("result", None)
     payload: dict[str, Any] = {
         **current,
         "status": str(status),

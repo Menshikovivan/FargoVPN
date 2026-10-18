@@ -1039,7 +1039,12 @@ async def resolve_user(user_id: int, username: str | None) -> dict | None:
         return await asyncio.to_thread(db_get_user, user_id)
 
 
-async def send_home(message: Message, user_id: int) -> None:
+async def send_home(
+    message: Message,
+    user_id: int,
+    username: str | None = None,
+    display_name: str | None = None,
+) -> None:
     profile_id = await asyncio.to_thread(billing.payment_profile_id, user_id, config.DB_PATH)
     user = await resolve_user(profile_id, None)
     summary = ""
@@ -1064,12 +1069,23 @@ async def send_home(message: Message, user_id: int) -> None:
         home_text(summary=summary),
         parse_mode="HTML",
         reply_markup=await get_user_menu_async(
-            user_id, user
+            user_id, user, username, display_name
         ),
     )
 
 
-async def send_user_stats(message: Message, user_id: int, username: str | None) -> None:
+async def send_user_stats(
+    message: Message,
+    user_id: int,
+    username: str | None,
+    display_name: str | None = None,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            refresh_telegram_identity, int(user_id), username, display_name
+        )
+    except Exception as error:
+        logger.debug("Не удалось обновить identity перед кабинетом %s: %s", user_id, error)
     profile_id = await asyncio.to_thread(billing.payment_profile_id, user_id, config.DB_PATH)
     u = await resolve_user(profile_id, None)
     panel_client = await get_client_from_panel(str(u.get("email") or "")) if u else None
@@ -1352,7 +1368,12 @@ async def cmd_start(msg: Message, state: FSMContext):
         return
     await state.clear()
     await asyncio.to_thread(ensure_referral_code, int(msg.from_user.id))
-    await send_home(msg, msg.from_user.id)
+    await send_home(
+        msg,
+        msg.from_user.id,
+        msg.from_user.username,
+        msg.from_user.full_name,
+    )
 
 
 @dp.message(PendingInviteCodeFilter())
@@ -1388,7 +1409,12 @@ async def process_referral_code(msg: Message, state: FSMContext):
         return
     if result.status == "already_active":
         await state.clear()
-        await send_home(msg, int(msg.from_user.id))
+        await send_home(
+            msg,
+            int(msg.from_user.id),
+            msg.from_user.username,
+            msg.from_user.full_name,
+        )
         return
     if result.registered:
         await state.clear()
@@ -1521,10 +1547,20 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
         return
     if action == "home":
         await state.clear()
-        await send_home(call.message, user_id)
+        await send_home(
+            call.message,
+            user_id,
+            call.from_user.username,
+            call.from_user.full_name,
+        )
     elif action == "stats":
         await state.clear()
-        await send_user_stats(call.message, user_id, call.from_user.username)
+        await send_user_stats(
+            call.message,
+            user_id,
+            call.from_user.username,
+            call.from_user.full_name,
+        )
     elif action == "buy":
         await start_purchase(call.message, state, payer_tg_id=user_id)
     elif action == "support":
@@ -1671,7 +1707,12 @@ async def process_instruction(call: CallbackQuery):
 
 @dp.message(lambda m: m.text and ("Моя подписка" in m.text or "Статистика" in m.text))
 async def user_stats(msg: Message):
-    await send_user_stats(msg, msg.from_user.id, msg.from_user.username)
+    await send_user_stats(
+        msg,
+        msg.from_user.id,
+        msg.from_user.username,
+        msg.from_user.full_name,
+    )
 
 @dp.message(lambda m: m.text and "Купить" in m.text)
 async def buy_vpn(msg: Message, state: FSMContext):
@@ -2248,10 +2289,13 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
     if call.from_user.id not in config.ADMIN_IDS:
         await safe_callback_answer(call, "Недостаточно прав", show_alert=True)
         return
-    await safe_callback_answer(call)
+    action = str(call.data or "").split(":", 1)[-1]
+    if action == "subscriptions":
+        await safe_callback_answer(call, "Формирую отчёт подписок…")
+    else:
+        await safe_callback_answer(call)
     if not call.message:
         return
-    action = str(call.data or "").split(":", 1)[-1]
     if action == "summary":
         await call.message.answer(await asyncio.to_thread(admin_summary_text), parse_mode="HTML", reply_markup=get_admin_menu())
     elif action == "users":
@@ -2259,7 +2303,18 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
     elif action == "sync":
         await run_admin_sync(call.message)
     elif action == "subscriptions":
-        await send_subscription_report(call.message)
+        try:
+            await send_subscription_report(call.message)
+        except Exception:
+            logger.exception("Не удалось отправить отчёт подписок из Telegram-админки")
+            try:
+                await call.message.answer(
+                    "❌ Не удалось сформировать или отправить отчёт подписок. "
+                    "Проверьте журнал бота и повторите попытку.",
+                    reply_markup=get_admin_menu(),
+                )
+            except Exception:
+                logger.exception("Не удалось отправить администратору уведомление об ошибке отчёта")
     elif action == "backup":
         await run_admin_backup(call.message)
     elif action == "broadcast":
@@ -2800,7 +2855,12 @@ async def manual_grant_process(msg: Message, state: FSMContext):
 
 @dp.message(lambda m: m.text and "Выйти" in m.text)
 async def back_to_user_menu(msg: Message):
-    await send_home(msg, msg.from_user.id)
+    await send_home(
+        msg,
+        msg.from_user.id,
+        msg.from_user.username,
+        msg.from_user.full_name,
+    )
 
 @dp.message(lambda m: m.text and "Подписки и уведомления" in m.text)
 async def admin_subscriptions_report(msg: Message):

@@ -1308,6 +1308,16 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
             str(user.get("display_name") or ""),
         )
     )
+    if user.get("family_subscription"):
+        family_owner_name = billing.telegram_identity_label(
+            int(user.get("family_owner_tg_id") or 0),
+            str(user.get("family_owner_username") or ""),
+            str(user.get("family_owner_display_name") or ""),
+        )
+        username_clean += (
+            f"<br><small>Семейная подписка пользователя "
+            f"{html.escape(family_owner_name)}</small>"
+        )
     sub_escaped = html.escape(sub_url, quote=True)
     bot_username = html.escape(_cabinet_bot_username(), quote=True)
     invite_code = html.escape(referral_codes.ensure_referral_code(config.DB_PATH, int(user.get("tg_id") or 0)))
@@ -4451,6 +4461,7 @@ def backups(request: Request):
     restore_state = restore_manager.read_restore_state()
     restore_status = str(restore_state.get("status") or "idle")
     restore_active = restore_status in {"queued", "validating", "running", "rolling_back"}
+    restore_tone = "warn" if restore_active or restore_status in {"failed", "interrupted"} else "good"
     csrf = html.escape(session_csrf_token(request), quote=True)
     archives = sorted(folder.glob("*.tar.gz"), key=lambda item: item.stat().st_mtime, reverse=True)[:100]
     archive_options = "".join(
@@ -4477,7 +4488,7 @@ def backups(request: Request):
     disabled = " disabled" if restore_active else ""
     body = f'''<header><div><h1>Резервные копии и восстановление</h1><div class="subtitle">Полный архив FargoVPN + базы FargoVPN/3x-ui + настройки + Xray + systemd. Внешний Nginx/L4 не входит.</div></div><form method="post" action="/backups/create"><input type="hidden" name="csrf_token" value="{csrf}"><button>＋ Создать и отправить сейчас</button></form></header>
 {active_notice}
-<div class="card" style="margin-bottom:15px"><div class="section-title"><h2>Восстановление</h2><span class="badge {'warn' if restore_active else 'good'}">{html.escape(restore_status)}</span></div><p>Перед восстановлением автоматически создаётся страховочный полный бэкап. В случае ошибки выполняется откат изменённых данных и безопасных настроек. Установленные программы, systemd, ключи и настройки запуска сервисов сохраняются.</p><form method="post" action="/backups/restore" onsubmit="return confirmRestore(this)"><input type="hidden" name="csrf_token" value="{csrf}"><label>Архив<br><select name="archive" required{disabled}>{archive_options}</select></label><div style="margin-top:12px"><label><input type="radio" name="mode" value="users-only" checked{disabled}> Только пользователи и подписки — users, payments, referral_rewards. Остальные журналы, безопасность, Push и служебное состояние не заменяются.</label><br><label><input type="radio" name="mode" value="full"{disabled}> Все данные — FargoVPN PostgreSQL, данные 3x-ui и безопасные настройки сервиса. Программы, systemd, ключи и настройки запуска сервисов сохраняются.</label></div><div style="margin-top:12px"><button class="danger" type="submit"{disabled}>Восстановить выбранный архив</button></div></form></div>
+<div class="card" style="margin-bottom:15px"><div class="section-title"><h2>Восстановление</h2><span class="badge {restore_tone}">{html.escape(restore_status)}</span></div><p>Перед восстановлением автоматически создаётся страховочный полный бэкап. В случае ошибки выполняется откат изменённых данных и безопасных настроек. Установленные программы, systemd, ключи и настройки запуска сервисов сохраняются.</p><form method="post" action="/backups/restore" onsubmit="return confirmRestore(this)"><input type="hidden" name="csrf_token" value="{csrf}"><label>Архив<br><select name="archive" required{disabled}>{archive_options}</select></label><div style="margin-top:12px"><label><input type="radio" name="mode" value="users-only" checked{disabled}> Только пользователи и подписки — users, payments, referral_rewards. Остальные журналы, безопасность, Push и служебное состояние не заменяются.</label><br><label><input type="radio" name="mode" value="full"{disabled}> Все данные — FargoVPN PostgreSQL, данные 3x-ui и безопасные настройки сервиса. Программы, systemd, ключи и настройки запуска сервисов сохраняются.</label></div><div style="margin-top:12px"><button class="danger" type="submit"{disabled}>Восстановить выбранный архив</button></div></form></div>
 <div class="notice">Плановый таймер и ручная кнопка используют одну службу vpn-service-backup. В очереди повторной доставки Telegram: <strong>{pending_count}</strong>.</div>
 <div class="card table-wrap"><table><thead><tr><th>Архив</th><th>Размер</th><th>Дата</th><th>Действия</th></tr></thead><tbody>{rows or '<tr><td colspan="4">Бэкапов пока нет.</td></tr>'}</tbody></table></div><div class="card table-wrap" style="margin-top:15px"><div class="section-title"><h2>Последние доставки</h2></div><table><thead><tr><th>Дата</th><th>Файл</th><th>Telegram</th><th>Подробности</th></tr></thead><tbody>{run_rows or '<tr><td colspan="4">Запусков пока нет.</td></tr>'}</tbody></table></div>'''
     body += r'''<script>function confirmRestore(form){const mode=form.querySelector('input[name="mode"]:checked')?.value||'full';const archive=form.querySelector('select[name="archive"]')?.value||'';if(!archive)return false;const text=mode==='full'?'ПОЛНОЕ ВОССТАНОВЛЕНИЕ\n\nБудут восстановлены данные FargoVPN и 3x-ui и безопасные настройки сервиса в текущую схему. Установленные программы, systemd, .env, ключи, настройки запуска Xray/3x-ui и внешний Nginx/L4 сохраняются. Несовместимая схема будет отклонена.':'ВОССТАНОВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ\n\nБудут заменены только users, payments и referral_rewards. Аудит, безопасность, Push и служебные таблицы сохраняются.';return window.confirm(text+'\n\nАрхив: '+archive+'\n\nПеред началом будет создан страховочный полный бэкап текущего состояния. Продолжить?');}setTimeout(()=>window.location.reload(),15000);</script>'''
