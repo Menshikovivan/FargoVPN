@@ -77,16 +77,20 @@ def family_profile_map(db_path: str | None = None) -> dict[int, dict[str, Any]]:
         ).fetchall()
     profiles: dict[int, dict[str, Any]] = {}
     for row in rows:
+        telegram_id = int(row[0] or 0)
+        profile_tg_id = int(row[1] or 0)
+        if telegram_id <= 0 or profile_tg_id <= 0 or telegram_id == profile_tg_id:
+            continue
         profile = {
             "family_subscription": True,
-            "family_owner_tg_id": int(row[1] or 0),
+            "family_owner_tg_id": profile_tg_id,
             "family_owner_expiry_time": int(row[5] or 0),
             "family_owner_enable": bool(row[6]) if row[6] is not None else False,
             "family_owner_has_subscription": any(
                 str(row[index] or "").strip() for index in (2, 3, 4)
             ),
         }
-        profiles[int(row[0])] = profile
+        profiles[telegram_id] = profile
     return profiles
 
 

@@ -2178,7 +2178,8 @@ def subscription_report_text() -> str:
     lines = ["📋 <b>Подписки и уведомления</b>\n"]
     for row in users:
         username, display_name, tg_id = row[:3]
-        family_owner = row[10] is not None
+        profile_tg_id = int(row[10] or 0)
+        family_owner = profile_tg_id > 0 and profile_tg_id != int(tg_id)
         owner_profile = row[11:15]
         account = {
             "tg_id": int(tg_id),
@@ -2191,7 +2192,7 @@ def subscription_report_text() -> str:
             "email": str(row[7] or ""),
             "sub_id": str(row[8] or ""),
             "family_subscription": family_owner,
-            "family_owner_tg_id": int(row[10] or 0),
+            "family_owner_tg_id": profile_tg_id if family_owner else 0,
             "family_owner_has_subscription": any(str(value or "").strip() for value in owner_profile[:3]),
             "family_owner_expiry_time": int(row[14] or 0) if family_owner else 0,
             "family_owner_enable": bool(row[15]) if family_owner and row[15] is not None else False,
