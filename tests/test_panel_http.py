@@ -8,8 +8,6 @@ ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
 def test_panel_routes_and_publisher_boundary(tmp_path):
-    pytest = __import__("pytest")
-    pytest.importorskip("psycopg", reason="psycopg is unavailable in this runtime; HTTP panel integration test is environment-blocked")
     script = r'''
 import base64
 import hashlib
@@ -35,6 +33,12 @@ config.BACKUP_DIR = str(Path.cwd() / "backup")
 config.UPDATE_DIR = str(Path.cwd() / "updates")
 import psutil
 psutil.net_io_counters = lambda: type("Counters", (), {"bytes_recv": 0, "bytes_sent": 0})()
+# The test replaces all database/upstream boundaries. Stub the PostgreSQL
+# client import so the HTTP rendering regressions can run in lean CI images.
+import types
+psycopg_stub = types.ModuleType("psycopg")
+psycopg_stub.connect = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("unexpected PostgreSQL access in isolated HTTP test"))
+sys.modules.setdefault("psycopg", psycopg_stub)
 with patch("logging.FileHandler", lambda *a, **k: logging.NullHandler()):
     import webapp as web
 from fastapi.testclient import TestClient
@@ -113,10 +117,55 @@ for actor, target, denied in (("admin", "admin", False), ("admin", "test-publish
         assert denied and error.status_code == 403, error.detail
     else:
         raise AssertionError("Expected persistence boundary or access denial")
+# Exercise the real overview HTTP route with a minimal local database and a
+# deterministic non-empty live snapshot. This used to raise UnboundLocalError:
+# dashboard() referenced `error` even though live_users() had succeeded.
+import contextlib
+import sqlite3
+import time
+client.cookies.clear()
+dashboard_db = Path.cwd() / "dashboard.db"
+with sqlite3.connect(dashboard_db) as setup_db:
+    setup_db.executescript("""
+        CREATE TABLE payments (id INTEGER PRIMARY KEY, status TEXT, amount INTEGER, receipt_amount REAL, created_at TEXT);
+        CREATE TABLE user_events (id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT, direction TEXT, text TEXT, created_at TEXT);
+        CREATE TABLE audit_log (id INTEGER PRIMARY KEY, actor TEXT, action TEXT, details TEXT, created_at TEXT);
+    """)
+@contextlib.contextmanager
+def dashboard_database():
+    connection = sqlite3.connect(dashboard_db)
+    connection.row_factory = sqlite3.Row
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+web.database = dashboard_database
+web.live_users = lambda force=False: ([{
+    "tg_id": 123, "username": "tester", "latest_username": "tester",
+    "active": True, "expiry_time": int(time.time() * 1000) + 86400000,
+    "online": False,
+}], {"stale": False, "server_traffic_summary": {}, "traffic_summary": {}})
+web.fetch_control_snapshot_sync = lambda: {"status": {"xray_state": "running", "tcp_count": 0}}
+web.dashboard_backup_status = lambda: {"state": "ok", "label": "OK"}
+web.user_events.unread_messages_summary = lambda **kw: {"total": 0, "users": 0, "items": [], "last_event_id": 0}
+config.WEB_USERNAME = "test-publisher"
+dashboard_cookie = TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({
+    "auth": True, "auth_version": web.auth_credentials_version(),
+    "user": "test-publisher", "csrf_token": "dashboard-csrf"
+}).encode())).decode()
+client.cookies.set("session", dashboard_cookie)
+overview = client.get("/")
+assert overview.status_code == 200, (overview.status_code, overview.text[:1000])
+assert "Обзор" in overview.text and "Всего пользователей" in overview.text
+assert "Истёка" not in overview.text
 client.cookies.clear()
 for route in ("/settings", "/updates", "/diagnostics", "/api/diagnostics"):
     assert client.get(route, follow_redirects=False).status_code in (401, 303)
-print("HTTP routes, diagnostics and publisher boundary passed")
+print("HTTP routes, dashboard with a live user, diagnostics and publisher boundary passed")
 '''
     result = subprocess.run(
         [sys.executable, "-c", script, str(ROOT)], cwd=tmp_path,

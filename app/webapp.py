@@ -1946,21 +1946,26 @@ def dashboard_backup_status() -> dict[str, Any]:
     return result
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
-    require_auth(request)
-    # The overview page must remain renderable even when 3x-ui or an optional
-    # local table is temporarily unavailable. Monitoring data is refreshed
-    # client-side after the first paint, so a transient backend failure must
-    # never turn the whole dashboard into HTTP 500.
+def dashboard_users_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load dashboard data while keeping identity normalization separate from fallback state."""
     try:
         users, snapshot = live_users()
+        if not isinstance(snapshot, dict):
+            snapshot = {"stale": True, "error": "Некорректный ответ snapshot"}
     except Exception as error:
         LOGGER.exception("Не удалось получить live snapshot для обзора: %s", error)
         try:
             users = _local_users()
         except Exception:
+            LOGGER.exception("Не удалось получить локальный список пользователей для обзора")
             users = []
+        snapshot = {
+            "stale": True,
+            "error": str(error),
+            "server_traffic_summary": {},
+            "traffic_summary": {},
+        }
+
     for item in users:
         try:
             identity_tg_id = int(item.get("tg_id") or 0)
@@ -1969,7 +1974,17 @@ def dashboard(request: Request):
         item["username"] = cabinet_service.public_username(
             identity_tg_id, item.get("username"), item.get("latest_username")
         )
-        snapshot = {"stale": True, "error": str(error), "server_traffic_summary": {}, "traffic_summary": {}}
+    return users, snapshot
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request):
+    require_auth(request)
+    # The overview page must remain renderable even when 3x-ui or an optional
+    # local table is temporarily unavailable. Monitoring data is refreshed
+    # client-side after the first paint, so a transient backend failure must
+    # never turn the whole dashboard into HTTP 500.
+    users, snapshot = dashboard_users_snapshot()
     now_ms = int(time.time() * 1000)
     total = len(users)
     active = sum(1 for item in users if item["active"])

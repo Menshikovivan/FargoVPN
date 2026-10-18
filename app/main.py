@@ -954,20 +954,33 @@ def get_messages_notification_markup():
     return builder.as_markup()
 
 
+def admin_menu_text() -> str:
+    """Short, structured entry screen for the Telegram admin keyboard."""
+    return (
+        f"<b>🛠 Админ-панель {html.escape(str(config.SERVICE_NAME))}</b>\n"
+        "<i>Выберите действие. Отчёты будут отправлены отдельным сообщением.</i>\n\n"
+        "<b>📊 Мониторинг</b> — сводка, пользователи и подписки\n"
+        "<b>⚙️ Обслуживание</b> — резервная копия и синхронизация 3x-ui\n"
+        "<b>💬 Коммуникации</b> — рассылка и сообщения\n"
+        "<b>🔑 Доступ</b> — ручная выдача VPN-доступа"
+    )
+
+
 def get_admin_menu():
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Сводка", callback_data="admin:summary")
     builder.button(text="👥 Пользователи", callback_data="admin:users")
+    builder.button(text="📋 Подписки", callback_data="admin:subscriptions")
     builder.button(text="✉ Рассылка", callback_data="admin:broadcast")
     builder.button(text="💾 Бэкап", callback_data="admin:backup")
     builder.button(text="🔄 Синхронизация 3x-ui", callback_data="admin:sync")
-    builder.button(text="📋 Подписки", callback_data="admin:subscriptions")
     builder.button(text="🔑 Выдать доступ", callback_data="admin:grant")
     messages_url = get_messages_panel_url()
     if messages_url:
-        builder.button(text="💬 Сообщения в веб-панели", url=messages_url)
+        builder.button(text="💬 Сообщения", url=messages_url)
     builder.button(text="🏠 Меню пользователя", callback_data="menu:home")
-    builder.adjust(2, 2, 2, 2, 1)
+    # Short labels share rows; actions with longer names get their own row.
+    builder.adjust(2, 1, 2, 1, 2, 1)
     return builder.as_markup()
 
 
@@ -1575,7 +1588,7 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
     elif action == "admin":
         await state.clear()
         await call.message.answer(
-            f"<b>🛠 Администрирование {html.escape(str(config.SERVICE_NAME))}</b>",
+            admin_menu_text(),
             parse_mode="HTML",
             reply_markup=get_admin_menu(),
         )
@@ -2136,13 +2149,18 @@ def admin_summary_text() -> str:
         except sqlite3.Error:
             pass
     return (
-        "<b>📊 Сводка сервиса</b>\n"
-        f"Версия: {html.escape(current_version())}\n\n"
-        f"👥 Пользователей: <b>{int(total or 0)}</b>\n"
-        f"✅ Активных подписок: <b>{int(active or 0)}</b>\n"
-        f"⏳ Истекают за 7 дней: <b>{int(expiring or 0)}</b>\n"
-        f"💳 Платежей на проверке: <b>{int(pending or 0)}</b>\n"
-        f"💬 Непрочитанных сообщений: <b>{int(unread or 0)}</b>"
+        "<b>📊 СВОДКА СЕРВИСА</b>\n"
+        f"<code>Версия {html.escape(current_version())}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>👥 Пользователи и подписки</b>\n"
+        f"• Всего пользователей: <b>{int(total or 0)}</b>\n"
+        f"• Активных подписок: <b>{int(active or 0)}</b>\n"
+        f"• Истекают за 7 дней: <b>{int(expiring or 0)}</b>\n\n"
+        "<b>💳 Платежи</b>\n"
+        f"• Ожидают проверки: <b>{int(pending or 0)}</b>\n\n"
+        "<b>💬 Коммуникации</b>\n"
+        f"• Непрочитанных сообщений: <b>{int(unread or 0)}</b>\n"
+        "━━━━━━━━━━━━━━━━━━"
     )
 
 
@@ -2678,7 +2696,7 @@ async def cmd_admin_kb(msg: Message, state: FSMContext):
     await state.clear()
     if msg.from_user.id in config.ADMIN_IDS:
         await msg.answer(
-            f"<b>🛠 Администрирование {html.escape(str(config.SERVICE_NAME))}</b>",
+            admin_menu_text(),
             parse_mode="HTML",
             reply_markup=get_admin_menu(),
         )
