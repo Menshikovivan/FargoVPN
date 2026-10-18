@@ -807,6 +807,18 @@ def _safe_journal_outgoing_sync(tg_id: int, **kwargs: Any) -> int | None:
         return None
 
 
+def _journal_outgoing(
+    tg_id: int,
+    background_tasks: BackgroundTasks | None = None,
+    **kwargs: Any,
+) -> int | None:
+    """Persist web-chat delivery outside the response when a task queue is available."""
+    if background_tasks is not None:
+        background_tasks.add_task(_safe_journal_outgoing_sync, int(tg_id), **kwargs)
+        return None
+    return _safe_journal_outgoing_sync(int(tg_id), **kwargs)
+
+
 def _safe_message_log(
     actor: str, tg_id: int, username: str | None, message: str, success: bool, detail: str
 ) -> None:
@@ -862,6 +874,7 @@ def telegram_send(
     message_kind: str = "message",
     event_type: str = "panel_message",
     return_event: bool = False,
+    background_tasks: BackgroundTasks | None = None,
 ) -> tuple[bool, str] | tuple[bool, str, dict[str, Any] | None]:
     try:
         response = httpx.post(
@@ -878,22 +891,24 @@ def telegram_send(
         detail = "Сообщение отправлено" if ok else str(data.get("description") or f"HTTP {response.status_code}")
         result = data.get("result") if isinstance(data, dict) else None
         message_id = int(result.get("message_id") or 0) if isinstance(result, dict) else 0
-        event_id = _safe_journal_outgoing_sync(
+        event_id = _journal_outgoing(
             int(tg_id), event_type=event_type, text=message, actor="web",
             success=ok, message_kind=message_kind,
             delivery_status="delivered" if ok else "failed",
             delivery_error="" if ok else detail,
             telegram_message_id=message_id or None,
+            background_tasks=background_tasks,
         )
-        event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+        event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
         return (ok, detail, event) if return_event else (ok, detail)
     except Exception as error:
         detail = str(error)
-        event_id = _safe_journal_outgoing_sync(
+        event_id = _journal_outgoing(
             int(tg_id), event_type=event_type, text=message, actor="web",
             success=False, message_kind=message_kind, delivery_status="failed", delivery_error=detail,
+            background_tasks=background_tasks,
         )
-        event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+        event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
         return (False, detail, event) if return_event else (False, detail)
 
 
@@ -903,6 +918,7 @@ def telegram_send_media(
     caption: str = "",
     *,
     return_event: bool = False,
+    background_tasks: BackgroundTasks | None = None,
 ) -> tuple[bool, str, dict[str, Any], str, str] | tuple[bool, str, dict[str, Any], str, str, dict[str, Any] | None]:
     """Send one photo/video from the web chat and return journal metadata."""
     filename = safe_media_filename(str(upload.filename or "media"), str(upload.content_type or ""))
@@ -938,12 +954,13 @@ def telegram_send_media(
     label = "Фото" if kind == "photo" else "Видео"
     event_text = caption.strip() or f"[{label}]"
     def journal_media(ok: bool, detail: str, metadata: dict[str, Any] | None = None, message_id: int | None = None) -> int | None:
-        return _safe_journal_outgoing_sync(
+        return _journal_outgoing(
             int(tg_id), event_type=event_type, text=event_text, actor="web",
             success=ok, message_kind="service",
             delivery_status="delivered" if ok else "failed",
             delivery_error="" if ok else detail, metadata=metadata,
             telegram_message_id=message_id,
+            background_tasks=background_tasks,
         )
     prepared_photo = None
     try:
@@ -964,7 +981,7 @@ def telegram_send_media(
         if response.status_code != 200 or not payload.get("ok"):
             detail = str(payload.get("description") or f"Telegram HTTP {response.status_code}")
             event_id = journal_media(False, detail)
-            event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+            event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
             return (False, detail, {}, event_type, event_text, event) if return_event else (False, detail, {}, event_type, event_text)
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         telegram_file: dict[str, Any] = {}
@@ -979,7 +996,7 @@ def telegram_send_media(
         if not file_id:
             detail = "Telegram не вернул file_id отправленного файла"
             event_id = journal_media(False, detail)
-            event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+            event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
             return (False, detail, {}, event_type, event_text, event) if return_event else (False, detail, {}, event_type, event_text)
         media = {
             "kind": kind,
@@ -996,11 +1013,11 @@ def telegram_send_media(
         message_id = int(result.get("message_id") or 0) or None
         metadata = {"media": media, "source": "web_panel"}
         event_id = journal_media(True, "Файл отправлен", metadata, message_id)
-        event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+        event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
         return (True, "Файл отправлен", metadata, event_type, event_text, event) if return_event else (True, "Файл отправлен", metadata, event_type, event_text)
     except Exception as error:
         event_id = journal_media(False, str(error))
-        event = _safe_event_for_id(int(tg_id), event_id) if return_event else None
+        event = _safe_event_for_id(int(tg_id), event_id) if return_event and background_tasks is None else None
         return (False, str(error), {}, event_type, event_text, event) if return_event else (False, str(error), {}, event_type, event_text)
     finally:
         if prepared_photo is not None:
@@ -1032,14 +1049,20 @@ def _local_users() -> list[dict[str, Any]]:
     with database() as connection:
         rows = connection.execute(
             """SELECT u.*,
-                      COALESCE(NULLIF(u.username,''),(
-                          SELECT NULLIF(e.username,'') FROM user_events e
-                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
-                           ORDER BY e.id DESC LIMIT 1
-                      ),'') AS latest_username
+                      (SELECT NULLIF(e.username,'') FROM user_events e
+                        WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
+                          AND LOWER(REPLACE(TRIM(e.username),'@','')) NOT IN (
+                              'id_' || CAST(u.tg_id AS TEXT), CAST(u.tg_id AS TEXT)
+                          )
+                        ORDER BY e.id DESC LIMIT 1) AS latest_username
                  FROM users u"""
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _panel_user_label(tg_id: int, username: Any, display_name: Any) -> str:
+    resolved_username = cabinet_service.public_username(tg_id, username)
+    return billing.telegram_identity_label(tg_id, resolved_username, str(display_name or ""))
 
 
 def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1107,7 +1130,9 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "registration_status": str(row.get("registration_status") or "active"),
             "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
-            "username": str(row.get("username") or row.get("latest_username") or ""),
+            "username": cabinet_service.public_username(
+                tg_id, row.get("username"), row.get("latest_username")
+            ),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
             "expiry_time": expiry,
@@ -1160,7 +1185,9 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "sub_id": str(row.get("sub_id") or ""),
             **family,
             "tg_id": local_tg_id,
-            "username": str(row.get("username") or row.get("latest_username") or ""),
+            "username": cabinet_service.public_username(
+                local_tg_id, row.get("username"), row.get("latest_username")
+            ),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or "")[:255],
             "expiry_time": expiry,
@@ -1301,17 +1328,25 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     elif expiry > 0 and expiry <= now_ms: status, status_cls = "Истекла", "warn"
     elif expiry <= 0 and billing.has_subscription(user): status, status_cls = "Бессрочная", "good"
     else: status, status_cls = "Активна", "good"
+    user_tg_id = int(user.get("tg_id") or 0)
+    resolved_username = cabinet_service.public_username(
+        user_tg_id, username, user.get("username")
+    )
     username_clean = html.escape(
-        username or billing.telegram_identity_label(
-            int(user.get("tg_id") or 0),
-            str(user.get("username") or ""),
+        f"@{resolved_username}" if resolved_username else billing.telegram_identity_label(
+            user_tg_id,
+            "",
             str(user.get("display_name") or ""),
         )
     )
     if user.get("family_subscription"):
+        family_owner_tg_id = int(user.get("family_owner_tg_id") or 0)
+        family_owner_username = cabinet_service.public_username(
+            family_owner_tg_id, user.get("family_owner_username")
+        )
         family_owner_name = billing.telegram_identity_label(
-            int(user.get("family_owner_tg_id") or 0),
-            str(user.get("family_owner_username") or ""),
+            family_owner_tg_id,
+            family_owner_username,
             str(user.get("family_owner_display_name") or ""),
         )
         username_clean += (
@@ -1330,6 +1365,13 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
 def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
     """Remove Telegram secrets and prepare one safe browser event."""
     result = dict(event)
+    display_username = cabinet_service.public_username(
+        tg_id, result.get("display_username"), result.get("username")
+    )
+    result["display_username"] = display_username
+    result["display_label"] = _panel_user_label(
+        tg_id, display_username, result.get("display_name")
+    )
     legacy_text = str(result.get("text") or "").strip()
     legacy_match = re.fullmatch(
         r"Отправлено:\s*(?:ContentType\.)?([A-Za-z_]+)",
@@ -1919,6 +1961,14 @@ def dashboard(request: Request):
             users = _local_users()
         except Exception:
             users = []
+    for item in users:
+        try:
+            identity_tg_id = int(item.get("tg_id") or 0)
+        except (TypeError, ValueError):
+            identity_tg_id = 0
+        item["username"] = cabinet_service.public_username(
+            identity_tg_id, item.get("username"), item.get("latest_username")
+        )
         snapshot = {"stale": True, "error": str(error), "server_traffic_summary": {}, "traffic_summary": {}}
     now_ms = int(time.time() * 1000)
     total = len(users)
@@ -2531,7 +2581,7 @@ def users_page(
         quota = "∞" if item["quota_remaining"] is None else fmt_bytes(item["quota_remaining"])
         payment_status = user_subscription_label(item, now_ms)
         display_name = (
-            billing.telegram_identity_label(
+            _panel_user_label(
                 tg_id,
                 str(item.get("username") or ""),
                 str(item.get("display_name") or ""),
@@ -3651,9 +3701,17 @@ def messages_page(
         query_text=q,
         db_path=config.DB_PATH,
     )
-    selected_name = next(
-        (str(x["username"]) for x in participants if int(x["tg_id"]) == selected),
-        f"id_{selected}" if selected else "Все сообщения",
+    selected_user = next(
+        (x for x in participants if int(x["tg_id"]) == selected),
+        None,
+    )
+    selected_name = (
+        _panel_user_label(
+            selected,
+            selected_user.get("username"),
+            selected_user.get("display_name"),
+        )
+        if selected_user else (f"ID {selected}" if selected else "Все сообщения")
     )
     global_last_id = max((int(item.get("last_event_id") or 0) for item in participants), default=0)
 
@@ -3696,14 +3754,17 @@ def messages_page(
         active = "active" if tid == selected else ""
         unread_count = max(0, int((unread_map.get(tid) or {}).get("count") or 0))
         badge = f'<span class="message-unread-badge">{unread_count}</span>' if unread_count else ""
+        user_label = _panel_user_label(
+            tid, item.get("username"), item.get("display_name")
+        )
         user_rows.append(
-            '<a class="message-user-row %s%s" data-tg-id="%s" href="%s"><span class="message-user-main"><strong>@%s</strong><span>#%s</span></span>%s<small>%s входящих · %s исходящих</small></a>'
+            '<a class="message-user-row %s%s" data-tg-id="%s" href="%s"><span class="message-user-main"><strong>%s</strong><span>#%s</span></span>%s<small>%s входящих · %s исходящих</small></a>'
             % (
                 active,
                 " has-unread" if unread_count else "",
                 tid,
                 messages_url(1, tg_id=tid),
-                html.escape(str(item["username"])),
+                html.escape(user_label),
                 tid,
                 badge,
                 item["incoming_events"],
@@ -3725,7 +3786,11 @@ def messages_page(
             "unknown": "статус неизвестен",
         }.get(status, status)
         text = html.escape(str(event.get("text") or "").strip())
-        uname = html.escape(str(event.get("display_username") or f"id_{tid}"))
+        user_label = html.escape(
+            _panel_user_label(
+                tid, event.get("display_username"), event.get("display_name")
+            )
+        )
         at = html.escape(fmt_event_timestamp(event.get("created_at")))
         error_note = html.escape(str(event.get("delivery_error") or ""))
         status_class = "failed" if status == "failed" else ""
@@ -3735,7 +3800,7 @@ def messages_page(
         failed_class = "failed" if status == "failed" else ""
         kind_label = "служебное" if kind_css == "service" else "сообщение"
         event_rows.append(
-            f'<div class="chat-message {css} {kind_css} {failed_class}" data-event-id="{int(event.get("id") or 0)}"><div class="muted">{label} · {kind_label} · @{uname} · {at} · #{int(event.get("id") or 0)} · {status_html}</div><div class="chat-message-text">{text}</div></div>'
+            f'<div class="chat-message {css} {kind_css} {failed_class}" data-event-id="{int(event.get("id") or 0)}"><div class="muted">{label} · {kind_label} · {user_label} · {at} · #{int(event.get("id") or 0)} · {status_html}</div>{_event_media_html(event_for_web(event, tid))}<div class="chat-message-text">{text}</div></div>'
         )
 
     direction_filters = []
@@ -3787,11 +3852,11 @@ let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||('id_'+tid)).replace(/^@/,'');if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent='@'+username;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
-function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.textContent=direction+' · '+kind+' · @'+String(item.display_username||item.username||('id_'+item.tg_id)).replace(/^@/,'')+' · '+String(item.created_at||'')+' · #'+id+' · '+status;const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
+function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').replace(/^@/,'');const label=username?'@'+username:(String(item.display_name||'').trim()||('ID '+tid));if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.textContent=direction+' · '+kind+' · '+String(item.display_label||item.display_username||('ID '+item.tg_id))+' · '+String(item.created_at||'')+' · #'+id+' · '+status;const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
-async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
+async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}else{{setTimeout(()=>{{if(!inflight)poll();}},100);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
 async function poll(){{if(stopped||document.hidden){{timer=setTimeout(poll,5000);return;}}if(inflight){{timer=setTimeout(poll,1500);return;}}inflight=true;try{{const url=new URL(__MESSAGES_FEED_PATH__,document.baseURI);url.searchParams.set('after_id',String(globalAfterId));if(selected)url.searchParams.set('tg_id',String(selected));const response=await fetch(url.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();globalAfterId=Math.max(globalAfterId,Number(data.next_after_id)||globalAfterId);updateUnread(data.unread||{{}});for(const item of (Array.isArray(data.dialogs)?data.dialogs:[]))upsertDialog(item);appendSelected(data.selected_events||[]);}}catch(error){{console.debug('[FargoVPN] messages live feed',error);}}finally{{inflight=false;timer=setTimeout(poll,3000);}}}}
 if(search)search.addEventListener('input',()=>{{clearTimeout(filterTimer);filterTimer=setTimeout(applySearch,80);}});
 if(composeText)composeText.addEventListener('keydown',(event)=>{{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){{event.preventDefault();compose?.requestSubmit();}}}});
@@ -4044,6 +4109,7 @@ def user_event_media(request: Request, tg_id: int, event_id: int):
 @app.post("/users/{tg_id}/message")
 def message_user(
     request: Request,
+    background_tasks: BackgroundTasks,
     tg_id: int,
     message: str = Form(""),
     media: UploadFile | None = File(None),
@@ -4061,21 +4127,28 @@ def message_user(
 
     metadata: dict[str, Any] = {}
     if has_media and media is not None:
-        ok, detail, metadata, event_type, event_text, event = telegram_send_media(tg_id, media, message, return_event=True)
+        ok, detail, metadata, event_type, event_text, event = telegram_send_media(
+            tg_id, media, message, return_event=True, background_tasks=background_tasks
+        )
     else:
-        ok, detail, event = telegram_send(tg_id, message, event_type="admin_message", return_event=True)
+        ok, detail, event = telegram_send(
+            tg_id, message, event_type="admin_message", return_event=True,
+            background_tasks=background_tasks,
+        )
         event_type, event_text = "admin_message", message
     actor = str(request.session.get("user", "web"))
     # Telegram delivery is the primary side effect. Auxiliary persistence and
     # UI echo are deliberately best-effort so a DB/journal problem can never
     # turn an already delivered message into HTTP 500.
-    _safe_message_log(actor, tg_id, row.get("username"), event_text, bool(ok), detail)
+    background_tasks.add_task(
+        _safe_message_log, actor, tg_id, row.get("username"), event_text, bool(ok), detail
+    )
     try:
         if media is not None:
             media.file.close()
     except Exception:
         pass
-    audit(actor, "message_user", f"{tg_id}: {detail}")
+    background_tasks.add_task(audit, actor, "message_user", f"{tg_id}: {detail}")
     wants_json = "application/json" in request.headers.get("accept", "")
     if not ok:
         friendly = friendly_telegram_error(detail)

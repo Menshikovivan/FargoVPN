@@ -684,15 +684,25 @@ def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) 
                            FROM users AS canonical
                            WHERE canonical.tg_id=events.tg_id
                              AND TRIM(COALESCE(canonical.username,''))<>''
+                             AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
+                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                             )
                            LIMIT 1), ''),
                     NULLIF((SELECT latest.username
                            FROM user_events AS latest
                            WHERE latest.tg_id=events.tg_id
                              AND TRIM(COALESCE(latest.username,''))<>''
+                             AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
+                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                             )
                            ORDER BY latest.id DESC
                            LIMIT 1), ''),
-                    'id_' || events.tg_id
+                    ''
                 ) AS username,
+                COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
+                          FROM users AS canonical
+                          WHERE canonical.tg_id=events.tg_id
+                          LIMIT 1), '') AS display_name,
                 COUNT(*) AS total_events,
                 SUM(CASE WHEN events.direction='in' THEN 1 ELSE 0 END) AS incoming_events,
                 SUM(CASE WHEN events.direction='out' THEN 1 ELSE 0 END) AS outgoing_events,
@@ -701,7 +711,8 @@ def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) 
             WHERE events.tg_id>0
             GROUP BY events.tg_id
             ORDER BY last_event_id DESC LIMIT ?""", (limit,)).fetchall()
-    return [dict(tg_id=int(r['tg_id']), username=str(r['username'] or f"id_{int(r['tg_id'])}"),
+    return [dict(tg_id=int(r['tg_id']), username=str(r['username'] or ''),
+        display_name=str(r['display_name'] or ''),
         total_events=int(r['total_events'] or 0), incoming_events=int(r['incoming_events'] or 0),
         outgoing_events=int(r['outgoing_events'] or 0), last_event_id=int(r['last_event_id'] or 0),
         last_event_at=str(r['last_event_at'] or '')) for r in rows]
@@ -735,8 +746,24 @@ def all_events(
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
     where, params = _event_filters(tg_id=tg_id, direction=direction, message_kind=message_kind, query_text=query_text)
-    query = ("SELECT events.*, COALESCE(NULLIF(users.username,''), NULLIF(events.username,''), 'id_' || events.tg_id) AS display_username "
-             "FROM user_events AS events LEFT JOIN users ON users.tg_id=events.tg_id" + where)
+    query = (
+        "SELECT events.*, "
+        "COALESCE("
+        "NULLIF((SELECT canonical.username FROM users AS canonical "
+        "WHERE canonical.tg_id=events.tg_id "
+        "AND TRIM(COALESCE(canonical.username,''))<>'' "
+        "AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN "
+        "('id_' || CAST(events.tg_id AS TEXT),CAST(events.tg_id AS TEXT)) LIMIT 1),''),"
+        "NULLIF((SELECT latest.username FROM user_events AS latest "
+        "WHERE latest.tg_id=events.tg_id "
+        "AND TRIM(COALESCE(latest.username,''))<>'' "
+        "AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN "
+        "('id_' || CAST(events.tg_id AS TEXT),CAST(events.tg_id AS TEXT)) "
+        "ORDER BY latest.id DESC LIMIT 1),''),'') AS display_username, "
+        "COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'') FROM users AS canonical "
+        "WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name "
+        "FROM user_events AS events LEFT JOIN users ON users.tg_id=events.tg_id" + where
+    )
     if int(before_id) > 0:
         query += ' AND events.id<?'; params.append(int(before_id))
     query += ' ORDER BY events.id DESC LIMIT ? OFFSET ?'; params.extend([limit, offset])
@@ -744,7 +771,10 @@ def all_events(
         rows = connection.execute(query, params).fetchall()
     result=[]
     for row in rows:
-        item=_event_from_row(row); item['display_username']=str(row['display_username'] or f"id_{int(row['tg_id'])}"); result.append(item)
+        item = _event_from_row(row)
+        item["display_username"] = str(row["display_username"] or "")
+        item["display_name"] = str(row["display_name"] or "")
+        result.append(item)
     return result
 
 
@@ -802,10 +832,37 @@ def recent_all_events(
     limit = max(1, min(int(limit or 500), 1000))
     with _connect(db_path) as connection:
         rows = connection.execute(
-            "SELECT * FROM user_events WHERE id>? ORDER BY id ASC LIMIT ?",
+            """SELECT events.*,
+                      COALESCE(
+                          NULLIF((SELECT canonical.username FROM users AS canonical
+                                  WHERE canonical.tg_id=events.tg_id
+                                    AND TRIM(COALESCE(canonical.username,''))<>''
+                                    AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
+                                        'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                                    )
+                                  LIMIT 1), ''),
+                          NULLIF((SELECT latest.username FROM user_events AS latest
+                                  WHERE latest.tg_id=events.tg_id
+                                    AND TRIM(COALESCE(latest.username,''))<>''
+                                    AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
+                                        'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                                    )
+                                  ORDER BY latest.id DESC LIMIT 1), '')
+                      ) AS display_username,
+                      COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
+                                FROM users AS canonical
+                                WHERE canonical.tg_id=events.tg_id LIMIT 1), '') AS display_name
+                 FROM user_events AS events
+                WHERE events.id>? ORDER BY events.id ASC LIMIT ?""",
             (after_id, limit),
         ).fetchall()
-    return [_event_from_row(row) for row in rows]
+    result = []
+    for row in rows:
+        item = _event_from_row(row)
+        item["display_username"] = str(row["display_username"] or "")
+        item["display_name"] = str(row["display_name"] or "")
+        result.append(item)
+    return result
 
 
 def conversation_users_for_ids(
@@ -827,15 +884,25 @@ def conversation_users_for_ids(
                            FROM users AS canonical
                            WHERE canonical.tg_id=events.tg_id
                              AND TRIM(COALESCE(canonical.username,''))<>''
+                             AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
+                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                             )
                            LIMIT 1), ''),
                     NULLIF((SELECT latest.username
                            FROM user_events AS latest
                            WHERE latest.tg_id=events.tg_id
                              AND TRIM(COALESCE(latest.username,''))<>''
+                             AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
+                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
+                             )
                            ORDER BY latest.id DESC
                            LIMIT 1), ''),
-                    'id_' || events.tg_id
+                    ''
                 ) AS username,
+                COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
+                          FROM users AS canonical
+                          WHERE canonical.tg_id=events.tg_id
+                          LIMIT 1), '') AS display_name,
                 COUNT(*) AS total_events,
                 SUM(CASE WHEN events.direction='in' THEN 1 ELSE 0 END) AS incoming_events,
                 SUM(CASE WHEN events.direction='out' THEN 1 ELSE 0 END) AS outgoing_events,
@@ -848,7 +915,8 @@ def conversation_users_for_ids(
         ).fetchall()
     return [dict(
         tg_id=int(row["tg_id"]),
-        username=str(row["username"] or f"id_{int(row['tg_id'])}"),
+        username=str(row["username"] or ""),
+        display_name=str(row["display_name"] or ""),
         total_events=int(row["total_events"] or 0),
         incoming_events=int(row["incoming_events"] or 0),
         outgoing_events=int(row["outgoing_events"] or 0),

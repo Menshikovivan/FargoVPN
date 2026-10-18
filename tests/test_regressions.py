@@ -188,7 +188,8 @@ assert client.get('/test-panel/api/users/1/events/7/media').status_code==401
 cookie=TimestampSigner(config.WEB_SECRET_KEY).sign(base64.b64encode(json.dumps({'auth':True,'auth_version':web.auth_credentials_version(),'user':'admin','csrf_token':'csrf'}).encode())).decode();client.cookies.set('session',cookie)
 r=client.post('/test-panel/users/1/message',data={'message':'caption'},files={'media':('photo.tiff',file.getvalue(),'image/tiff')},headers={'Accept':'application/json','X-CSRF-Token':'csrf'})
 assert r.status_code==200,r.text
-assert r.json()['event']['metadata']['media']['url']=='/test-panel/api/users/1/events/7/media'
+assert r.json()['event'] is None
+assert web.event_for_web(stored[7],1)['metadata']['media']['url']=='/test-panel/api/users/1/events/7/media'
 stored[8]={**stored[7],'id':8,'direction':'in'}
 feed=client.get('/test-panel/api/users/1/events').json()['events']
 assert all(e['metadata']['media']['url'].startswith('/test-panel/api/') for e in feed)

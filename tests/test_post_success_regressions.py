@@ -17,7 +17,8 @@ def func(name: str) -> str:
 
 def test_panel_message_success_is_not_coupled_to_compatibility_log():
     src = func("message_user")
-    assert "_safe_message_log(" in src
+    assert "_safe_message_log, actor, tg_id" in src
+    assert "background_tasks.add_task(audit" in src
     assert "return_event=True" in src
     assert "_safe_event_for_id(" in WEB
     assert "return JSONResponse({\"ok\": True" in src
@@ -26,12 +27,13 @@ def test_panel_message_success_is_not_coupled_to_compatibility_log():
 
 def test_message_transport_journal_is_best_effort():
     src = func("telegram_send")
-    assert "_safe_journal_outgoing_sync(" in src
+    assert "_journal_outgoing(" in src
+    assert "background_tasks: BackgroundTasks | None = None" in src
 
 
 def test_media_transport_journal_is_best_effort():
     src = func("telegram_send_media")
-    assert "_safe_journal_outgoing_sync(" in WEB
+    assert "_journal_outgoing(" in src
     assert "def journal_media" in src
     assert "message_journal.record_outgoing_sync(" not in src
 

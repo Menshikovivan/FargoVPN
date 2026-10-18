@@ -38,6 +38,11 @@ def cabinet_functions(sub_url='https://example.test/sub'):
         public_path=lambda path: '/private123' + path,
         _cabinet_bot_username=lambda: 'testbot',
         referral_codes=SimpleNamespace(ensure_referral_code=lambda *args: 'TEST'),
+        cabinet_service=SimpleNamespace(public_username=lambda tg_id, *values: next(
+            (str(value).strip().lstrip('@') for value in values
+             if value and str(value).strip().lstrip('@') not in {str(tg_id), f'id_{tg_id}'}),
+            ''
+        )),
         bytes_to_gb=lambda value: 0, remaining_label=lambda *args: '0',
         panel_from_timestamp=lambda _value: __import__('datetime').datetime.fromtimestamp(0),
         billing=SimpleNamespace(
@@ -98,6 +103,24 @@ def test_family_cabinet_shows_owner_username_separately_from_member_identity():
     assert '<h1>@member<br><small>Семейная подписка пользователя @owner</small></h1>' in markup
 
 
+def test_cabinet_render_uses_safe_fallback_for_synthetic_member_and_owner_usernames():
+    ns = cabinet_functions()
+    markup = ns['_cabinet_markup']('', {
+        'tg_id': 20,
+        'username': 'id_20',
+        'display_name': 'Иван Петров',
+        'uuid': 'member-uuid',
+        'family_subscription': True,
+        'family_owner_tg_id': 10,
+        'family_owner_username': 'id_10',
+        'family_owner_display_name': 'Мария',
+    }, '')
+
+    assert '<h1>Иван Петров<br><small>Семейная подписка пользователя Мария</small></h1>' in markup
+    assert '@id_20' not in markup
+    assert '@id_10' not in markup
+
+
 def test_user_subscription_badges_use_yellow_for_no_subscription():
     tree = ast.parse((ROOT / 'app/webapp.py').read_text(encoding='utf-8'))
     node = next(
@@ -130,6 +153,10 @@ def test_family_cabinet_keeps_member_identity_and_owner_subscription():
         10: {'tg_id': 10, 'username': 'owner', 'display_name': 'Owner', 'sub_id': 'owner-sub'},
         20: {'tg_id': 20, 'username': '', 'display_name': 'Иван Петров'},
     }
+    public_username = next(
+        item for item in ast.parse((ROOT / 'app/cabinet_service.py').read_text(encoding='utf-8')).body
+        if isinstance(item, ast.FunctionDef) and item.name == 'public_username'
+    )
 
     class Result:
         def fetchone(self):
@@ -146,10 +173,12 @@ def test_family_cabinet_keeps_member_identity_and_owner_subscription():
     namespace = {
         'Path': Path,
         'Any': object,
+        're': re,
         '_connect': connect,
         '_latest_username': lambda *_args: 'membernick',
         'get_user': lambda tg_id, _path: members.get(tg_id),
     }
+    exec(compile(ast.Module(body=[public_username], type_ignores=[]), 'public_username', 'exec'), namespace)
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'resolve_user_for_cabinet', 'exec'), namespace)
     user = namespace['resolve_user_for_cabinet'](20, 'unused')
 

@@ -253,7 +253,7 @@ def register_with_invitation_sync(
     if normalized is None:
         return RegistrationResult("invalid_format")
     tg_id = int(tg_id)
-    clean_username = _clean_username(username) or f"id_{tg_id}"
+    clean_username = _clean_username(username)
     clean_display = _clean_display_name(display_name)
     now = int(time.time())
     with _connect() as connection:

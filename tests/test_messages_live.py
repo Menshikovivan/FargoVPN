@@ -27,7 +27,7 @@ def test_incremental_journal_query_uses_append_only_id_index():
     src = read("user_events.py")
     init = read("init_db.py")
     block = func("user_events.py", "recent_all_events")
-    assert "WHERE id>? ORDER BY id ASC LIMIT ?" in block
+    assert "WHERE events.id>? ORDER BY events.id ASC LIMIT ?" in block
     assert "after_id = max(0, int(after_id or 0))" in block
     assert "limit = max(1, min(int(limit or 500), 1000))" in block
     assert "idx_user_events_tg_id_id" in init
@@ -74,7 +74,7 @@ def test_dynamic_message_dom_uses_textcontent_for_user_controlled_text():
     src = func("webapp.py", "messages_page")
     assert "text.textContent=String(item.text||item.event_type||'Событие')" in src
     assert "muted.textContent=direction+' · '+kind" in src
-    assert "strong.textContent='@'+username" in src
+    assert "strong.textContent=label" in src
     assert "row.innerHTML=" in src  # static shell only; user data is not interpolated into it
 
 
@@ -84,13 +84,23 @@ def test_web_send_journal_module_is_imported():
     assert "message_journal.record_outgoing_sync" in source
 
 
-def test_exact_event_echo_prevents_parallel_admin_race():
-    src = read("webapp.py")
-    assert "event_id = _safe_journal_outgoing_sync(" in src
-    assert "event = _safe_event_for_id(int(tg_id), event_id) if return_event else None" in src
+def test_web_chat_send_defers_auxiliary_database_writes():
     route = func("webapp.py", "message_user")
-    assert "telegram_send(tg_id, message, event_type=\"admin_message\", return_event=True)" in route
-    assert "telegram_send_media(tg_id, media, message, return_event=True)" in route
+    assert "background_tasks: BackgroundTasks" in route
+    assert "background_tasks=background_tasks" in route
+    assert "_safe_message_log, actor, tg_id" in route
+    assert "background_tasks.add_task(audit" in route
+
+    journal = func("webapp.py", "_journal_outgoing")
+    assert "background_tasks.add_task(_safe_journal_outgoing_sync" in journal
+    assert "return None" in journal
+
+
+def test_messages_page_initial_history_renders_event_media():
+    src = func("webapp.py", "messages_page")
+    assert "_event_media_html(event_for_web(event, tid))" in src
+    assert "if(data.event)" in src
+    assert "if(!inflight)poll()" in src
 
 
 def test_friendly_telegram_errors_cover_requested_cases():

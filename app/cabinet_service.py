@@ -23,6 +23,22 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 LEGACY_TOKEN_RE = re.compile(r"^(?P<tg_id>[1-9][0-9]{0,19})\.(?P<signature>[A-Za-z0-9_-]{43})$")
 
 
+def public_username(tg_id: int, *candidates: Any) -> str:
+    """Return the first real Telegram username, ignoring stored ID placeholders."""
+    try:
+        user_id = int(tg_id or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    for value in candidates:
+        username = str(value or "").strip().lstrip("@").strip()
+        if not username or username.isdecimal():
+            continue
+        if user_id > 0 and username.casefold() == f"id_{user_id}".casefold():
+            continue
+        return username
+    return ""
+
+
 def _secret() -> bytes:
     value = str(getattr(config, "WEB_SECRET_KEY", "") or "").encode()
     if len(value) < 16:
@@ -208,10 +224,11 @@ def _latest_username(tg_id: int, db_path: str | Path | None = None) -> str:
         row = db.execute(
             """SELECT username FROM user_events
                 WHERE tg_id=? AND TRIM(COALESCE(username,''))<>''
+                  AND LOWER(REPLACE(TRIM(username),'@','')) NOT IN (?,CAST(? AS TEXT))
                 ORDER BY id DESC LIMIT 1""",
-            (int(tg_id),),
+            (int(tg_id), f"id_{int(tg_id)}", int(tg_id)),
         ).fetchone()
-    return str(row[0] or "").strip().lstrip("@") if row else ""
+    return public_username(tg_id, row[0]) if row else ""
 
 
 def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
@@ -224,21 +241,23 @@ def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> d
     if not user:
         return None
     user = dict(user)
+    user["username"] = public_username(
+        profile_tg_id,
+        user.get("username"),
+        _latest_username(profile_tg_id, db_path),
+    )
     if profile_tg_id != int(tg_id):
-        placeholder_username = f"id_{profile_tg_id}".casefold()
-        owner_username = str(user.get("username") or "").strip().lstrip("@")
-        if owner_username.casefold() == placeholder_username:
-            owner_username = ""
-        if not owner_username:
-            owner_username = str(_latest_username(profile_tg_id, db_path) or "").strip().lstrip("@")
-            if owner_username.casefold() == placeholder_username:
-                owner_username = ""
+        owner_username = user["username"]
         owner_display_name = str(user.get("display_name") or "")
         member = get_user(int(tg_id), db_path) or {}
         user.update(
             {
                 "tg_id": int(tg_id),
-                "username": str(member.get("username") or _latest_username(int(tg_id), db_path)),
+                "username": public_username(
+                    int(tg_id),
+                    member.get("username"),
+                    _latest_username(int(tg_id), db_path),
+                ),
                 "display_name": str(member.get("display_name") or ""),
                 "family_subscription": True,
                 "family_owner_tg_id": profile_tg_id,
@@ -251,8 +270,12 @@ def resolve_user_for_cabinet(tg_id: int, db_path: str | Path | None = None) -> d
                 "family_owner_enable": bool(user.get("enable", True)),
             }
         )
-    elif not str(user.get("username") or "").strip():
-        user["username"] = _latest_username(int(tg_id), db_path)
+    else:
+        user["username"] = public_username(
+            int(tg_id),
+            user.get("username"),
+            _latest_username(int(tg_id), db_path),
+        )
     return user
 
 

@@ -98,6 +98,19 @@ def test_restart_between_start_and_code_does_not_lose_registration_state(sqlite_
     assert registration_access.registration_state_sync(555).status == registration_access.ACTIVE
 
 
+def test_registration_without_username_does_not_store_synthetic_id_as_username(sqlite_backend):
+    registration_access.ensure_user_registration_state_sync(555, None, "New User")
+    seed_owner(sqlite_backend)
+
+    result = registration_access.register_with_invitation_sync(555, None, "1234", "New User")
+    assert result.registered
+    with sqlite3.connect(sqlite_backend) as connection:
+        username = connection.execute(
+            "SELECT username FROM users WHERE tg_id=555"
+        ).fetchone()[0]
+    assert username in (None, "")
+
+
 def test_postgresql_compatible_owner_row_and_text_timestamp(sqlite_backend, monkeypatch):
     seed_owner(sqlite_backend)
     registration_access.ensure_user_registration_state_sync(555, "new_user", "New User")
