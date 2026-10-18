@@ -2165,6 +2165,15 @@ def subscription_report_text() -> str:
         ).fetchall()
     if not users:
         return "📭 Пользователи не найдены."
+    invalid_rows = sum(row is None for row in users)
+    if invalid_rows:
+        logger.warning(
+            "Subscription report query returned %d null rows; skipping invalid entries",
+            invalid_rows,
+        )
+        users = [row for row in users if row is not None]
+        if not users:
+            raise RuntimeError("Запрос списка подписок вернул только пустые строки")
     now_ms = int(time.time() * 1000)
     lines = ["📋 <b>Подписки и уведомления</b>\n"]
     for row in users:

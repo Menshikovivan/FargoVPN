@@ -212,7 +212,7 @@ class CompatRow:
     def __init__(self, row: Any):
         self._row = row
     def __getitem__(self, key: Any):
-        if isinstance(key, int):
+        if isinstance(key, (int, slice)):
             return self._row[key]
         try:
             return self._row._mapping[key]
