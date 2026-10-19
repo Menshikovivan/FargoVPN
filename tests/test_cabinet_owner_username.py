@@ -108,5 +108,5 @@ def test_public_username_rejects_only_identity_placeholders_and_numeric_ids():
     resolve = namespace["public_username"]
     assert resolve(100, "id_100", "@real_nick") == "real_nick"
     assert resolve(100, "100", "id_100") == ""
-    assert resolve(100, "id_200") == "id_200"
-    assert resolve(100, "id_0100") == "id_0100"
+    assert resolve(100, "id_200") == ""
+    assert resolve(100, "id_0100") == ""

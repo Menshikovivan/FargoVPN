@@ -25,7 +25,12 @@ def _clean(value: Any, limit: int = 255) -> str:
 def normalize_username(value: Any, tg_id: Any = 0) -> str:
     """Normalize a Telegram username; reject blanks and synthetic ID labels."""
     username = _clean(value, 100).lstrip("@").strip()
-    if not username or username.casefold() in {"none", "null", "undefined"}:
+    if not username or username.casefold() in {"none", "null", "undefined", "id"}:
+        return ""
+    # These values are generated 3x-ui/import labels, not a trustworthy
+    # Telegram username. Reject all numeric ID placeholders, not only the
+    # one whose suffix happens to equal the current row's TG ID.
+    if re.fullmatch(r"id_?\d+", username, flags=re.IGNORECASE):
         return ""
     if not re.fullmatch(r"[A-Za-z0-9_]{1,100}", username):
         return ""
@@ -45,6 +50,28 @@ def normalize_username(value: Any, tg_id: Any = 0) -> str:
 def normalize_comment(value: Any) -> str:
     """Normalize an operator-supplied comment used as the display fallback."""
     return _clean(value, 255)
+
+
+def is_generated_identity_comment(value: Any, tg_id: Any, email: Any = "") -> bool:
+    """Detect panel comments that are merely synthetic ID labels, not operator notes.
+
+    FargoVPN historically used ``id_<telegram_id>`` as a fallback username and
+    copied it into the 3x-ui comment. A plain ``id`` is treated as synthetic only
+    when the associated client email also has the generated ID prefix.
+    """
+    comment = normalize_comment(value)
+    if not comment:
+        return False
+    if re.fullmatch(r"id_?\d+", comment, flags=re.IGNORECASE):
+        return True
+    if comment.casefold() != "id":
+        return False
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    email_prefix = str(email or "").strip().split("+", 1)[0].casefold()
+    return numeric_id > 0 and email_prefix in {f"id_{numeric_id}", f"id{numeric_id}"}
 
 
 

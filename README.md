@@ -1,4 +1,4 @@
-# FargoVPN 5.1.35
+# FargoVPN 5.1.36
 
 > FargoVPN помогает запустить собственный VPN-сервис: Telegram-бот принимает пользователей и показывает подписки, а веб-панель нужна владельцу сервиса для управления ими.
 
@@ -8,9 +8,15 @@
 [![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 [![3x-ui](https://img.shields.io/badge/3x--ui-integrated-444444)](https://github.com/MHSanaei/3x-ui)
 
-**Текущая версия: 5.1.35**
+**Текущая версия: 5.1.36**
 
 FargoVPN предназначен прежде всего для владельца VPN-сервиса или администратора сервера. Если вы хотите только подключиться к уже существующему VPN, попросите ссылку на Telegram-бота и инструкцию у своего провайдера: устанавливать FargoVPN на свой сервер не нужно.
+
+## Что изменено в 5.1.36
+
+- Отчёт подписок и сообщения ссылаются на Telegram по числовому `tg_id`; смена username не ломает и не перенаправляет ссылку.
+- Исправлена нормализация текущего username: старые никнеймы из истории не подменяют актуальную идентичность; служебные `id`/`id_<id>` и некорректные имена 3x-ui не показываются как Telegram handles.
+- Вкладка «Аудит» адаптирована к узким экранам и длинным деталям.
 
 ## Что изменено в 5.1.35
 
@@ -139,8 +145,8 @@ curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install
 Для новой версии до её первой публикации в GitHub Releases используйте локальный release-архив. Распакуйте его на сервере и запустите корневой `install.sh`: он обнаружит соседний `app/VERSION` и установит именно этот архив, не скачивая старый `latest` из GitHub.
 
 ```bash
-tar -xzf FargoVPN-5.1.35_FULL.tar.gz
-cd FargoVPN-5.1.35
+tar -xzf FargoVPN-5.1.36_FULL.tar.gz
+cd FargoVPN-5.1.36
 sudo ./install.sh
 ```
 

@@ -829,16 +829,38 @@ def db_get_user(tg_id: int) -> dict:
     conn.close()
     return dict(row) if row else None
 
-def db_upsert_user(tg_id: int, username: str, uuid_str: str, email: str, expiry_time: int, sub_id: str, is_active: int = 1, reminder_days: int = -1):
-    clean_name = username.replace("@", "").strip() if username else None
+
+def db_upsert_user(tg_id: int, username: str | None, uuid_str: str, email: str, expiry_time: int, sub_id: str, is_active: int = 1, reminder_days: int = -1):
+    """Upsert subscription fields without treating synthetic labels as Telegram usernames.
+
+    A missing username in this helper means subscription data arrived without a
+    new Telegram identity signal. The dedicated contact refresh path owns explicit
+    username removal, so an unrelated subscription update must not erase a valid
+    handle (nor overwrite it with an email-derived ``id_<id>`` value).
+    """
+    numeric_id = int(tg_id)
+    if numeric_id > 0:
+        clean_name = normalize_username(username, numeric_id) or None
+    else:
+        clean_name = str(username or "").replace("@", "").strip() or None
     conn = database_adapter.connect(config.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""INSERT INTO users (tg_id, username, uuid, email, expiry_time, enable, sub_id, last_online, last_reminder_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username, uuid=excluded.uuid, email=excluded.email,
-        expiry_time=excluded.expiry_time, enable=excluded.enable, sub_id=excluded.sub_id, last_online=excluded.last_online, last_reminder_days=excluded.last_reminder_days""",
-        (tg_id, clean_name, uuid_str, email, int(expiry_time), is_active, sub_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), reminder_days))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO users
+                   (tg_id, username, uuid, email, expiry_time, enable, sub_id, last_online, last_reminder_days)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(tg_id) DO UPDATE SET
+                   username=CASE WHEN excluded.username IS NOT NULL THEN excluded.username ELSE users.username END,
+                   uuid=excluded.uuid, email=excluded.email, expiry_time=excluded.expiry_time,
+                   enable=excluded.enable, sub_id=excluded.sub_id,
+                   last_online=excluded.last_online, last_reminder_days=excluded.last_reminder_days""",
+            (numeric_id, clean_name, uuid_str, email, int(expiry_time), is_active, sub_id,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), reminder_days),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_cabinet_url() -> str:
     if not bool(getattr(config, "CABINET_ENABLED", True)):
@@ -2288,8 +2310,12 @@ def subscription_report_text(page_no: int = 1) -> str:
             price_text = f" · {int(custom_price)} ₽" if custom_price is not None else ""
         except (TypeError, ValueError, OverflowError):
             price_text = ""
+        if tg_id > 0:
+            label_markup = f'<a href="tg://user?id={tg_id}"><b>{label}</b></a>'
+        else:
+            label_markup = f"<b>{label}</b>"
         lines.extend([
-            f"👤 <b>{label}</b> · TG <code>{tg_id}</code>",
+            f"👤 {label_markup} · TG <code>{tg_id}</code>",
             f"🏷 Тариф: период {tariff_days} дн.{price_text}",
             f"📊 Статус: {status_icon} {html.escape(status_text)}",
             f"📅 Окончание: {html.escape(expiry_text)}",

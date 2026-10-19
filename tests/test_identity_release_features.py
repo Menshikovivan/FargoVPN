@@ -243,13 +243,14 @@ def test_identity_migration_backs_up_first_reports_changes_and_is_idempotent(tmp
     assert report["display_names_normalized"] == 2
     assert report["events_checked"] == 3
     assert report["event_usernames_normalized"] == 1
-    assert report["historical_usernames_recovered"] == 1
+    assert report["historical_usernames_recovered"] == 0
+    assert report["historical_usernames_ignored"] >= 1
     assert Path(report["backup"]).stat().st_mode & 0o777 == 0o600
     assert users[0]["username"] == "alice"
     assert users[0]["display_name"] == "Alice Smith"
     assert users[0]["notes"] == "Клиент A"
     assert users[1]["username"] is None and users[1]["display_name"] is None and users[1]["notes"] is None
-    assert users[3]["username"] == "member_real"
+    assert users[3]["username"] is None
     assert events[0]["username"] is None
 
     operations.clear()
@@ -315,9 +316,9 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
     first = namespace["subscription_report_text"](1)
     last = namespace["subscription_report_text"](63)
     assert "Страница 1/63" in first
-    assert first.count("👤 <b>") == 8
+    assert first.count('<a href="tg://user?id=') == 8
     assert "Страница 63/63" in last
-    assert last.count("👤 <b>") == 4
+    assert last.count('<a href="tg://user?id=') == 4
     split_node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "split_subscription_report")
     split_node.decorator_list = []
     split_ns = {"re": re}

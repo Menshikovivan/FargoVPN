@@ -73,7 +73,7 @@ def test_messages_polling_preserves_scroll_and_does_not_reload_page():
 def test_dynamic_message_dom_uses_textcontent_for_user_controlled_text():
     src = func("webapp.py", "messages_page")
     assert "text.textContent=String(item.text||item.event_type||'Событие')" in src
-    assert "muted.textContent=direction+' · '+kind" in src
+    assert "muted.append(document.createTextNode(direction+' · '+kind+' · '))" in src
     assert "strong.textContent=label" in src
     assert "row.innerHTML=" in src  # static shell only; user data is not interpolated into it
 

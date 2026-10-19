@@ -179,32 +179,6 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def identity_candidates(tg_id: int, db_path: str | Path | None = None) -> list[str]:
-    candidates: list[str] = []
-    with _connect(db_path) as db:
-        for row in db.execute(
-            "SELECT username FROM users WHERE tg_id=? UNION ALL "
-            "SELECT username FROM user_events WHERE tg_id=? ORDER BY username",
-            (int(tg_id), int(tg_id)),
-        ):
-            value = str(row[0] or "").strip().lstrip("@").strip().casefold()
-            if value and value not in candidates:
-                candidates.append(value)
-    return candidates[:64]
-
-
-def _matched_names(db: sqlite3.Connection, candidates: list[str]) -> list[str]:
-    out: list[str] = []
-    for name in candidates:
-        users = int(db.execute(
-            "SELECT COUNT(DISTINCT tg_id) FROM users "
-            "WHERE replace(lower(trim(COALESCE(username,''))),'@','')=?", (name,)
-        ).fetchone()[0] or 0)
-        # No current user or exactly one current user with this username is safe.
-        if users <= 1:
-            out.append(name)
-    return out
-
 
 def get_user(tg_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
     with _connect(db_path) as db:

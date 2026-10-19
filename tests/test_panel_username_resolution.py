@@ -3,6 +3,7 @@ import ast
 from contextlib import contextmanager
 import re
 import sqlite3
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,8 +135,6 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
         "_connect": connect,
         "normalize_username": normalize_username,
     }
-    helper = _function(ROOT / "app/user_events.py", "latest_valid_usernames")
-    exec(compile(ast.Module(body=[helper], type_ignores=[]), "latest_valid_usernames", "exec"), namespace)
     function = _function(ROOT / "app/user_events.py", "conversation_users_for_ids")
     exec(
         compile(ast.Module(body=[function], type_ignores=[]), "conversation_users_for_ids", "exec"),
@@ -144,7 +143,7 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
 
     rows = namespace["conversation_users_for_ids"]([100, 200], db_path=db_path)
     by_id = {row["tg_id"]: row for row in rows}
-    assert by_id[100]["username"] == "owner_nickname"
+    assert by_id[100]["username"] == ""
     assert by_id[100]["display_name"] == "Telegram Full Name"
     assert by_id[100]["notes"] == "Комментарий владельца"
     assert by_id[200]["username"] == ""
@@ -158,7 +157,7 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     )
     initial_rows = all_namespace["conversation_users"](db_path=db_path)
     initial_by_id = {row["tg_id"]: row for row in initial_rows}
-    assert initial_by_id[100]["username"] == "owner_nickname"
+    assert initial_by_id[100]["username"] == ""
     assert initial_by_id[200]["username"] == ""
 
     events_namespace = {
@@ -176,7 +175,7 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
         events_namespace,
     )
     paged_events = events_namespace["all_events"](tg_id=100, db_path=db_path)
-    assert paged_events[0]["display_username"] == "owner_nickname"
+    assert paged_events[0]["display_username"] == ""
     assert paged_events[0]["display_name"] == "Telegram Full Name"
 
     recent_events = _function(ROOT / "app/user_events.py", "recent_all_events")
@@ -186,7 +185,7 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     )
     live_events = events_namespace["recent_all_events"](db_path=db_path)
     live_by_id = {event["id"]: event for event in live_events}
-    assert live_by_id[1]["display_username"] == "owner_nickname"
+    assert live_by_id[1]["display_username"] == ""
     assert live_by_id[3]["display_username"] == ""
     assert live_by_id[3]["display_name"] == "Member Name"
 
@@ -304,3 +303,144 @@ def test_unlinked_3xui_rows_never_render_user_zero_or_destructive_actions():
     assert "/users/456/days" in linked
     assert "/users/456/toggle" in linked
     assert "/users/456/delete" in linked
+
+
+@pytest.mark.parametrize("panel_comment", ["Брат Мишы Авхадеева", "id", "id_1180284364"])
+def test_3xui_snapshot_clears_synthetic_handle_without_touching_comment_or_subscription(tmp_path, monkeypatch, panel_comment):
+    import importlib
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    config_spec = importlib.util.spec_from_file_location("config", ROOT / "app" / "config.example.py")
+    config_module = importlib.util.module_from_spec(config_spec)
+    assert config_spec.loader is not None
+    config_spec.loader.exec_module(config_module)
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    xui_api = importlib.import_module("services.xui_api")
+    db_path = tmp_path / "canonical-identity-sync.sqlite"
+    tg_id = 1180284364
+    email = "id_1180284364+1180284364"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript("""
+            CREATE TABLE users(
+                tg_id INTEGER PRIMARY KEY, username TEXT, uuid TEXT, email TEXT,
+                expiry_time INTEGER DEFAULT 0, enable INTEGER DEFAULT 1,
+                up INTEGER DEFAULT 0, down INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
+                sub_id TEXT, last_reminder_days INTEGER DEFAULT -1, notes TEXT,
+                last_online TEXT, last_online_ts INTEGER DEFAULT 0, last_sync_at TEXT,
+                identity_source TEXT, identity_updated_at TEXT, display_name TEXT,
+                registered_at TEXT, registration_status TEXT
+            );
+        """)
+        connection.execute(
+            """INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,last_reminder_days,notes,identity_source)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (tg_id, "id", "uuid-brother", email, 0, 1, 0, 0, 0, "sub-brother", -1,
+             "Брат Мишы Авхадеева", "3x-ui"),
+        )
+
+    def connect(path, timeout=20):
+        con = sqlite3.connect(path, timeout=timeout)
+        con.create_function("GREATEST", -1, lambda *values: max(v for v in values if v is not None))
+        return con
+
+    monkeypatch.setattr(xui_api.database_adapter, "connect", connect)
+    changed = xui_api.sync_snapshot_to_db({"clients": [{
+        "tg_id": tg_id, "email": email, "uuid": "uuid-brother", "expiry_time": 0,
+        "enable": True, "up": 0, "down": 0, "total": 0, "sub_id": "sub-brother",
+        "last_online_ts": 0, "comment": panel_comment,
+    }]}, db_path=str(db_path))
+    assert changed > 0
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT username,uuid,email,sub_id,notes FROM users WHERE tg_id=?", (tg_id,)
+        ).fetchone()
+    assert row == (None, "uuid-brother", email, "sub-brother", "Брат Мишы Авхадеева")
+    package = sys.modules.get("services")
+    sys.modules.pop("services.xui_api", None)
+    if package is not None and getattr(package, "xui_api", None) is xui_api:
+        delattr(package, "xui_api")
+
+
+def test_3xui_merge_never_copies_synthetic_name_into_real_telegram_profile(tmp_path, monkeypatch):
+    """Merging a legacy panel row must not reintroduce an email-derived pseudo handle."""
+    import importlib
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    config_spec = importlib.util.spec_from_file_location("config", ROOT / "app" / "config.example.py")
+    config_module = importlib.util.module_from_spec(config_spec)
+    assert config_spec.loader is not None
+    config_spec.loader.exec_module(config_module)
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    xui_api = importlib.import_module("services.xui_api")
+
+    db_path = tmp_path / "xui-identity-merge.sqlite"
+    tg_id = 1180284364
+    email = "id_1180284364+1180284364"
+    comment = "Брат Мишы Авхадеева"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript("""
+            CREATE TABLE users(
+                tg_id INTEGER PRIMARY KEY, username TEXT, uuid TEXT, email TEXT,
+                expiry_time INTEGER DEFAULT 0, enable INTEGER DEFAULT 1,
+                up INTEGER DEFAULT 0, down INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
+                sub_id TEXT, last_reminder_days INTEGER DEFAULT -1, notes TEXT,
+                last_online TEXT, last_online_ts INTEGER DEFAULT 0, last_sync_at TEXT,
+                identity_source TEXT, identity_updated_at TEXT, display_name TEXT,
+                registered_at TEXT, registration_status TEXT
+            );
+        """)
+        connection.execute(
+            """INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,
+                                  last_reminder_days,notes,identity_source)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (-9180284364, "id_1180284364", "legacy-uuid", email, 0, 1, 0, 0, 0,
+             "legacy-sub", -1, comment, "3x-ui"),
+        )
+        connection.execute(
+            """INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,
+                                  last_reminder_days,notes,identity_source)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (tg_id, "id", "real-uuid", email, 0, 1, 0, 0, 0,
+             "real-sub", -1, comment, "3x-ui"),
+        )
+
+    def connect(path, timeout=20):
+        con = sqlite3.connect(path, timeout=timeout)
+        con.create_function("GREATEST", -1, lambda *values: max(v for v in values if v is not None))
+        return con
+
+    monkeypatch.setattr(xui_api.database_adapter, "connect", connect)
+
+    # Construct a legacy state where the email key resolved to the negative-ID
+    # row while the UUID independently confirms the positive Telegram row.
+    # This forces the defensive legacy-merge branch without weakening its checks.
+    with sqlite3.connect(db_path) as connection:
+        negative_row = dict(zip(
+            [column[1] for column in connection.execute("PRAGMA table_info(users)")],
+            connection.execute("SELECT * FROM users WHERE tg_id<0").fetchone(),
+        ))
+    monkeypatch.setattr(
+        xui_api, "match_local_identity",
+        lambda *args, **kwargs: (negative_row, False),
+    )
+
+    changed = xui_api.sync_snapshot_to_db({"clients": [{
+        "tg_id": tg_id, "email": email, "uuid": "real-uuid", "expiry_time": 0,
+        "enable": True, "up": 0, "down": 0, "total": 0, "sub_id": "real-sub",
+        "last_online_ts": 0, "comment": comment,
+    }]}, db_path=str(db_path))
+    assert changed > 0
+    with sqlite3.connect(db_path) as connection:
+        users = connection.execute(
+            "SELECT tg_id,username,uuid,email,sub_id,notes FROM users ORDER BY tg_id"
+        ).fetchall()
+    assert users == [(tg_id, None, "real-uuid", email, "real-sub", comment)]
+
+    package = sys.modules.get("services")
+    sys.modules.pop("services.xui_api", None)
+    if package is not None and getattr(package, "xui_api", None) is xui_api:
+        delattr(package, "xui_api")

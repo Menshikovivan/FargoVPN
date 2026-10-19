@@ -16,6 +16,7 @@ from typing import Any, Iterator
 
 import db as database_adapter
 import config
+from user_identity import normalize_username
 
 LOGGER = logging.getLogger("fargovpn-registration")
 
@@ -57,7 +58,13 @@ def normalize_invitation_code(value: Any) -> str | None:
     return text if _CODE_RE.fullmatch(text) else None
 
 
-def _clean_username(value: Any) -> str:
+def _clean_username(value: Any, tg_id: Any = 0) -> str:
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    if numeric_id > 0:
+        return normalize_username(value, numeric_id)
     value = re.sub(r"[\x00-\x1f\x7f]+", "", str(value or "").strip().lstrip("@"))
     return value[:80] or ""
 
@@ -152,7 +159,7 @@ def ensure_user_registration_state_sync(
     tg_id = int(tg_id)
     if tg_id <= 0:
         raise ValueError("Telegram ID must be positive")
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, tg_id)
     clean_display = _clean_display_name(display_name)
     with _connect() as connection:
         row = _select_state(connection, tg_id)
@@ -253,7 +260,7 @@ def register_with_invitation_sync(
     if normalized is None:
         return RegistrationResult("invalid_format")
     tg_id = int(tg_id)
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, tg_id)
     clean_display = _clean_display_name(display_name)
     now = int(time.time())
     with _connect() as connection:
@@ -407,7 +414,7 @@ def authorize_admin_user_sync(tg_id: int, username: str | None = None, display_n
     tg_id = int(tg_id)
     if tg_id <= 0:
         return False
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, tg_id)
     clean_display = _clean_display_name(display_name)
     with _connect() as connection:
         connection.execute(

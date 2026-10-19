@@ -28,7 +28,7 @@ import psycopg
 import config
 from time_utils import from_timestamp as panel_from_timestamp
 import user_events
-from user_identity import build_unique_identity_index, match_local_identity, normalize_username
+from user_identity import build_unique_identity_index, is_generated_identity_comment, match_local_identity, normalize_username
 
 logger = logging.getLogger(__name__)
 
@@ -1530,12 +1530,26 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                             (occupied_uuid and uuid_key and occupied_uuid != uuid_key)
                         )
                         if identity_agrees and not conflicting_fields:
-                            if not existing_dict.get("username") and row.get("username"):
+                            source_username = normalize_username(row.get("username"), inferred_tg_id)
+                            existing_username = normalize_username(existing_dict.get("username"), inferred_tg_id)
+                            # When a legacy negative-ID row is merged into a real
+                            # Telegram account, never copy its generated/email-derived
+                            # panel label into users.username. Keep a validated handle
+                            # only; an invalid target placeholder is normalized to NULL
+                            # by the main upsert below (its notes/comment stay intact).
+                            if not existing_username and source_username:
                                 connection.execute(
                                     "UPDATE users SET username=? WHERE tg_id=?",
-                                    (row.get("username"), inferred_tg_id),
+                                    (source_username, inferred_tg_id),
                                 )
-                                existing_dict["username"] = row.get("username")
+                                existing_dict["username"] = source_username
+                            elif not existing_username:
+                                if existing_dict.get("username"):
+                                    connection.execute(
+                                        "UPDATE users SET username=NULL WHERE tg_id=?",
+                                        (inferred_tg_id,),
+                                    )
+                                existing_dict["username"] = None
                             _rekey_related_rows(connection, current_tg_id, inferred_tg_id)
                             connection.execute("DELETE FROM users WHERE tg_id=?", (current_tg_id,))
                             row = existing_dict
@@ -1593,8 +1607,22 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                 tg_id = _stable_negative_id(email)
             matched_ids.add(tg_id)
 
-            username = str((row or {}).get("username") or "") or (email.rsplit("_", 1)[0] or "Веб-клиент")
+            raw_username = str((row or {}).get("username") or "")
+            current_username = normalize_username(raw_username, tg_id)
+            # A 3x-ui email such as "Kirill_Avdeenko+1180" is not a Telegram
+            # username. For Telegram-linked IDs, keep only a verified current
+            # handle (or NULL); unbound negative-ID clients retain the legacy
+            # email-derived label for backward-compatible panel display.
+            if tg_id > 0:
+                username = current_username or None
+            else:
+                username = current_username or (email.rsplit("_", 1)[0] or "Веб-клиент")
+            username_changed = row is None or (
+                bool(raw_username) and not current_username and tg_id > 0
+            ) or (bool(current_username) and current_username != raw_username.strip().lstrip("@"))
             panel_comment = str(item.get("comment") or "").strip()[:255]
+            if tg_id > 0 and is_generated_identity_comment(panel_comment, tg_id, email):
+                panel_comment = ""
             last_online_ts = _int(item.get("last_online_ts"))
             last_online = (
                 panel_from_timestamp(last_online_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
@@ -1611,7 +1639,6 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
             old = row or {}
             old_last_online_ts = _int(old.get("last_online_ts")) if row else 0
             merged_last_online_ts = max(last_online_ts, old_last_online_ts)
-            username_changed = bool(row is None and username) or (row is not None and not str(old.get("username") or "") and bool(username))
             data_changed = (
                 row is None
                 or username_changed
@@ -1634,7 +1661,8 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                         last_online,last_online_ts,last_sync_at,last_reminder_days
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,-1)
                     ON CONFLICT(tg_id) DO UPDATE SET
-                        username=COALESCE(NULLIF(users.username,''),excluded.username),
+                        username=CASE WHEN ? THEN excluded.username
+                                      ELSE COALESCE(NULLIF(users.username,''),excluded.username) END,
                         uuid=excluded.uuid,email=excluded.email,
                         last_reminder_days=CASE
                             WHEN COALESCE(users.expiry_time,0) <> COALESCE(excluded.expiry_time,0) THEN -1
@@ -1651,7 +1679,7 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                     (
                         tg_id, username, new_uuid, email, new_expiry, new_enable,
                         new_up, new_down, new_total, new_sub_id, panel_comment, last_online,
-                        last_online_ts, now_text,
+                        last_online_ts, now_text, username_changed,
                     ),
                 )
                 changed += 1

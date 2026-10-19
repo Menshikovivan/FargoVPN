@@ -58,7 +58,7 @@ import push_service
 import restore_manager
 from security_policy import PANEL_CONTENT_SECURITY_POLICY
 import registration_access
-from user_identity import build_unique_identity_index, match_local_identity, normalize_username
+from user_identity import build_unique_identity_index, is_generated_identity_comment, match_local_identity, normalize_username
 from detached_jobs import DetachedJobError, launch_detached
 from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local
 from backup import read_live_state, request_backup_now
@@ -839,6 +839,24 @@ def _safe_message_log(
         LOGGER.exception("Сообщение пользователю tg_id=%s доставлено, но message_log не записан: %s", tg_id, error)
 
 
+def _current_identity_fields(tg_id: int) -> dict[str, Any]:
+    """Read current user identity fields; journal usernames are historical snapshots."""
+    try:
+        with database() as connection:
+            row = connection.execute(
+                "SELECT username,display_name,notes FROM users WHERE tg_id=?", (int(tg_id),)
+            ).fetchone()
+        if row:
+            return {
+                "display_username": cabinet_service.public_username(int(tg_id), row[0]),
+                "display_name": str(row[1] or ""),
+                "notes": str(row[2] or ""),
+            }
+    except Exception as error:
+        LOGGER.debug("Не удалось получить текущую идентичность %s: %s", tg_id, error)
+    return {"display_username": "", "display_name": "", "notes": ""}
+
+
 def _safe_event_for_id(tg_id: int, event_id: int | None) -> dict[str, Any] | None:
     """Return one exact journal row for a just-completed UI send."""
     if not event_id:
@@ -846,6 +864,7 @@ def _safe_event_for_id(tg_id: int, event_id: int | None) -> dict[str, Any] | Non
     try:
         event = user_events.get_event(int(tg_id), int(event_id), db_path=config.DB_PATH)
         if event and str(event.get("direction") or "") == "out":
+            event.update(_current_identity_fields(int(tg_id)))
             return event_for_web(event, int(tg_id))
     except Exception as error:
         LOGGER.warning("Не удалось подготовить исходящее событие для UI tg_id=%s event_id=%s: %s", tg_id, event_id, error)
@@ -1062,6 +1081,22 @@ def _panel_user_label(tg_id: int, username: Any, display_name: Any = "", comment
     )
 
 
+def _telegram_profile_link(tg_id: Any, label: Any, css_class: str = "telegram-profile-link") -> str:
+    """Render a safe Telegram deep link keyed by immutable numeric user ID."""
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    safe_label = html.escape(str(label or "Пользователь"))
+    if numeric_id <= 0:
+        return safe_label
+    return (
+        f'<a class="{html.escape(css_class, quote=True)}" '
+        f'href="tg://user?id={numeric_id}" aria-label="Открыть профиль в Telegram">'
+        f'{safe_label}</a>'
+    )
+
+
 def _user_actions_html(tg_id: int, identity_conflict: bool, enabled: bool) -> str:
     """Render actions only when a stable, positive Telegram identity is confirmed.
 
@@ -1106,19 +1141,8 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
     local = _local_users()
     by_email, ambiguous_emails = build_unique_identity_index(local, "email")
     by_uuid, ambiguous_uuids = build_unique_identity_index(local, "uuid")
-    # Recover real handles only for rows whose current username is blank or a
-    # known synthetic ID label. This is one bounded window query, not an N+1 loop.
-    history_usernames: dict[int, str] = {}
-    missing_handles = [
-        int(row.get("tg_id") or 0) for row in local
-        if int(row.get("tg_id") or 0) > 0
-        and not normalize_username(row.get("username"), int(row.get("tg_id") or 0))
-    ]
-    if missing_handles:
-        try:
-            history_usernames = user_events.latest_valid_usernames(missing_handles, db_path=config.DB_PATH)
-        except Exception as error:
-            LOGGER.warning("Не удалось восстановить исторические Telegram-ники списка подписок: %s", type(error).__name__)
+    # Current users.username is authoritative. Historical event usernames are
+    # intentionally not used as a fallback because Telegram handles can change.
     family_profiles = billing.family_profile_map(config.DB_PATH)
     now_ms = int(time.time() * 1000)
 
@@ -1179,9 +1203,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "registration_status": str(row.get("registration_status") or "active"),
             "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
-            "username": cabinet_service.public_username(
-                tg_id, row.get("username"), history_usernames.get(tg_id)
-            ),
+            "username": cabinet_service.public_username(tg_id, row.get("username")),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
             "expiry_time": expiry,
@@ -1234,9 +1256,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "sub_id": str(row.get("sub_id") or ""),
             **family,
             "tg_id": local_tg_id,
-            "username": cabinet_service.public_username(
-                local_tg_id, row.get("username"), history_usernames.get(local_tg_id)
-            ),
+            "username": cabinet_service.public_username(local_tg_id, row.get("username")),
             "identity_conflict": False,
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or "")[:255],
@@ -1271,8 +1291,9 @@ def get_user(tg_id: int) -> dict[str, Any] | None:
         return dict(row)
     try:
         from services.subscriptions import ensure_telegram_user_shell_sync
-        username = user_events.last_known_username(int(tg_id), db_path=config.DB_PATH)
-        return ensure_telegram_user_shell_sync(int(tg_id), username, config.DB_PATH)
+        # The journal stores historical username snapshots; never use them as
+        # the current Telegram handle after a user has renamed/removed it.
+        return ensure_telegram_user_shell_sync(int(tg_id), None, config.DB_PATH)
     except Exception as error:
         LOGGER.warning("Не удалось восстановить локального пользователя %s: %s", tg_id, error)
         return None
@@ -1351,9 +1372,6 @@ def _cabinet_personal_url(tg_id: int, sub_id: str = "") -> str:
     return cabinet_service.personal_url(tg_id, sub_id)
 
 
-def _cabinet_identity_candidates(tg_id: int) -> list[str]:
-    return cabinet_service.identity_candidates(tg_id, config.DB_PATH)
-
 
 def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     expiry = int(user.get("expiry_time") or 0)
@@ -1418,7 +1436,7 @@ def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
     """Remove Telegram secrets and prepare one safe browser event."""
     result = dict(event)
     display_username = cabinet_service.public_username(
-        tg_id, result.get("display_username"), result.get("username")
+        tg_id, result.get("display_username")
     )
     result["display_username"] = display_username
     result["display_label"] = _panel_user_label(
@@ -1489,8 +1507,9 @@ def _event_media_html(event: dict[str, Any]) -> str:
 
 def render_user_events(events: list[dict[str, Any]], tg_id: int) -> str:
     result: list[str] = []
+    identity = _current_identity_fields(int(tg_id))
     for raw_event in events:
-        event = event_for_web(raw_event, tg_id)
+        event = event_for_web({**raw_event, **identity}, tg_id)
         direction = str(event.get("direction") or "system")
         if direction not in {"in", "out", "system"}:
             direction = "system"
@@ -2387,23 +2406,10 @@ def dashboard(request: Request):
         return f'<span class="system-state {state}"><i></i>{html.escape(label)}</span>'
 
     message_items: list[str] = []
-    history_needed = sorted({
-        int(row["tg_id"] or 0) for row in recent_events
-        if int(row["tg_id"] or 0) > 0
-        and not normalize_username(row["username"], int(row["tg_id"] or 0))
-        and not normalize_username(row["event_username"], int(row["tg_id"] or 0))
-    })
-    recent_history: dict[int, str] = {}
-    if history_needed:
-        try:
-            recent_history = user_events.latest_valid_usernames(history_needed, db_path=config.DB_PATH)
-        except Exception as error:
-            LOGGER.warning("Не удалось восстановить ники последних сообщений на обзоре: %s", type(error).__name__)
+    # Message history is not a source of current Telegram usernames.
     for row in recent_events:
         event_tg_id = int(row["tg_id"] or 0)
-        current_handle = cabinet_service.public_username(
-            event_tg_id, row["username"], recent_history.get(event_tg_id), row["event_username"]
-        )
+        current_handle = cabinet_service.public_username(event_tg_id, row["username"])
         name = _panel_user_label(
             event_tg_id, current_handle, row["display_name"], row["notes"]
         )
@@ -3009,7 +3015,7 @@ def users_page(
             telegram_badge += f'<span class="muted" title="{html.escape(telegram_reason, quote=True)}">{html.escape(telegram_reason[:90])}</span>'
         cards.append(
             f'''<article class="user-row" data-user-tg-id="{tg_id}" data-user-registered="{html.escape(registered_day, quote=True)}" data-user-search="{html.escape(search_blob, quote=True)}" data-user-status="{row_status}" data-user-online="{1 if item.get('online') else 0}" data-user-remaining="{remaining_sort}" data-user-last-online="{int(item.get('last_online_ts') or 0)}" data-user-traffic="{int(item.get('traffic_used') or 0)}" data-user-quota="{html.escape(quota_sort, quote=True)}" data-user-name="{html.escape(display_name.casefold(), quote=True)}">
-<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{html.escape(display_name)}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
+<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{_telegram_profile_link(tg_id, display_name)}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
 <div class="user-status">{user_subscription_badge(payment_status)}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
 <div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
@@ -3361,7 +3367,7 @@ def user_detail_page(request: Request, tg_id: int):
             (int(tg_id), int(tg_id)),
         ).fetchall()
     linked_html = ''.join(
-        f'<li>{html.escape(billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")))} · TG {int(x[0])}</li>'
+        f'<li>{_telegram_profile_link(int(x[0]), billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")), "telegram-inline-link")} · TG {int(x[0])}</li>'
         for x in linked_rows
     ) or '<li>Дополнительных аккаунтов нет</li>'
     price_value = str(row.get("custom_payment_price") or "")
@@ -3397,6 +3403,8 @@ def user_detail_page(request: Request, tg_id: int):
             record = get_client_record_sync(str(row.get("email") or ""))
             panel_client = record.get("client") if isinstance(record.get("client"), dict) else {}
             live_comment = str(panel_client.get("comment") or "").strip()[:255]
+            if is_generated_identity_comment(live_comment, tg_id, row.get("email")):
+                live_comment = ""
             if live_comment:
                 xui_comment = live_comment
                 if live_comment != str(row.get("notes") or ""):
@@ -3442,8 +3450,11 @@ def user_detail_page(request: Request, tg_id: int):
         '</div>'
     )
     media_limit = max(1, int(getattr(config, "CHAT_MEDIA_MAX_MB", 100)))
-    display_label = str(xui_comment or row.get("username") or row.get("email") or "Пользователь").strip() or "Пользователь"
-    body = f'''<header><div><h1>{html.escape(display_label)}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
+    display_label = _panel_user_label(
+        tg_id, row.get("username"), row.get("display_name"), xui_comment or row.get("notes")
+    )
+    display_label_html = _telegram_profile_link(tg_id, display_label)
+    body = f'''<header><div><h1>{display_label_html}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
 {billing_html}
 <div class="chat-layout"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
 {('<div class="notice">Сначала восстановите или укажите положительный Telegram ID. Ник сам по себе не позволяет боту написать пользователю.</div>' if disabled else '')}
@@ -3714,7 +3725,8 @@ def user_events_api(request: Request, tg_id: int, after_id: int = 0):
     events = user_events.recent_events(
         tg_id, limit=250, after_id=after_id, db_path=config.DB_PATH
     )
-    return {"events": [event_for_web(event, tg_id) for event in events]}
+    identity = _current_identity_fields(int(tg_id))
+    return {"events": [event_for_web({**event, **identity}, tg_id) for event in events]}
 
 
 @app.get("/api/panel/messages/feed")
@@ -4128,13 +4140,17 @@ def messages_page(
             tid, item.get("username"), item.get("display_name"), item.get("notes")
         )
         user_rows.append(
-            '<a class="message-user-row %s%s" data-tg-id="%s" href="%s"><span class="message-user-main"><strong>%s</strong><span>#%s</span></span>%s<small>%s входящих · %s исходящих</small></a>'
+            '<div class="message-user-row %s%s" data-tg-id="%s">'
+            '<a class="message-user-open" href="%s"><span class="message-user-main"><strong>%s</strong><span>#%s</span></span></a>'
+            '<a class="message-user-telegram" href="tg://user?id=%s" title="Открыть этого пользователя в Telegram">Telegram ↗</a>'
+            '%s<small>%s входящих · %s исходящих</small></div>'
             % (
                 active,
                 " has-unread" if unread_count else "",
                 tid,
                 messages_url(1, tg_id=tid),
                 html.escape(user_label),
+                tid,
                 tid,
                 badge,
                 item["incoming_events"],
@@ -4156,11 +4172,10 @@ def messages_page(
             "unknown": "статус неизвестен",
         }.get(status, status)
         text = html.escape(str(event.get("text") or "").strip())
-        user_label = html.escape(
-            _panel_user_label(
-                tid, event.get("display_username"), event.get("display_name"), event.get("notes")
-            )
+        user_label_text = _panel_user_label(
+            tid, event.get("display_username"), event.get("display_name"), event.get("notes")
         )
+        user_label = _telegram_profile_link(tid, user_label_text, "telegram-inline-link")
         at = html.escape(fmt_event_timestamp(event.get("created_at")))
         error_note = html.escape(str(event.get("delivery_error") or ""))
         status_class = "failed" if status == "failed" else ""
@@ -4200,7 +4215,7 @@ def messages_page(
     body = f'''<header class="page-header"><div><h1>Сообщения</h1><div class="subtitle">Входящие, исходящие и служебные события · {range_start}–{range_end} из {total_events}</div></div><div class="actions">{" ".join(direction_filters)} {" ".join(type_filters)} {card_link}</div></header>
 <div class="card messages-toolbar"><form method="get" action="/messages"><input type="hidden" name="tg_id" value="{selected}"><input type="hidden" name="direction" value="{html.escape(direction)}"><input type="hidden" name="message_kind" value="{html.escape(message_kind)}"><label>Поиск <input type="search" name="q" value="{html.escape(q)}" placeholder="Текст, @username или Telegram ID"></label><label>На странице <select name="per_page"><option value="25" {"selected" if per_page == 25 else ""}>25</option><option value="50" {"selected" if per_page == 50 else ""}>50</option><option value="100" {"selected" if per_page == 100 else ""}>100</option></select></label><button class="button small" type="submit">Искать</button></form></div>
 <div class="messages-layout messages-layout-modern" data-message-live-feed="1"><section class="card messages-users"><div class="compact-panel-head"><div><strong>Диалоги</strong><span class="muted">Нажмите пользователя для открытия чата</span></div><span class="badge" data-message-dialog-count>{len(participants)}</span></div><label class="messages-search"><span>⌕</span><input type="search" placeholder="Фильтр списка пользователей" data-message-search autocomplete="off"></label><div class="messages-users-list" data-message-list>{"".join(user_rows) or '<p class="muted">Сообщений ещё нет.</p>'}</div></section>
-<section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div>{card_link}</div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
+<section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div><div class="actions">{('<a class="button secondary small" href="tg://user?id=' + str(selected) + '">Открыть Telegram ↗</a>' if selected > 0 else '')}{card_link}</div></div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
     messages_path_js = json.dumps(public_path("/messages"))
     messages_feed_path_js = json.dumps(public_path("/api/panel/messages/feed"))
     scripts = f'''<script>(function(){{
@@ -4222,8 +4237,8 @@ let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{1,100}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id_'+tid;const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
-function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.textContent=direction+' · '+kind+' · '+String(item.display_label||item.display_username||('ID '+item.tg_id))+' · '+String(item.created_at||'')+' · #'+id+' · '+status;const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
+function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{1,100}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id'&&!/^id_?\\d+$/i.test(username);const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('div');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.innerHTML='<a class="message-user-open" href="'+messagesPath+'?tg_id='+encodeURIComponent(tid)+'"><span class="message-user-main"><strong></strong><span>#'+tid+'</span></span></a><a class="message-user-telegram" href="tg://user?id='+tid+'" title="Открыть этого пользователя в Telegram">Telegram ↗</a><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id||selected)||0;const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));if(whoId>0){{const who=document.createElement('a');who.className='telegram-inline-link';who.href='tg://user?id='+whoId;who.textContent=whoLabel;who.title='Открыть этого пользователя в Telegram';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
 async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}else{{setTimeout(()=>{{if(!inflight)poll();}},100);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
@@ -4716,8 +4731,11 @@ def payments(request: Request):
             int(row["tg_id"] or 0), str(row["current_username"] or ""),
             str(row["current_display_name"] or ""), str(row["user_notes"] or "")
         )
+        payment_user_link = _telegram_profile_link(
+            int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link"
+        )
         table_rows.append(
-            f'<tr class="payment-row"><td data-label="ID">#{row["id"]}</td><td data-label="Пользователь">{html.escape(payment_user_label)}<br><small>ID {row["tg_id"]}</small></td><td data-label="Сумма">{amount_text}</td><td data-label="Получен">{html.escape(row["created_at"] or "")}</td><td data-label="OCR">{ocr_badge}{ocr_note}</td><td data-label="Статус">{badge}{error_note}</td><td data-label="Действия"><div class="payment-actions">{actions}</div></td></tr>'
+            f'<tr class="payment-row"><td data-label="ID">#{row["id"]}</td><td data-label="Пользователь">{payment_user_link}<br><small>ID {row["tg_id"]}</small></td><td data-label="Сумма">{amount_text}</td><td data-label="Получен">{html.escape(row["created_at"] or "")}</td><td data-label="OCR">{ocr_badge}{ocr_note}</td><td data-label="Статус">{badge}{error_note}</td><td data-label="Действия"><div class="payment-actions">{actions}</div></td></tr>'
         )
     body = f'''<header><div><h1>Платежи</h1><div class="subtitle">Все чеки в одном списке: новые платежи всегда сверху, статус и результат OCR видны в строке</div></div><span class="badge">{len(rows)} записей</span></header><div class="card table-wrap payments-table"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Сумма чека</th><th>Получен</th><th>OCR</th><th>Статус</th><th>Действия</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="7"><div class="empty-state">Платежей пока нет.</div></td></tr>'}</tbody></table></div>'''
     return page(request, "Платежи", body, "payments")
@@ -4765,7 +4783,10 @@ def receipt(request: Request, payment_id: int):
         int(row["tg_id"] or 0), str(row["current_username"] or ""),
         str(row["current_display_name"] or ""), str(row["user_notes"] or "")
     )
-    body = f'''<header><div><h1>Чек #{payment_id}</h1><div class="subtitle">{html.escape(payment_user_label)} · Telegram ID {row["tg_id"]} · {html.escape(str(row["created_at"] or ""))}</div></div><a class="button secondary" href="/payments">Назад</a></header>{duplicate_html}<div class="grid"><div class="card wide" style="text-align:center"><img src="/payments/{payment_id}/receipt/image" alt="Чек #{payment_id}" style="display:block;max-width:100%;max-height:78vh;margin:auto;border-radius:10px;object-fit:contain" loading="eager"></div><div class="card side"><h2>Результат OCR</h2><p>Статус: <span class="code">{status}</span></p><p>Сумма: <strong>{amount}</strong><br>Дата: <strong>{html.escape(str(row["receipt_date"] or "—"))}</strong><br>Имя: <strong>{html.escape(str(row["receipt_receiver"] or "—"))}</strong><br>Номер: <strong>{html.escape(str(row["receipt_phone"] or "—"))}</strong></p>{checks_html}{reasons_html}</div><div class="card full"><h2>Распознанный текст</h2><pre>{ocr_text}</pre></div></div>'''
+    payment_user_link = _telegram_profile_link(
+        int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link"
+    )
+    body = f'''<header><div><h1>Чек #{payment_id}</h1><div class="subtitle">{payment_user_link} · Telegram ID {row["tg_id"]} · {html.escape(str(row["created_at"] or ""))}</div></div><a class="button secondary" href="/payments">Назад</a></header>{duplicate_html}<div class="grid"><div class="card wide" style="text-align:center"><img src="/payments/{payment_id}/receipt/image" alt="Чек #{payment_id}" style="display:block;max-width:100%;max-height:78vh;margin:auto;border-radius:10px;object-fit:contain" loading="eager"></div><div class="card side"><h2>Результат OCR</h2><p>Статус: <span class="code">{status}</span></p><p>Сумма: <strong>{amount}</strong><br>Дата: <strong>{html.escape(str(row["receipt_date"] or "—"))}</strong><br>Имя: <strong>{html.escape(str(row["receipt_receiver"] or "—"))}</strong><br>Номер: <strong>{html.escape(str(row["receipt_phone"] or "—"))}</strong></p>{checks_html}{reasons_html}</div><div class="card full"><h2>Распознанный текст</h2><pre>{ocr_text}</pre></div></div>'''
     return page(request, f"Чек #{payment_id}", body, "payments")
 
 

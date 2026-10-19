@@ -548,3 +548,29 @@ form[action$="/payment-price"]>.setting{margin:0}
 @media(min-width:901px) and (max-width:1120px){
   body.panel-page>main{width:calc(100% - 252px)!important;margin-left:252px!important}
 }
+
+
+/* 5.1.36: resilient audit table and filter layout on desktop and mobile. */
+.audit-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.45fr) minmax(84px,100px) auto;align-items:end;gap:8px;min-width:0;width:100%}
+.audit-filters>*{min-width:0;max-width:100%}
+.audit-filters input,.audit-filters select{width:100%;min-width:0}
+.audit-filters button{white-space:nowrap}
+.audit-details{min-width:0;max-width:none;width:48%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.5}
+.table-wrap{min-width:0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.table-wrap table{width:100%;min-width:780px;table-layout:fixed}
+.table-wrap th,.table-wrap td{overflow-wrap:anywhere;word-break:break-word;vertical-align:top}
+.table-wrap th:nth-child(1){width:150px}
+.table-wrap th:nth-child(2){width:150px}
+.table-wrap th:nth-child(3){width:190px}
+.telegram-profile-link,.telegram-inline-link{color:#87b4ff;text-decoration:none;text-decoration-thickness:1px;text-underline-offset:3px;overflow-wrap:anywhere}
+.telegram-profile-link:hover,.telegram-inline-link:hover{text-decoration:underline;color:#c0d8ff}
+.message-user-row{min-width:0;grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.message-user-open{display:block;min-width:0;color:inherit;text-decoration:none}
+.message-user-open .message-user-main{min-width:0}
+.message-user-open strong{overflow-wrap:anywhere;word-break:break-word}
+.message-user-telegram{align-self:center;justify-self:end;color:#87b4ff;font-size:10px;white-space:nowrap;text-decoration:none}
+.message-user-telegram:hover{text-decoration:underline}
+.chat-message .muted{overflow-wrap:anywhere;word-break:break-word}
+.chat-head .actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:900px){.audit-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.audit-filters button{grid-column:1/-1}.audit-details{max-width:none}.table-wrap table{min-width:760px}}
+@media(max-width:560px){.audit-filters{grid-template-columns:minmax(0,1fr)}.audit-filters button{grid-column:auto;width:100%}.message-user-telegram{font-size:9px}.messages-layout{min-width:0}.chat-head .actions{justify-content:flex-start}}

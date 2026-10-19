@@ -30,6 +30,7 @@ from typing import Any, Iterator
 
 import config
 import user_events
+from user_identity import normalize_username
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,15 @@ def _candidate_column(columns: set[str], names: tuple[str, ...]) -> str | None:
     return None
 
 
-def _clean_username(value: Any) -> str:
+def _clean_username(value: Any, tg_id: Any = 0) -> str:
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    if numeric_id > 0:
+        return normalize_username(value, numeric_id)
+    # Negative IDs represent local, non-Telegram panel users. Their manually
+    # supplied names may contain spaces and must not be treated as @usernames.
     text = str(value or "").strip().lstrip("@")
     text = re.sub(r"[\x00-\x1f\x7f]+", "", text)
     return text[:100]
@@ -246,7 +255,7 @@ def read_legacy_identities(path: Path) -> list[LegacyIdentity]:
         tg_id = _valid_tg_id(values.get(tg_col))
         if not tg_id:
             continue
-        username = _clean_username(values.get(username_col)) if username_col else ""
+        username = _clean_username(values.get(username_col), tg_id) if username_col else ""
         email = _clean_identity_text(values.get(email_col)) if email_col else ""
         uuid_value = _clean_identity_text(values.get(uuid_col)) if uuid_col else ""
         if not email and not uuid_value:
@@ -523,7 +532,7 @@ def rebind_local_identity(
     old_tg_id, new_tg_id = int(old_tg_id), _valid_tg_id(new_tg_id)
     if not new_tg_id:
         raise IdentityImportError("Telegram ID должен быть положительным числом")
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, new_tg_id)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -592,7 +601,7 @@ def assign_existing_panel_client(
     """
     target_tg_id = _valid_tg_id(target_tg_id)
     clean_email = str(email or '').strip()
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, target_tg_id)
     if not target_tg_id:
         raise IdentityImportError('Telegram ID пользователя должен быть положительным числом')
     if not clean_email:
@@ -729,7 +738,7 @@ def bind_existing_panel_client(
     current_tg_id = int(current_tg_id)
     new_tg_id = _valid_tg_id(new_tg_id)
     clean_email = str(email or "").strip()
-    clean_username = _clean_username(username)
+    clean_username = _clean_username(username, new_tg_id)
     if current_tg_id == 0:
         raise IdentityImportError("Текущий Telegram ID не указан")
     if not new_tg_id:

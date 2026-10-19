@@ -74,39 +74,39 @@ def test_family_report_tracks_owner_expiry_extension_expiration_and_unlink():
     report = _report_function(connection)
 
     first = report()
-    assert "👤 <b>Иван Петров</b>" in first
-    assert "👤 <b>@owner</b>" in first
-    assert "👤 <b>ID 300</b>" in first
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in first
+    assert 'href="tg://user?id=100"><b>@owner</b></a>' in first
+    assert 'href="tg://user?id=300"><b>ID 300</b></a>' in first
     assert "👨‍👩‍👧 Тип: Семейная" in first
     assert "👨‍👩‍👧 Тип: Обычная" in first
-    assert "👤 <b>@lifetime</b>" in first and "Активна · бессрочно" in first
+    assert 'href="tg://user?id=400"><b>@lifetime</b></a>' in first and "Активна · бессрочно" in first
     assert "истёк 01.01.1970" not in first
     assert "Статус: ⚪ Без подписки" in first
     assert "Страница 1/1" in first
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS - 1,))
     expired = report()
-    assert "👤 <b>Иван Петров</b>" in expired
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in expired
     assert "Статус: 🔴 Истекла" in expired
     assert "❌" not in expired
 
     connection.execute("UPDATE users SET expiry_time=0 WHERE tg_id=100")
     family_lifetime = report()
-    assert "👤 <b>Иван Петров</b>" in family_lifetime
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in family_lifetime
     assert "Статус: 🟢 Активна · бессрочно" in family_lifetime
     assert "👨‍👩‍👧 Тип: Семейная" in family_lifetime
     assert "истёк 01.01.1970" not in family_lifetime
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS + 20 * 86_400_000,))
-    assert "👤 <b>Иван Петров</b>" in report()
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in report()
 
     connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=200")
     unlinked = report()
-    assert "👤 <b>Иван Петров</b>" in unlinked
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in unlinked
     assert "Статус: ⚪ Без подписки" in unlinked
 
     connection.execute("INSERT INTO user_events VALUES(1,200,'family_member')")
-    assert "👤 <b>Иван Петров</b>" in report()
+    assert 'href="tg://user?id=200"><b>Иван Петров</b></a>' in report()
     connection.close()
 
 
@@ -138,7 +138,7 @@ def test_subscription_report_skips_null_rows_and_handles_compat_row_slices():
     logger = SimpleNamespace(warning=Mock())
     report = _report_function(Connection(), logger)()
 
-    assert "👤 <b>@alice</b>" in report
+    assert 'href="tg://user?id=123"><b>@alice</b></a>' in report
     logger.warning.assert_called_once()
 
 
@@ -330,3 +330,40 @@ def test_home_menu_passes_current_telegram_identity_to_cabinet_link():
 
     resolve_user.assert_awaited_once_with(10, None)
     get_user_menu.assert_awaited_once_with(10, None, "alice", "Alice Example")
+
+
+def test_subscription_report_links_numeric_id_and_uses_current_username_or_comment():
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE users (
+            tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, expiry_time INTEGER,
+            last_reminder_days INTEGER, enable INTEGER, uuid TEXT, email TEXT, sub_id TEXT,
+            registration_status TEXT, notes TEXT, custom_payment_price INTEGER
+        );
+        CREATE TABLE telegram_profile_links (telegram_id INTEGER, profile_tg_id INTEGER);
+        CREATE TABLE user_events (id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT);
+        """
+    )
+    connection.executemany(
+        """INSERT INTO users
+           (tg_id,username,display_name,expiry_time,last_reminder_days,enable,uuid,email,sub_id,registration_status,notes)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (1180284364, "id", "Telegram display name", NOW_MS + 30 * 86_400_000, -1, 1, "uuid-brother", "id_1180284364+1180284364", "sub-brother", "active", "Брат Мишы Авхадеева"),
+            (422172767, "Kirill", "", NOW_MS + 30 * 86_400_000, -1, 1, "uuid-kirill", "Kirill_Avdeenko+422172767", "sub-kirill", "active", "kiryan_avd"),
+            (693845923, "Anna", "", NOW_MS + 30 * 86_400_000, -1, 1, "uuid-anna", "Anna_Pavlovna+693845923", "sub-anna", "active", "AnnaSam111"),
+        ],
+    )
+    # Historical events remain in the journal but must not override current handles.
+    connection.executemany(
+        "INSERT INTO user_events VALUES(?,?,?)",
+        [(1, 422172767, "kiryan_avd"), (2, 693845923, "AnnaSam111"), (3, 1180284364, "id")],
+    )
+    report = _report_function(connection)()
+    assert '<a href="tg://user?id=1180284364"><b>Брат Мишы Авхадеева</b></a>' in report
+    assert '<a href="tg://user?id=422172767"><b>@Kirill</b></a>' in report
+    assert '<a href="tg://user?id=693845923"><b>@Anna</b></a>' in report
+    assert "<b>@id</b>" not in report
+    assert "tg://user?id=1180284364" in report
+    connection.close()

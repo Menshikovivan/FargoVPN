@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 import config
 import referral_rewards
+from user_identity import is_generated_identity_comment, normalize_username
 from services.xui_api import (
     add_client_sync,
     bind_client_tg_id_sync,
@@ -117,13 +118,18 @@ def ensure_telegram_user_shell_sync(
     tg_id = int(tg_id)
     if tg_id <= 0:
         raise ValueError("Telegram ID должен быть положительным")
-    display_name = clean_username(username, tg_id)
+    # Keep the display handle separate from the synthetic name used for 3x-ui
+    # email generation. A Telegram user without a handle has username=NULL.
+    display_name = normalize_username(username, tg_id) or None
     existing = get_user_by_tg_id(tg_id, db_path)
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _connect(db_path) as connection:
         if existing:
-            current_name = str(existing.get("username") or "")
-            if display_name and display_name != current_name:
+            raw_current = str(existing.get("username") or "")
+            current_name = normalize_username(raw_current, tg_id) or None
+            # Clear malformed placeholders (id, id_<TG ID>, numeric IDs) and
+            # refresh the real handle even when Telegram reports no username.
+            if display_name != current_name or (raw_current and not current_name):
                 connection.execute(
                     "UPDATE users SET username=?,last_sync_at=? WHERE tg_id=?",
                     (display_name, now_text, tg_id),
@@ -164,11 +170,19 @@ def _upsert_user(
     expiry = int(panel_client.get("expiry_time") or panel_client.get("expiryTime") or 0)
     enable = int(bool(panel_client.get("enable", True)))
     panel_comment = str(panel_client.get("comment") or "").strip()[:255]
+    if tg_id > 0 and is_generated_identity_comment(panel_comment, tg_id, email):
+        panel_comment = ""
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    username = clean_username(username, tg_id)
+    # Positive IDs are Telegram identities; never persist id_<TG ID> or an email
+    # prefix as their username. Negative IDs are local panel users, whose typed
+    # display names must remain intact for backward compatibility.
+    incoming_username = normalize_username(username, tg_id) if tg_id > 0 else clean_username(username, tg_id)
 
     with _connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute("SELECT username FROM users WHERE tg_id=?", (int(tg_id),)).fetchone()
+        current_username = normalize_username(current[0], tg_id) if current and tg_id > 0 else (str(current[0] or "") if current else "")
+        stored_username = incoming_username or current_username or (None if tg_id > 0 else clean_username(username, tg_id))
         # Remove only legacy, unbound aliases for this exact panel client.
         connection.execute(
             "DELETE FROM users WHERE tg_id<=0 AND tg_id<>? AND (LOWER(email)=LOWER(?) OR (?<>'' AND LOWER(uuid)=LOWER(?)))",
@@ -192,7 +206,7 @@ def _upsert_user(
                 last_sync_at=excluded.last_sync_at,
                 last_reminder_days=-1
             """,
-            (int(tg_id), username, uuid_value, email, expiry, enable, sub_id, panel_comment, now_text, now_text),
+            (int(tg_id), stored_username, uuid_value, email, expiry, enable, sub_id, panel_comment, now_text, now_text),
         )
     result = get_user_by_tg_id(tg_id, db_path)
     if not result:
@@ -218,7 +232,7 @@ def recover_user_identity_sync(
     tg_id = int(tg_id)
     if tg_id <= 0:
         return None
-    display_name = clean_username(username, tg_id)
+    display_name = normalize_username(username, tg_id) or None
     local = get_user_by_tg_id(tg_id, db_path)
     candidate: dict[str, Any] | None = None
     if local and local.get("email"):
@@ -352,7 +366,7 @@ def _ensure_subscription_sync_unlocked(
         user = _upsert_user(tg_id, display_name, updated, db_path)
         return SubscriptionResult(
             tg_id=tg_id,
-            username=str(user.get("username") or display_name),
+            username=(str(user.get("username") or "") if tg_id > 0 else str(user.get("username") or display_name)),
             email=str(user.get("email") or email),
             uuid=str(user.get("uuid") or updated.get("uuid") or ""),
             sub_id=str(user.get("sub_id") or updated.get("sub_id") or ""),
@@ -432,7 +446,7 @@ def _ensure_subscription_sync_unlocked(
     user = _upsert_user(tg_id, display_name, panel_client, db_path)
     return SubscriptionResult(
         tg_id=tg_id,
-        username=str(user.get("username") or display_name),
+        username=(str(user.get("username") or "") if tg_id > 0 else str(user.get("username") or display_name)),
         email=str(user.get("email") or email),
         uuid=str(user.get("uuid") or client_uuid),
         sub_id=str(user.get("sub_id") or sub_id),
@@ -463,9 +477,10 @@ def repair_panel_client_identities_sync(db_path: str | Path | None = None) -> di
     result: dict[str, Any] = {"checked": 0, "updated": 0, "unchanged": 0, "missing": 0, "errors": []}
     for row in rows:
         tg_id = int(row.get("tg_id") or 0)
-        username = clean_username(row.get("username"), tg_id)
-        manual_comment = str(row.get("notes") or "").strip()[:255] or username
-        desired = panel_email_for(username, tg_id)
+        stored_username = normalize_username(row.get("username"), tg_id) or None
+        panel_name = clean_username(stored_username or row.get("username"), tg_id)
+        manual_comment = str(row.get("notes") or "").strip()[:255] or panel_name
+        desired = panel_email_for(panel_name, tg_id)
         current_email = str(row.get("email") or "").strip()
         client = by_tg.get(tg_id) or by_email.get(current_email.casefold()) or by_email.get(desired.casefold())
         result["checked"] += 1
@@ -483,7 +498,7 @@ def repair_panel_client_identities_sync(db_path: str | Path | None = None) -> di
             record = get_client_record_sync(old_email)
             update_client_sync(old_email, changes, record=record)
             with _connect(db_path) as connection:
-                connection.execute("UPDATE users SET email=?,username=?,last_sync_at=CURRENT_TIMESTAMP WHERE tg_id=?", (desired if "email" in changes else old_email, username, tg_id))
+                connection.execute("UPDATE users SET email=?,username=?,last_sync_at=CURRENT_TIMESTAMP WHERE tg_id=?", (desired if "email" in changes else old_email, stored_username, tg_id))
             result["updated"] += 1
             if "email" in changes:
                 by_email.pop(old_email.casefold(), None)
@@ -758,7 +773,7 @@ def bind_database_user_tg_id_sync(
     email = str(user.get("email") or "")
     if email:
         bind_client_tg_id_sync(email, new_tg_id)
-    display_name = clean_username(username or str(user.get("username") or ""), new_tg_id)
+    display_name = normalize_username(username, new_tg_id) or None
     with _connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if old_tg_id != new_tg_id:

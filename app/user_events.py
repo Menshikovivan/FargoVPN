@@ -663,55 +663,6 @@ def reconcile_unread_state(db_path: str | Path | None = None) -> int:
 
 
 
-def latest_valid_usernames(
-    tg_ids: Iterable[int], *, db_path: str | Path | None = None, candidates_per_user: int = 20
-) -> dict[int, str]:
-    """Return the newest valid historical Telegram handle for each requested ID.
-
-    Old releases occasionally stored generated labels (for example ``id_123``)
-    in the username column. We search a bounded recent window in one query and
-    validate each candidate against that exact Telegram ID; no cross-user
-    matching is performed.
-    """
-    ids = sorted({int(value) for value in tg_ids if int(value) > 0})
-    if not ids:
-        return {}
-    ensure_schema(db_path)
-    recovered: dict[int, str] = {}
-    candidates_per_user = max(1, min(int(candidates_per_user), 50))
-    with _connect(db_path) as connection:
-        for start in range(0, len(ids), 500):
-            chunk = ids[start:start + 500]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = connection.execute(
-                f"""SELECT tg_id,username FROM (
-                    SELECT tg_id,username,
-                           ROW_NUMBER() OVER (PARTITION BY tg_id ORDER BY id DESC) AS row_no
-                      FROM user_events
-                     WHERE tg_id IN ({placeholders})
-                       AND TRIM(COALESCE(username,''))<>''
-                ) AS recent WHERE row_no<=? ORDER BY tg_id,row_no""",
-                [*chunk, candidates_per_user],
-            ).fetchall()
-            for row in rows:
-                tg_id = int(row[0] or 0)
-                if tg_id in recovered:
-                    continue
-                username = normalize_username(row[1], tg_id)
-                if username:
-                    recovered[tg_id] = username
-    return recovered
-
-
-def last_known_username(tg_id: int, *, db_path: str | Path | None = None) -> str:
-    ensure_schema(db_path)
-    with _connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT username FROM user_events WHERE tg_id=? AND TRIM(COALESCE(username,''))<>'' ORDER BY id DESC LIMIT 1",
-            (int(tg_id),),
-        ).fetchone()
-    return str(row[0] or "") if row else ""
-
 
 def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) -> list[dict[str, Any]]:
     """Return every Telegram chat found in the journal, including users without subscriptions."""
@@ -734,20 +685,13 @@ def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) 
             WHERE events.tg_id>0
             GROUP BY events.tg_id
             ORDER BY last_event_id DESC LIMIT ?""", (limit,)).fetchall()
-    result = [dict(tg_id=int(r['tg_id']), username=str(r['username'] or ''),
+    result = [dict(tg_id=int(r['tg_id']), username=normalize_username(r['username'], int(r['tg_id'] or 0)) or '',
         display_name=str(r['display_name'] or ''), notes=str(r['notes'] or ''),
         total_events=int(r['total_events'] or 0), incoming_events=int(r['incoming_events'] or 0),
         outgoing_events=int(r['outgoing_events'] or 0), last_event_id=int(r['last_event_id'] or 0),
         last_event_at=str(r['last_event_at'] or '')) for r in rows]
-    needs_history = [item['tg_id'] for item in result if not normalize_username(item['username'], item['tg_id'])]
-    if needs_history:
-        try:
-            history = latest_valid_usernames(needs_history, db_path=db_path)
-            for item in result:
-                valid = normalize_username(item['username'], item['tg_id'])
-                item['username'] = valid or history.get(item['tg_id'], '')
-        except Exception as error:
-            logger.warning("Не удалось восстановить исторические Telegram-ники диалогов: %s", type(error).__name__)
+    # Dialogs use the current users row only. Event usernames are snapshots and
+    # may refer to an old Telegram handle after the person renames their account.
     return result
 
 
@@ -798,21 +742,11 @@ def all_events(
     for row in rows:
         item = _event_from_row(row)
         current_username = normalize_username(row["display_username"], int(row["tg_id"] or 0))
-        event_username = normalize_username(item.get("username"), int(row["tg_id"] or 0))
-        item["display_username"] = current_username or event_username or ""
+        item["display_username"] = current_username or ""
         item["display_name"] = str(row["display_name"] or "")
         item["notes"] = str(row["notes"] or "")
         result.append(item)
-    needs_history = sorted({int(item.get("tg_id") or 0) for item in result
-                            if int(item.get("tg_id") or 0) > 0 and not item["display_username"]})
-    if needs_history:
-        try:
-            history = latest_valid_usernames(needs_history, db_path=db_path)
-            for item in result:
-                if not item["display_username"]:
-                    item["display_username"] = history.get(int(item.get("tg_id") or 0), "")
-        except Exception as error:
-            logger.warning("Не удалось восстановить исторические ники журнала сообщений: %s", type(error).__name__)
+    # Do not replace a missing current username with an old event snapshot.
     return result
 
 
@@ -885,21 +819,11 @@ def recent_all_events(
     for row in rows:
         item = _event_from_row(row)
         current_username = normalize_username(row["display_username"], int(row["tg_id"] or 0))
-        event_username = normalize_username(item.get("username"), int(row["tg_id"] or 0))
-        item["display_username"] = current_username or event_username or ""
+        item["display_username"] = current_username or ""
         item["display_name"] = str(row["display_name"] or "")
         item["notes"] = str(row["notes"] or "")
         result.append(item)
-    needs_history = sorted({int(item.get("tg_id") or 0) for item in result
-                            if int(item.get("tg_id") or 0) > 0 and not item["display_username"]})
-    if needs_history:
-        try:
-            history = latest_valid_usernames(needs_history, db_path=db_path)
-            for item in result:
-                if not item["display_username"]:
-                    item["display_username"] = history.get(int(item.get("tg_id") or 0), "")
-        except Exception as error:
-            logger.warning("Не удалось восстановить исторические ники live-ленты: %s", type(error).__name__)
+    # A previous message may carry a renamed handle; current profile metadata wins.
     return result
 
 
@@ -935,7 +859,7 @@ def conversation_users_for_ids(
         ).fetchall()
     result = [dict(
         tg_id=int(row["tg_id"]),
-        username=str(row["username"] or ""),
+        username=normalize_username(row["username"], int(row["tg_id"] or 0)) or "",
         display_name=str(row["display_name"] or ""), notes=str(row["notes"] or ""),
         total_events=int(row["total_events"] or 0),
         incoming_events=int(row["incoming_events"] or 0),
@@ -943,15 +867,8 @@ def conversation_users_for_ids(
         last_event_id=int(row["last_event_id"] or 0),
         last_event_at=str(row["last_event_at"] or ""),
     ) for row in rows]
-    needs_history = [item['tg_id'] for item in result if not normalize_username(item['username'], item['tg_id'])]
-    if needs_history:
-        try:
-            history = latest_valid_usernames(needs_history, db_path=db_path)
-            for item in result:
-                valid = normalize_username(item['username'], item['tg_id'])
-                item['username'] = valid or history.get(item['tg_id'], '')
-        except Exception as error:
-            logger.warning("Не удалось восстановить исторические Telegram-ники выбранных диалогов: %s", type(error).__name__)
+    # The visible label is calculated from the current profile (username, then
+    # notes, then Telegram ID); never fill a missing handle from message history.
     return result
 
 
