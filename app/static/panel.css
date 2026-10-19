@@ -550,7 +550,7 @@ form[action$="/payment-price"]>.setting{margin:0}
 }
 
 
-/* 5.1.36: resilient audit table and filter layout on desktop and mobile. */
+/* Resilient audit table and filter layout on desktop and mobile. */
 .audit-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.45fr) minmax(84px,100px) auto;align-items:end;gap:8px;min-width:0;width:100%}
 .audit-filters>*{min-width:0;max-width:100%}
 .audit-filters input,.audit-filters select{width:100%;min-width:0}

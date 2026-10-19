@@ -37,6 +37,7 @@ def test_canonical_display_name_order_and_normalization():
     assert user_identity.get_display_name({"tg_id": 8, "username": "  ", "notes": "  Иван   Петров  "}) == "Иван Петров"
     assert user_identity.get_display_name({"tg_id": 9, "username": None, "display_name": "Telegram Full Name", "notes": "None"}) == "ID 9"
     assert user_identity.get_display_name({"tg_id": 10, "username": "None", "notes": "Комментарий"}) == "Комментарий"
+    assert user_identity.get_display_name({"tg_id": 693845923, "username": None, "notes": "id_693845923", "email": "Anna_Pavlovna"}) == "ID 693845923"
     assert user_identity.get_display_name({"tg_id": 11, "username": "id_11", "notes": "Участник семьи"}) == "Участник семьи"
     assert user_identity.get_display_name({"tg_id": 12, "username": "   ", "notes": ""}) == "ID 12"
     assert user_identity.get_display_name({"tg_id": 13, "username": "bad name", "notes": "Операторский комментарий"}) == "Операторский комментарий"
@@ -161,7 +162,7 @@ class _MigrationConnection:
     def __init__(self, users: list[dict], events: list[dict], columns: set[str] | None = None, has_events: bool = True, operations=None):
         self.users = users
         self.events = events
-        self.columns = set(columns) if columns is not None else {"tg_id", "username", "display_name", "notes"}
+        self.columns = set(columns) if columns is not None else {"tg_id", "username", "display_name", "notes", "identity_source", "email"}
         self.has_events = has_events
         self.operations = operations if operations is not None else []
 
@@ -179,14 +180,17 @@ class _MigrationConnection:
         if "information_schema.columns" in compact and "table_name='users'" in compact:
             return _Rows([(c,) for c in self.columns])
         if "information_schema.columns" in compact and "table_name='user_events'" in compact:
-            return _Rows([(c,) for c in ("id", "tg_id", "username")]) if self.has_events else _Rows([])
+            return _Rows([(c,) for c in ("id", "tg_id", "username", "direction", "actor")]) if self.has_events else _Rows([])
         if "information_schema.tables" in compact and "table_name='user_events'" in compact:
             return _Rows([(1,)]) if self.has_events else _Rows([])
         if compact.startswith("SELECT ") and " FROM users ORDER BY tg_id" in compact:
             selected = compact.split("SELECT ", 1)[1].split(" FROM users", 1)[0].split(",")
             return _Rows([tuple(row.get(column) for column in selected) for row in sorted(self.users, key=lambda item: item["tg_id"])])
-        if compact.startswith("SELECT id,tg_id,username FROM user_events"):
-            return _Rows([(event["id"], event["tg_id"], event["username"]) for event in self.events if event.get("username") is not None])
+        if compact.startswith("SELECT id,tg_id,username,direction,actor FROM user_events"):
+            return _Rows([
+                (event["id"], event["tg_id"], event.get("username"), event.get("direction", "system"), event.get("actor", "web"))
+                for event in self.events
+            ])
         if compact.startswith("UPDATE users SET "):
             before_where = compact.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
             names = [item.split("=", 1)[0] for item in before_where.split(",")]
@@ -217,9 +221,9 @@ def _migration_users():
 
 def test_identity_migration_backs_up_first_reports_changes_and_is_idempotent(tmp_path, monkeypatch):
     users, events = _migration_users(), [
-        {"id": 1, "tg_id": 4, "username": "id_4"},
-        {"id": 2, "tg_id": 1, "username": "alice"},
-        {"id": 3, "tg_id": 4, "username": "member_real"},
+        {"id": 1, "tg_id": 4, "username": "id_4", "direction": "in", "actor": "telegram:4"},
+        {"id": 2, "tg_id": 1, "username": "alice", "direction": "in", "actor": "telegram:@alice"},
+        {"id": 3, "tg_id": 4, "username": "member_real", "direction": "system", "actor": "web"},
     ]
     operations = []
     connection = _MigrationConnection(users, events, operations=operations)
@@ -307,7 +311,9 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
         "time": SimpleNamespace(time=lambda: now_seconds),
         "html": html,
         "billing": billing,
-        "logger": SimpleNamespace(warning=Mock()),
+        "logger": SimpleNamespace(warning=Mock(), debug=Mock()),
+        "normalize_username": __import__("user_identity").normalize_username,
+        "latest_trusted_telegram_usernames": __import__("user_identity").latest_trusted_telegram_usernames,
         "SUBSCRIPTION_REPORT_PAGE_SIZE": 8,
         "local_date_from_timestamp": lambda value: datetime.fromtimestamp(value).date(),
         "now_local": lambda: datetime.fromtimestamp(now_seconds),
@@ -316,9 +322,9 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
     first = namespace["subscription_report_text"](1)
     last = namespace["subscription_report_text"](63)
     assert "Страница 1/63" in first
-    assert first.count('<a href="tg://user?id=') == 8
+    assert first.count('<a href="https://t.me/') == 8
     assert "Страница 63/63" in last
-    assert last.count('<a href="tg://user?id=') == 4
+    assert last.count('<a href="https://t.me/') == 4
     split_node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "split_subscription_report")
     split_node.decorator_list = []
     split_ns = {"re": re}
@@ -464,3 +470,37 @@ def test_live_message_dialogs_return_server_resolved_display_label():
     endpoint = source[start:end]
     assert 'dialog["display_label"] = _panel_user_label(' in endpoint
     assert '"dialogs": changed_dialogs' in endpoint
+
+
+def test_identity_migration_recovers_handle_from_latest_direct_telegram_update_only(tmp_path, monkeypatch):
+    """The latest inbound Telegram handle wins; web/XUI/bot labels never do."""
+    users = [
+        {"tg_id": 422172767, "username": "Kirill", "display_name": "Kirill", "notes": "kiryan_avd", "identity_source": "3x-ui", "email": "Kirill_Avdeenko"},
+        {"tg_id": 693845923, "username": "Anna", "display_name": "Anna", "notes": "id_693845923", "identity_source": "3x-ui", "email": "Anna_Pavlovna"},
+    ]
+    events = [
+        {"id": 1, "tg_id": 422172767, "username": "kiryan_avd", "direction": "in", "actor": "telegram:@kiryan_avd"},
+        {"id": 2, "tg_id": 422172767, "username": "Kirill", "direction": "system", "actor": "web"},
+        {"id": 3, "tg_id": 693845923, "username": "Anna", "direction": "out", "actor": "telegram_bot"},
+    ]
+    connection = _MigrationConnection(users, events)
+    monkeypatch.setattr(migration.config, "DB_PATH", "unused", raising=False)
+    monkeypatch.setattr(migration.config, "BACKUP_DATABASE_TIMEOUT_SECONDS", 60, raising=False)
+    monkeypatch.setattr(migration.database_adapter, "database_url", lambda: "postgresql+psycopg://test", raising=False)
+
+    def snapshot(path, **_kwargs):
+        Path(path).write_text("-- fake but non-empty backup snapshot\n", encoding="utf-8")
+        return Path(path)
+
+    monkeypatch.setattr(migration, "postgres_snapshot", snapshot)
+    monkeypatch.setattr(migration.database_adapter, "connect", lambda *_args, **_kwargs: connection)
+    report = migration.run(backup_dir=str(tmp_path))
+
+    assert report["telegram_usernames_recovered"] == 1
+    assert report["untrusted_panel_usernames_cleared"] == 1
+    assert users[0]["username"] == "kiryan_avd"
+    # The supplied backup has no trusted incoming Telegram snapshot or stored
+    # @AnnaSam111 for this ID. Never invent/link the 3x-ui label @Anna.
+    assert users[1]["username"] is None
+    assert users[0]["notes"] == "kiryan_avd"
+    assert users[1]["notes"] == "id_693845923"

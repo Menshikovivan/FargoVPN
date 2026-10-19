@@ -1530,20 +1530,13 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                             (occupied_uuid and uuid_key and occupied_uuid != uuid_key)
                         )
                         if identity_agrees and not conflicting_fields:
-                            source_username = normalize_username(row.get("username"), inferred_tg_id)
                             existing_username = normalize_username(existing_dict.get("username"), inferred_tg_id)
-                            # When a legacy negative-ID row is merged into a real
-                            # Telegram account, never copy its generated/email-derived
-                            # panel label into users.username. Keep a validated handle
-                            # only; an invalid target placeholder is normalized to NULL
-                            # by the main upsert below (its notes/comment stay intact).
-                            if not existing_username and source_username:
-                                connection.execute(
-                                    "UPDATE users SET username=? WHERE tg_id=?",
-                                    (source_username, inferred_tg_id),
-                                )
-                                existing_dict["username"] = source_username
-                            elif not existing_username:
+                            # A negative-ID row is a 3x-ui/local display identity, not
+                            # a Telegram observation. Never promote it to a Telegram
+                            # handle during merge, even when it looks syntactically valid.
+                            # Invalid target placeholders become NULL; a trusted direct
+                            # Telegram update can repopulate the handle later.
+                            if not existing_username:
                                 if existing_dict.get("username"):
                                     connection.execute(
                                         "UPDATE users SET username=NULL WHERE tg_id=?",
@@ -1683,7 +1676,11 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                     ),
                 )
                 changed += 1
-            if panel_tg_id > 0 and tg_id == panel_tg_id and not identity_conflict and (row is None or str(old.get("identity_source") or "") != "3x-ui"):
+            old_identity_source = str(old.get("identity_source") or "").strip().casefold()
+            # A 3x-ui sync confirms the subscription/client record, not a
+            # Telegram username. Keep stronger identity provenance (Telegram
+            # update or explicit admin confirmation) across recurring syncs.
+            if panel_tg_id > 0 and tg_id == panel_tg_id and not identity_conflict and (row is None or not old_identity_source):
                 connection.execute(
                     "UPDATE users SET identity_source='3x-ui',identity_updated_at=? WHERE tg_id=?",
                     (now_text, tg_id),

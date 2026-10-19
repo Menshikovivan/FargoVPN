@@ -26,8 +26,8 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.36"] * 2
-    assert "## 5.1.36" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.37"] * 2
+    assert "## 5.1.37" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
 
 def test_readme_ci_badge_targets_included_workflow():
     repo = ROOT.parent
@@ -283,8 +283,8 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.36"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.36"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.37"
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.37"
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
     assert "5.1.20 всегда используется полный профиль" in installer
 

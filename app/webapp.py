@@ -1081,18 +1081,28 @@ def _panel_user_label(tg_id: int, username: Any, display_name: Any = "", comment
     )
 
 
-def _telegram_profile_link(tg_id: Any, label: Any, css_class: str = "telegram-profile-link") -> str:
-    """Render a safe Telegram deep link keyed by immutable numeric user ID."""
+def _telegram_profile_link(
+    tg_id: Any, label: Any, css_class: str = "telegram-profile-link", username: Any = None
+) -> str:
+    """Link a user only by a validated Telegram username, never by numeric ID.
+
+    Telegram Bot API numeric-ID deep links do not reliably open a conversation
+    unless the target is already known to the client. An operator comment or
+    display name is not a username and must never be placed into a t.me URL.
+    """
     try:
         numeric_id = int(tg_id or 0)
     except (TypeError, ValueError, OverflowError):
         numeric_id = 0
     safe_label = html.escape(str(label or "Пользователь"))
-    if numeric_id <= 0:
+    handle = normalize_username(username, numeric_id)
+    if numeric_id <= 0 or not handle:
         return safe_label
+    safe_handle = html.escape(handle, quote=True)
     return (
         f'<a class="{html.escape(css_class, quote=True)}" '
-        f'href="tg://user?id={numeric_id}" aria-label="Открыть профиль в Telegram">'
+        f'href="https://t.me/{safe_handle}" target="_blank" rel="noopener noreferrer" '
+        f'aria-label="Открыть переписку с @{safe_handle} в Telegram">'
         f'{safe_label}</a>'
     )
 
@@ -3015,7 +3025,7 @@ def users_page(
             telegram_badge += f'<span class="muted" title="{html.escape(telegram_reason, quote=True)}">{html.escape(telegram_reason[:90])}</span>'
         cards.append(
             f'''<article class="user-row" data-user-tg-id="{tg_id}" data-user-registered="{html.escape(registered_day, quote=True)}" data-user-search="{html.escape(search_blob, quote=True)}" data-user-status="{row_status}" data-user-online="{1 if item.get('online') else 0}" data-user-remaining="{remaining_sort}" data-user-last-online="{int(item.get('last_online_ts') or 0)}" data-user-traffic="{int(item.get('traffic_used') or 0)}" data-user-quota="{html.escape(quota_sort, quote=True)}" data-user-name="{html.escape(display_name.casefold(), quote=True)}">
-<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{_telegram_profile_link(tg_id, display_name)}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
+<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{_telegram_profile_link(tg_id, display_name, username=item.get("username"))}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
 <div class="user-status">{user_subscription_badge(payment_status)}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
 <div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
@@ -3367,7 +3377,7 @@ def user_detail_page(request: Request, tg_id: int):
             (int(tg_id), int(tg_id)),
         ).fetchall()
     linked_html = ''.join(
-        f'<li>{_telegram_profile_link(int(x[0]), billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")), "telegram-inline-link")} · TG {int(x[0])}</li>'
+        f'<li>{_telegram_profile_link(int(x[0]), billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")), "telegram-inline-link", username=x[1])} · TG {int(x[0])}</li>'
         for x in linked_rows
     ) or '<li>Дополнительных аккаунтов нет</li>'
     price_value = str(row.get("custom_payment_price") or "")
@@ -3453,7 +3463,7 @@ def user_detail_page(request: Request, tg_id: int):
     display_label = _panel_user_label(
         tg_id, row.get("username"), row.get("display_name"), xui_comment or row.get("notes")
     )
-    display_label_html = _telegram_profile_link(tg_id, display_label)
+    display_label_html = _telegram_profile_link(tg_id, display_label, username=row.get("username"))
     body = f'''<header><div><h1>{display_label_html}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
 {billing_html}
 <div class="chat-layout"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
@@ -4139,11 +4149,13 @@ def messages_page(
         user_label = _panel_user_label(
             tid, item.get("username"), item.get("display_name"), item.get("notes")
         )
+        telegram_link = _telegram_profile_link(
+            tid, "Telegram ↗", "message-user-telegram", username=item.get("username")
+        )
         user_rows.append(
             '<div class="message-user-row %s%s" data-tg-id="%s">'
             '<a class="message-user-open" href="%s"><span class="message-user-main"><strong>%s</strong><span>#%s</span></span></a>'
-            '<a class="message-user-telegram" href="tg://user?id=%s" title="Открыть этого пользователя в Telegram">Telegram ↗</a>'
-            '%s<small>%s входящих · %s исходящих</small></div>'
+            '%s%s<small>%s входящих · %s исходящих</small></div>'
             % (
                 active,
                 " has-unread" if unread_count else "",
@@ -4151,7 +4163,7 @@ def messages_page(
                 messages_url(1, tg_id=tid),
                 html.escape(user_label),
                 tid,
-                tid,
+                telegram_link,
                 badge,
                 item["incoming_events"],
                 item["outgoing_events"],
@@ -4175,7 +4187,7 @@ def messages_page(
         user_label_text = _panel_user_label(
             tid, event.get("display_username"), event.get("display_name"), event.get("notes")
         )
-        user_label = _telegram_profile_link(tid, user_label_text, "telegram-inline-link")
+        user_label = _telegram_profile_link(tid, user_label_text, "telegram-inline-link", username=event.get("display_username"))
         at = html.escape(fmt_event_timestamp(event.get("created_at")))
         error_note = html.escape(str(event.get("delivery_error") or ""))
         status_class = "failed" if status == "failed" else ""
@@ -4206,6 +4218,13 @@ def messages_page(
     if page_no < total_pages:
         pagination.append(f'<a class="button secondary small" href="{messages_url(page_no + 1)}">Старее →</a>')
     card_link = f'<a class="button secondary small" href="/users/id/{selected}">Карточка пользователя</a>' if selected else ""
+    selected_telegram_link = (
+        _telegram_profile_link(
+            selected, "Открыть Telegram ↗", "button secondary small",
+            username=(selected_user.get("username") if selected_user else None),
+        )
+        if selected > 0 else ""
+    )
     range_start = 0 if total_events == 0 else offset + 1
     range_end = min(total_events, offset + len(events))
     media_limit = max(1, int(getattr(config, "CHAT_MEDIA_MAX_MB", 100)))
@@ -4215,7 +4234,7 @@ def messages_page(
     body = f'''<header class="page-header"><div><h1>Сообщения</h1><div class="subtitle">Входящие, исходящие и служебные события · {range_start}–{range_end} из {total_events}</div></div><div class="actions">{" ".join(direction_filters)} {" ".join(type_filters)} {card_link}</div></header>
 <div class="card messages-toolbar"><form method="get" action="/messages"><input type="hidden" name="tg_id" value="{selected}"><input type="hidden" name="direction" value="{html.escape(direction)}"><input type="hidden" name="message_kind" value="{html.escape(message_kind)}"><label>Поиск <input type="search" name="q" value="{html.escape(q)}" placeholder="Текст, @username или Telegram ID"></label><label>На странице <select name="per_page"><option value="25" {"selected" if per_page == 25 else ""}>25</option><option value="50" {"selected" if per_page == 50 else ""}>50</option><option value="100" {"selected" if per_page == 100 else ""}>100</option></select></label><button class="button small" type="submit">Искать</button></form></div>
 <div class="messages-layout messages-layout-modern" data-message-live-feed="1"><section class="card messages-users"><div class="compact-panel-head"><div><strong>Диалоги</strong><span class="muted">Нажмите пользователя для открытия чата</span></div><span class="badge" data-message-dialog-count>{len(participants)}</span></div><label class="messages-search"><span>⌕</span><input type="search" placeholder="Фильтр списка пользователей" data-message-search autocomplete="off"></label><div class="messages-users-list" data-message-list>{"".join(user_rows) or '<p class="muted">Сообщений ещё нет.</p>'}</div></section>
-<section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div><div class="actions">{('<a class="button secondary small" href="tg://user?id=' + str(selected) + '">Открыть Telegram ↗</a>' if selected > 0 else '')}{card_link}</div></div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
+<section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div><div class="actions">{selected_telegram_link}{card_link}</div></div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
     messages_path_js = json.dumps(public_path("/messages"))
     messages_feed_path_js = json.dumps(public_path("/api/panel/messages/feed"))
     scripts = f'''<script>(function(){{
@@ -4237,8 +4256,8 @@ let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{1,100}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id'&&!/^id_?\\d+$/i.test(username);const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('div');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.innerHTML='<a class="message-user-open" href="'+messagesPath+'?tg_id='+encodeURIComponent(tid)+'"><span class="message-user-main"><strong></strong><span>#'+tid+'</span></span></a><a class="message-user-telegram" href="tg://user?id='+tid+'" title="Открыть этого пользователя в Telegram">Telegram ↗</a><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
-function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id||selected)||0;const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));if(whoId>0){{const who=document.createElement('a');who.className='telegram-inline-link';who.href='tg://user?id='+whoId;who.textContent=whoLabel;who.title='Открыть этого пользователя в Telegram';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
+function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{1,100}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id'&&!/^id_?[0-9]+$/i.test(username);const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('div');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.innerHTML='<a class="message-user-open" href="'+messagesPath+'?tg_id='+encodeURIComponent(tid)+'"><span class="message-user-main"><strong></strong><span>#'+tid+'</span></span></a><a class="message-user-telegram" title="Открыть этого пользователя в Telegram">Telegram ↗</a><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const telegramLink=row.querySelector('.message-user-telegram');if(telegramLink){{if(realUsername){{telegramLink.href='https://t.me/'+encodeURIComponent(username);telegramLink.target='_blank';telegramLink.rel='noopener noreferrer';telegramLink.removeAttribute('aria-disabled');}}else{{telegramLink.removeAttribute('href');telegramLink.setAttribute('aria-disabled','true');telegramLink.title='У пользователя нет подтверждённого Telegram username';}}}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id||selected)||0;const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));const whoUsername=String(item.display_username||'').trim().replace(/^@/,'');const validWhoUsername=/^[A-Za-z0-9_]{1,100}$/.test(whoUsername)&&!/^[0-9]+$/.test(whoUsername)&&!['none','null','undefined','id'].includes(whoUsername.toLowerCase())&&!/^id_?[0-9]+$/i.test(whoUsername);if(whoId>0&&validWhoUsername){{const who=document.createElement('a');who.className='telegram-inline-link';who.href='https://t.me/'+encodeURIComponent(whoUsername);who.target='_blank';who.rel='noopener noreferrer';who.textContent=whoLabel;who.title='Открыть переписку с пользователем в Telegram';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
 async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}else{{setTimeout(()=>{{if(!inflight)poll();}},100);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
@@ -4277,7 +4296,10 @@ def create_user(request: Request, tg_id: str = Form(""), username: str = Form(),
             row = connection.execute("SELECT MIN(tg_id) FROM users WHERE tg_id<0").fetchone()
             parsed = min(-1, int(row[0] or 0) - 1)
     try:
-        result = ensure_subscription_sync(parsed, username, days=days, db_path=config.DB_PATH)
+        result = ensure_subscription_sync(
+            parsed, username, days=days, db_path=config.DB_PATH,
+            trust_username=(parsed <= 0),
+        )
         email = result.email
     except Exception as error:
         raise HTTPException(502, f"3x-ui не приняла создание пользователя: {error}") from error
@@ -4293,7 +4315,9 @@ def create_user(request: Request, tg_id: str = Form(""), username: str = Form(),
     auth_warning = ""
     if parsed > 0:
         try:
-            registration_access.authorize_admin_user_sync(parsed, username, None, actor=actor)
+            registration_access.authorize_admin_user_sync(
+                parsed, None if parsed > 0 else username, None, actor=actor
+            )
         except Exception as error:
             # The 3x-ui account already exists. Report the secondary auth
             # problem without converting the successful primary action to 500.
@@ -4732,7 +4756,8 @@ def payments(request: Request):
             str(row["current_display_name"] or ""), str(row["user_notes"] or "")
         )
         payment_user_link = _telegram_profile_link(
-            int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link"
+            int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link",
+            username=row["current_username"],
         )
         table_rows.append(
             f'<tr class="payment-row"><td data-label="ID">#{row["id"]}</td><td data-label="Пользователь">{payment_user_link}<br><small>ID {row["tg_id"]}</small></td><td data-label="Сумма">{amount_text}</td><td data-label="Получен">{html.escape(row["created_at"] or "")}</td><td data-label="OCR">{ocr_badge}{ocr_note}</td><td data-label="Статус">{badge}{error_note}</td><td data-label="Действия"><div class="payment-actions">{actions}</div></td></tr>'
@@ -4784,7 +4809,8 @@ def receipt(request: Request, payment_id: int):
         str(row["current_display_name"] or ""), str(row["user_notes"] or "")
     )
     payment_user_link = _telegram_profile_link(
-        int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link"
+        int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link",
+        username=row["current_username"],
     )
     body = f'''<header><div><h1>Чек #{payment_id}</h1><div class="subtitle">{payment_user_link} · Telegram ID {row["tg_id"]} · {html.escape(str(row["created_at"] or ""))}</div></div><a class="button secondary" href="/payments">Назад</a></header>{duplicate_html}<div class="grid"><div class="card wide" style="text-align:center"><img src="/payments/{payment_id}/receipt/image" alt="Чек #{payment_id}" style="display:block;max-width:100%;max-height:78vh;margin:auto;border-radius:10px;object-fit:contain" loading="eager"></div><div class="card side"><h2>Результат OCR</h2><p>Статус: <span class="code">{status}</span></p><p>Сумма: <strong>{amount}</strong><br>Дата: <strong>{html.escape(str(row["receipt_date"] or "—"))}</strong><br>Имя: <strong>{html.escape(str(row["receipt_receiver"] or "—"))}</strong><br>Номер: <strong>{html.escape(str(row["receipt_phone"] or "—"))}</strong></p>{checks_html}{reasons_html}</div><div class="card full"><h2>Распознанный текст</h2><pre>{ocr_text}</pre></div></div>'''
     return page(request, f"Чек #{payment_id}", body, "payments")

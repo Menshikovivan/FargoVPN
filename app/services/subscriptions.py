@@ -161,6 +161,8 @@ def _upsert_user(
     username: str,
     panel_client: dict[str, Any],
     db_path: str | Path | None = None,
+    *,
+    allow_seed_username: bool = True,
 ) -> dict[str, Any]:
     email = str(panel_client.get("email") or "").strip()
     if not email:
@@ -176,13 +178,20 @@ def _upsert_user(
     # Positive IDs are Telegram identities; never persist id_<TG ID> or an email
     # prefix as their username. Negative IDs are local panel users, whose typed
     # display names must remain intact for backward compatibility.
-    incoming_username = normalize_username(username, tg_id) if tg_id > 0 else clean_username(username, tg_id)
+    incoming_username = (
+        (normalize_username(username, tg_id) if allow_seed_username else None)
+        if tg_id > 0 else clean_username(username, tg_id)
+    )
 
     with _connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         current = connection.execute("SELECT username FROM users WHERE tg_id=?", (int(tg_id),)).fetchone()
         current_username = normalize_username(current[0], tg_id) if current and tg_id > 0 else (str(current[0] or "") if current else "")
-        stored_username = incoming_username or current_username or (None if tg_id > 0 else clean_username(username, tg_id))
+        # For an existing Telegram-linked row, a subscription mutation is not a
+        # new identity observation. Preserve the stored canonical username; the
+        # Telegram middleware/contact refresh owns updates from Telegram itself.
+        # A new row may be seeded from the supplied Telegram username.
+        stored_username = (current_username or incoming_username) if tg_id > 0 else (incoming_username or current_username or clean_username(username, tg_id))
         # Remove only legacy, unbound aliases for this exact panel client.
         connection.execute(
             "DELETE FROM users WHERE tg_id<=0 AND tg_id<>? AND (LOWER(email)=LOWER(?) OR (?<>'' AND LOWER(uuid)=LOWER(?)))",
@@ -329,11 +338,17 @@ def ensure_subscription_sync(
     username: str | None,
     days: int = 30,
     db_path: str | Path | None = None,
+    *,
+    trust_username: bool = True,
 ) -> SubscriptionResult:
-    """Extend/create a subscription while serializing concurrent renewals."""
+    """Extend/create a subscription while serializing concurrent renewals.
+
+    ``trust_username=False`` is for admin-entered 3x-ui labels: they may be
+    used for the panel comment/email but are not evidence of Telegram identity.
+    """
     tg_id = int(tg_id)
     with _subscription_identity_lock_sync(tg_id, db_path):
-        return _ensure_subscription_sync_unlocked(tg_id, username, days, db_path)
+        return _ensure_subscription_sync_unlocked(tg_id, username, days, db_path, trust_username=trust_username)
 
 
 def _ensure_subscription_sync_unlocked(
@@ -341,6 +356,8 @@ def _ensure_subscription_sync_unlocked(
     username: str | None,
     days: int = 30,
     db_path: str | Path | None = None,
+    *,
+    trust_username: bool = True,
 ) -> SubscriptionResult:
     """Implementation of :func:`ensure_subscription_sync` without the cross-worker lock.
 
@@ -363,7 +380,7 @@ def _ensure_subscription_sync_unlocked(
     if candidate:
         email = str(candidate.get("email") or "")
         updated = extend_client_sync(email, days, tg_id=tg_id)
-        user = _upsert_user(tg_id, display_name, updated, db_path)
+        user = _upsert_user(tg_id, display_name, updated, db_path, allow_seed_username=trust_username)
         return SubscriptionResult(
             tg_id=tg_id,
             username=(str(user.get("username") or "") if tg_id > 0 else str(user.get("username") or display_name)),
@@ -443,7 +460,7 @@ def _ensure_subscription_sync_unlocked(
         created = False
         recovered = True
 
-    user = _upsert_user(tg_id, display_name, panel_client, db_path)
+    user = _upsert_user(tg_id, display_name, panel_client, db_path, allow_seed_username=trust_username)
     return SubscriptionResult(
         tg_id=tg_id,
         username=(str(user.get("username") or "") if tg_id > 0 else str(user.get("username") or display_name)),

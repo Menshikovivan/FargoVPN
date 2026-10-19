@@ -41,9 +41,21 @@ def test_media_transport_journal_is_best_effort():
 def test_create_user_does_not_turn_post_creation_sync_failure_into_502():
     src = func("create_user")
     assert "ensure_subscription_sync(" in src
+    assert "trust_username=(parsed <= 0)" in src
+    assert "None if parsed > 0 else username" in src
     assert "fetch_and_sync(force=True" in src
     assert "sync_warning =" in src
     assert "auth_warning =" in src
+
+
+def test_xui_placeholder_merge_never_promotes_a_local_display_name_to_telegram_username():
+    source = (ROOT / "services/xui_api.py").read_text(encoding="utf-8")
+    assert 'source_username = normalize_username(row.get("username")' not in source
+    assert "Never promote it to a Telegram" in source
+    assert "UPDATE users SET username=NULL WHERE tg_id=?" in source
+    assert "or not old_identity_source" in source
+    assert 'str(old.get("identity_source") or "") != "3x-ui"' not in source
+    assert "Keep stronger identity provenance" in source
 
 
 def test_adjust_days_distinguishes_remote_success_from_local_sync_failures():

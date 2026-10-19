@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backup-first, idempotent normalization for the 5.1.36 identity policy."""
+"""Backup-first, idempotent normalization for the 5.1.37 identity policy."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,7 @@ from typing import Any
 import config
 import db as database_adapter
 from backup import postgres_snapshot
-from user_identity import normalize_comment, normalize_username
+from user_identity import latest_trusted_telegram_usernames, normalize_comment, normalize_username
 
 
 def _clean_full_name(value: Any) -> str | None:
@@ -35,7 +35,7 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
         or getattr(config, "BACKUP_DIR", "/var/lib/vpn-service/backups")
     ).expanduser()
     root.mkdir(parents=True, exist_ok=True)
-    backup_path = root / f"fargovpn-identity-pre-5.1.36-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.sql"
+    backup_path = root / f"fargovpn-identity-pre-5.1.37-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.sql"
     if not dry_run:
         dsn = database_adapter.database_url()
         previous_umask = os.umask(0o077)
@@ -53,6 +53,8 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
         "users_checked": 0,
         "users_changed": 0,
         "usernames_normalized": 0,
+        "telegram_usernames_recovered": 0,
+        "untrusted_panel_usernames_cleared": 0,
         "comments_normalized": 0,
         "display_names_normalized": 0,
         "events_checked": 0,
@@ -83,7 +85,7 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
         if "tg_id" not in user_columns:
             raise RuntimeError("В таблице users отсутствует обязательный столбец tg_id")
         selected_columns = [
-            name for name in ("tg_id", "username", "display_name", "notes")
+            name for name in ("tg_id", "username", "display_name", "notes", "identity_source", "email")
             if name in user_columns
         ]
         select_sql = "SELECT " + ",".join(selected_columns) + " FROM users ORDER BY tg_id"
@@ -106,13 +108,18 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
                     "WHERE table_schema=current_schema() AND table_name='user_events'"
                 ).fetchall()
             }
-            if {"id", "tg_id", "username"}.issubset(event_columns):
-                events = connection.execute(
-                    "SELECT id,tg_id,username FROM user_events WHERE username IS NOT NULL ORDER BY id DESC"
+            if {"id", "tg_id", "username", "direction", "actor"}.issubset(event_columns):
+                raw_events = connection.execute(
+                    "SELECT id,tg_id,username,direction,actor FROM user_events ORDER BY id ASC"
                 ).fetchall()
+                events = raw_events
                 counts["events_checked"] = len(events)
-        # Retain this metric for parsers of older migration reports; it is always
-        # zero now that historical names are deliberately not trusted.
+        trusted_usernames = latest_trusted_telegram_usernames(
+            [{"id": int(event[0] or 0), "tg_id": int(event[1] or 0),
+              "username": event[2], "direction": event[3], "actor": event[4]}
+             for event in events]
+        )
+        # Older migration-report keys are retained for compatibility with log parsers.
         counts["historical_usernames_recovered"] = 0
         counts["historical_usernames_ignored"] = 0
         user_updates: list[tuple[dict[str, Any], int]] = []
@@ -123,6 +130,22 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
             if "username" in user_columns:
                 old_username = values.get("username")
                 username = normalize_username(old_username, tg_id) or None
+                observed_username = trusted_usernames.get(tg_id)
+                source = str(values.get("identity_source") or "").strip().casefold()
+                if tg_id in trusted_usernames and observed_username != (username or ""):
+                    # A direct incoming Telegram update for the same immutable ID
+                    # is stronger evidence than a possibly polluted local/XUI label.
+                    # An empty observed value also prevents reviving a removed handle.
+                    username = observed_username or None
+                    counts["telegram_usernames_recovered"] += 1
+                elif source.startswith(("3x-ui", "3xui", "xui", "panel")):
+                    # A syntactically valid panel client name is not proof of a
+                    # Telegram handle. If no matching inbound Telegram snapshot
+                    # exists, clear it instead of linking to a potentially unrelated
+                    # person. A later genuine Telegram update repopulates the field.
+                    if username:
+                        counts["untrusted_panel_usernames_cleared"] += 1
+                    username = None
                 if old_username and not normalize_username(old_username, tg_id):
                     counts["historical_usernames_ignored"] += 1
                 if (old_username or None) != username:
@@ -151,13 +174,13 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
                     (*changes.values(), tg_id),
                 )
 
-        # Normalize malformed historical event usernames in place. They are not used
-        # as evidence for the current user identity. Avoid querying a missing
-        # table on PostgreSQL, where a failed query would poison the transaction.
+        # Normalize malformed event usernames in place after building the trusted
+        # per-user snapshot above. Only incoming Telegram events were eligible to
+        # repair users.username; bot/web events remain history, not identity evidence.
         if event_table_exists and {"id", "tg_id", "username"}.issubset(event_columns):
             event_updates: list[tuple[Any, int]] = []
             for event in events:
-                event_id, event_tg_id, old_username = tuple(event)
+                event_id, event_tg_id, old_username = tuple(event)[:3]
                 normalized = normalize_username(old_username, event_tg_id) or None
                 if (old_username or None) != normalized:
                     counts["event_usernames_normalized"] += 1

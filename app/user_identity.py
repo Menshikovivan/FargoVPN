@@ -52,6 +52,39 @@ def normalize_comment(value: Any) -> str:
     return _clean(value, 255)
 
 
+def latest_trusted_telegram_usernames(events: Any) -> dict[int, str]:
+    """Return the latest valid handle observed in an incoming Telegram update per ID.
+
+    Usernames copied from 3x-ui client names, form fields, or operator comments
+    are not Telegram identity evidence. Only incoming events explicitly recorded
+    by the Telegram middleware/support handler qualify. A newer event for the
+    same numeric ID wins, so a renamed handle replaces an older snapshot.
+    """
+    latest: dict[int, tuple[int, str]] = {}
+    for event in events or ():
+        if not isinstance(event, Mapping):
+            continue
+        if str(event.get("direction") or "").strip().casefold() != "in":
+            continue
+        actor = str(event.get("actor") or "").strip().casefold()
+        if not (actor.startswith("telegram:") or actor == "telegram_user"):
+            continue
+        try:
+            tg_id = int(event.get("tg_id") or 0)
+            event_id = int(event.get("id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if tg_id <= 0:
+            continue
+        # An empty/invalid username in a later direct Telegram update means
+        # the account no longer has a usable public handle; don't resurrect an
+        # older one. Non-Telegram events are filtered above and cannot clear it.
+        username = normalize_username(event.get("username"), tg_id)
+        if tg_id not in latest or event_id >= latest[tg_id][0]:
+            latest[tg_id] = (event_id, username)
+    return {tg_id: value[1] for tg_id, value in latest.items()}
+
+
 def is_generated_identity_comment(value: Any, tg_id: Any, email: Any = "") -> bool:
     """Detect panel comments that are merely synthetic ID labels, not operator notes.
 
@@ -138,8 +171,9 @@ def get_display_name(user: Any, tg_id: Any = None) -> str:
         comment = ""
         for key in ("notes", "comment", "user_comment", "operator_comment"):
             comment = normalize_comment(row.get(key))
-            if comment:
+            if comment and not is_generated_identity_comment(comment, row_id, row.get("email", "")):
                 break
+            comment = ""
     else:
         row_id = tg_id if tg_id is not None else 0
         username = normalize_username(user, row_id)

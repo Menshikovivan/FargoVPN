@@ -75,7 +75,7 @@ from services import billing
 from services.subscription_status import has_subscription, has_active_subscription
 from telegram_registration_middleware import InvitationAccessMiddleware, PendingInviteCodeFilter, send_registration_prompt
 import registration_access
-from user_identity import get_display_name, normalize_username
+from user_identity import get_display_name, latest_trusted_telegram_usernames, normalize_username
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
                     handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
@@ -2241,6 +2241,39 @@ def subscription_report_text(page_no: int = 1) -> str:
                  LEFT JOIN users p ON p.tg_id=l.profile_tg_id
                 ORDER BY COALESCE(p.expiry_time,u.expiry_time),u.tg_id"""
         ).fetchall()
+        # Resolve handles while the database connection is still open. A handle
+        # observed in a direct incoming Telegram update for the same numeric ID
+        # is authoritative over polluted usernames copied from 3x-ui or CRM.
+        # Web/system/outgoing events are deliberately excluded.
+        trusted_username_by_id: dict[int, str] = {}
+        try:
+            report_tg_ids = sorted({int(row[2] or 0) for row in users if row is not None and int(row[2] or 0) > 0})
+            if report_tg_ids:
+                placeholders = ",".join("?" for _ in report_tg_ids)
+                event_rows = connection.execute(
+                    f"""SELECT id,tg_id,username,direction,actor FROM user_events
+                       WHERE tg_id IN ({placeholders}) AND direction='in'
+                         AND (LOWER(COALESCE(actor,'')) LIKE 'telegram:%'
+                              OR LOWER(COALESCE(actor,''))='telegram_user')
+                       ORDER BY id ASC""",
+                    tuple(report_tg_ids),
+                ).fetchall()
+            else:
+                event_rows = []
+            event_snapshots = []
+            for event in event_rows:
+                if event is None:
+                    continue
+                try:
+                    event_snapshots.append({
+                        "id": event[0], "tg_id": event[1], "username": event[2],
+                        "direction": event[3], "actor": event[4],
+                    })
+                except (IndexError, KeyError, TypeError):
+                    continue
+            trusted_username_by_id = latest_trusted_telegram_usernames(event_snapshots)
+        except Exception as error:
+            logger.debug("Не удалось разрешить Telegram username из журнала: %s", error)
     if not users:
         return "📭 Пользователи не найдены. · Страница 1/1"
     invalid_rows = sum(row is None for row in users)
@@ -2272,8 +2305,14 @@ def subscription_report_text(page_no: int = 1) -> str:
         email_value = str(row[12] or "") if family_member else str(row[7] or "")
         sub_value = str(row[13] or "") if family_member else str(row[8] or "")
         has_subscription = any(value.strip() for value in (uuid_value, email_value, sub_value))
+        report_username = normalize_username(username, tg_id)
+        if tg_id in trusted_username_by_id:
+            # Presence in this map matters even when the value is empty: the
+            # latest direct Telegram update may indicate the account has no
+            # public username, in which case an older/polluted handle is stale.
+            report_username = trusted_username_by_id[tg_id]
         label = billing.telegram_identity_label(
-            tg_id, str(username or ""), str(display_name or ""), str(row[17] or "")
+            tg_id, report_username, str(display_name or ""), str(row[17] or "")
         )
         # Username/comment can be user-controlled; escape every dynamic field before HTML parsing.
         label = html.escape(str(label)[:100])
@@ -2310,8 +2349,12 @@ def subscription_report_text(page_no: int = 1) -> str:
             price_text = f" · {int(custom_price)} ₽" if custom_price is not None else ""
         except (TypeError, ValueError, OverflowError):
             price_text = ""
-        if tg_id > 0:
-            label_markup = f'<a href="tg://user?id={tg_id}"><b>{label}</b></a>'
+        if tg_id > 0 and report_username:
+            safe_handle = html.escape(report_username, quote=True)
+            label_markup = (
+                f'<a href="https://t.me/{safe_handle}" target="_blank" '
+                f'rel="noopener noreferrer"><b>{label}</b></a>'
+            )
         else:
             label_markup = f"<b>{label}</b>"
         lines.extend([
