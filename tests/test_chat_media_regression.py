@@ -51,8 +51,8 @@ def _load_web_helpers():
                 "",
             )
         ),
-        "_panel_user_label": lambda tg_id, username, display_name: (
-            f"@{username}" if username else display_name or f"ID {tg_id}"
+        "_panel_user_label": lambda tg_id, username, display_name, comment="": (
+            f"@{username}" if username else comment or f"ID {tg_id}"
         ),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "webapp_media_helpers.py", "exec"), namespace)

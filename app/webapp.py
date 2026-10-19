@@ -43,6 +43,7 @@ import config
 from services import billing
 import auth_security
 import cabinet_service
+import webauthn_service
 import referral_codes
 import referral_rewards
 import broadcast_manager
@@ -316,7 +317,7 @@ app.add_middleware(
     https_only=bool(getattr(config, "WEB_COOKIE_HTTPS_ONLY", False)),
     path=(public_prefix() or "/"),
     same_site="lax",
-    max_age=max(900, int(getattr(config, "WEB_SESSION_MAX_AGE_SECONDS", 28_800))),
+    max_age=max(900, int(getattr(config, "WEB_SESSION_MAX_AGE_SECONDS", 604_800))),
 )
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 NET_CACHE = {
@@ -418,7 +419,7 @@ def require_auth(request: Request, form_csrf_token: str = "") -> None:
         request.session.clear()
         raise HTTPException(401, "Учетные данные изменены. Войдите снова")
     login_at = int(request.session.get("login_at") or 0)
-    max_age = max(900, int(getattr(config, "WEB_SESSION_MAX_AGE_SECONDS", 28_800)))
+    max_age = max(900, int(getattr(config, "WEB_SESSION_MAX_AGE_SECONDS", 604_800)))
     if login_at > 0 and int(time.time()) - login_at > max_age:
         request.session.clear()
         raise HTTPException(401, "Сессия истекла")
@@ -1046,23 +1047,18 @@ def telegram_receipt_file(payment_id: int) -> tuple[bytes, str, str]:
 
 
 def _local_users() -> list[dict[str, Any]]:
+    """Return the canonical current user rows; history must not resurrect old handles."""
     with database() as connection:
-        rows = connection.execute(
-            """SELECT u.*,
-                      (SELECT NULLIF(e.username,'') FROM user_events e
-                        WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
-                          AND LOWER(REPLACE(TRIM(e.username),'@','')) NOT IN (
-                              'id_' || CAST(u.tg_id AS TEXT), CAST(u.tg_id AS TEXT)
-                          )
-                        ORDER BY e.id DESC LIMIT 1) AS latest_username
-                 FROM users u"""
-        ).fetchall()
+        rows = connection.execute("SELECT u.* FROM users u").fetchall()
     return [dict(row) for row in rows]
 
 
-def _panel_user_label(tg_id: int, username: Any, display_name: Any) -> str:
+def _panel_user_label(tg_id: int, username: Any, display_name: Any = "", comment: Any = "") -> str:
+    """Resolve a user label under the shared username → operator-comment → ID policy."""
     resolved_username = cabinet_service.public_username(tg_id, username)
-    return billing.telegram_identity_label(tg_id, resolved_username, str(display_name or ""))
+    return billing.telegram_identity_label(
+        int(tg_id), resolved_username, str(display_name or ""), str(comment or "")
+    )
 
 
 def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1131,7 +1127,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
             "username": cabinet_service.public_username(
-                tg_id, row.get("username"), row.get("latest_username")
+                tg_id, row.get("username")
             ),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
@@ -1186,7 +1182,7 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             **family,
             "tg_id": local_tg_id,
             "username": cabinet_service.public_username(
-                local_tg_id, row.get("username"), row.get("latest_username")
+                local_tg_id, row.get("username")
             ),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or "")[:255],
@@ -1329,14 +1325,15 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     elif expiry <= 0 and billing.has_subscription(user): status, status_cls = "Бессрочная", "good"
     else: status, status_cls = "Активна", "good"
     user_tg_id = int(user.get("tg_id") or 0)
-    resolved_username = cabinet_service.public_username(
-        user_tg_id, username, user.get("username")
-    )
+    # Resolve from the canonical record only. The `username` function argument
+    # is kept for call compatibility but may already be a formatted comment and
+    # must never be reinterpreted as an @username.
     username_clean = html.escape(
-        f"@{resolved_username}" if resolved_username else billing.telegram_identity_label(
+        billing.telegram_identity_label(
             user_tg_id,
-            "",
+            str(user.get("username") or ""),
             str(user.get("display_name") or ""),
+            str(user.get("notes") or user.get("comment") or ""),
         )
     )
     if user.get("family_subscription"):
@@ -1348,6 +1345,7 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
             family_owner_tg_id,
             family_owner_username,
             str(user.get("family_owner_display_name") or ""),
+            str(user.get("family_owner_notes") or ""),
         )
         username_clean += (
             f"<br><small>Семейная подписка пользователя "
@@ -1370,7 +1368,7 @@ def event_for_web(event: dict[str, Any], tg_id: int) -> dict[str, Any]:
     )
     result["display_username"] = display_username
     result["display_label"] = _panel_user_label(
-        tg_id, display_username, result.get("display_name")
+        tg_id, display_username, result.get("display_name"), result.get("notes")
     )
     legacy_text = str(result.get("text") or "").strip()
     legacy_match = re.fullmatch(
@@ -1555,6 +1553,7 @@ def navigation(active: str) -> str:
         ("audit", "/audit", "audit", "Аудит"),
         ("reminders", "/reminders", "bell", "Напоминания"),
         ("settings", "/settings", "settings", "Настройки"),
+        ("profile", "/profile", "settings", "Профиль и вход"),
         ("diagnostics", "/diagnostics", "check", "Диагностика"),
     ]
 
@@ -1789,7 +1788,7 @@ def login_page(request: Request):
     action = html.escape(public_path("/login"), quote=True)
     target = json.dumps(public_path("/"))
     service = html.escape(str(config.SERVICE_NAME))
-    body = """<div class="login-wrap"><div class="card login-card"><div class="login-brand"><div class="logo">V</div><div><strong>%s</strong><span>Control Panel</span></div></div><h1>Вход в панель</h1><p class="subtitle">Адаптировано для телефона, браузера и PWA.</p><form id="login-form" method="post" action="%s" novalidate><div class="setting"><label for="login-user">Логин</label><input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div><div class="setting"><label for="login-pass">Пароль</label><input id="login-pass" name="password" type="password" autocomplete="current-password" required></div><button id="login-submit" class="button" type="submit">Войти</button><div id="login-status" class="login-status" aria-live="polite"></div></form></div></div><script>
+    body = """<div class="login-wrap"><div class="card login-card"><div class="login-brand"><div class="logo">V</div><div><strong>%s</strong><span>Control Panel</span></div></div><h1>Вход в панель</h1><p class="subtitle">Адаптировано для телефона, браузера и PWA.</p><form id="login-form" method="post" action="%s" novalidate><div class="setting"><label for="login-user">Логин</label><input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div><div class="setting"><label for="login-pass">Пароль</label><input id="login-pass" name="password" type="password" autocomplete="current-password" required></div><button id="login-submit" class="button" type="submit">Войти по паролю</button><button id="passkey-login" class="button secondary" type="button" data-target="%s" hidden>Войти по Face ID / Touch ID</button><p class="muted">Биометрический вход доступен при HTTPS и после регистрации passkey в профиле.</p><div id="login-status" class="login-status" aria-live="polite"></div></form></div></div><script>
 (function(){
  const f=document.getElementById('login-form'),b=document.getElementById('login-submit'),st=document.getElementById('login-status');
  if(!f)return;
@@ -1803,7 +1802,20 @@ def login_page(request: Request):
   }catch(err){ st.textContent='❌ '+(err.message||'Ошибка входа'); st.className='login-status bad'; }
   finally{ b.disabled=false; }
  });
-})();</script>""" % (service, action, target)
+})();</script><script>
+(function(){
+ const btn=document.getElementById('passkey-login'), status=document.getElementById('login-status');
+ if(!btn)return;
+ const optionsUrl=%s,verifyUrl=%s;
+ const secure=(window.isSecureContext===true)&&!!(navigator.credentials&&window.PublicKeyCredential);
+ if(!secure)return;
+ btn.hidden=false;
+ function fromB64(s){const v=String(s||'').replace(/-/g,'+').replace(/_/g,'/');const b=atob(v+'='.repeat((4-v.length%%4)%%4));return Uint8Array.from(b,c=>c.charCodeAt(0));}
+ function toB64(buf){let s='';for(const b of new Uint8Array(buf))s+=String.fromCharCode(b);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+ function publicKeyOptions(o){o.challenge=fromB64(o.challenge);if(o.user&&o.user.id)o.user.id=fromB64(o.user.id);for(const k of ['allowCredentials','excludeCredentials'])for(const c of (o[k]||[]))c.id=fromB64(c.id);return o;}
+ function credentialJSON(c){const r=c.response,out={id:c.id,rawId:toB64(c.rawId),type:c.type,clientExtensionResults:c.getClientExtensionResults?c.getClientExtensionResults():{},authenticatorAttachment:c.authenticatorAttachment||null,response:{}};for(const k of ['clientDataJSON','attestationObject','authenticatorData','signature','userHandle'])if(r[k])out.response[k]=toB64(r[k]);if(r.getTransports)out.response.transports=r.getTransports();return out;}
+ btn.addEventListener('click',async()=>{btn.disabled=true;status.textContent='Ожидаю подтверждение биометрии…';status.className='login-status';try{const a=await fetch(optionsUrl,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'}});const ad=await a.json();if(!a.ok||!ad.ok)throw new Error(ad.detail||'Passkey недоступен');const cred=await navigator.credentials.get({publicKey:publicKeyOptions(ad.options)});const r=await fetch(verifyUrl,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','Accept':'application/json','X-Requested-With':'XMLHttpRequest'},body:JSON.stringify({credential:credentialJSON(cred)})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Проверка passkey не пройдена');status.textContent='Вход выполнен';status.className='login-status ok';window.location.replace(d.redirect||btn.dataset.target||'/');}catch(e){status.textContent='❌ '+(e.message||'Вход по passkey не выполнен');status.className='login-status bad';}finally{btn.disabled=false;}});
+})();</script>""" % (service, action, target, html.escape(public_path("/"), quote=True), json.dumps(public_path("/api/webauthn/authentication/options")), json.dumps(public_path("/api/webauthn/authentication/verify")))
     return page(request, "Вход", body)
 
 
@@ -1845,9 +1857,18 @@ def login_post(request: Request, username: str = Form(), password: str = Form())
         request.session["user"] = clean_username
         request.session["login_at"] = int(time.time())
         audit(clean_username, "login_success", f"ip={ip_address}")
+        has_passkey = False
+        try:
+            with database() as connection:
+                has_passkey = bool(connection.execute(
+                    "SELECT 1 FROM webauthn_credentials WHERE user_name=? LIMIT 1", (clean_username,)
+                ).fetchone())
+        except Exception as error:
+            LOGGER.warning("Не удалось проверить зарегистрированные passkeys: %s", error)
+        destination = public_path("/") if has_passkey else public_path("/profile?setup_passkey=1")
         if "application/json" in request.headers.get("accept", "").lower() or request.headers.get("x-requested-with") == "XMLHttpRequest":
-            return JSONResponse({"ok": True, "redirect": public_path("/")})
-        return RedirectResponse(public_path("/"), 303)
+            return JSONResponse({"ok": True, "redirect": destination, "offer_passkey": not has_passkey})
+        return RedirectResponse(destination, 303)
 
     failed_username = auth_security.record_failure(ip_address, clean_username, db_path=config.DB_PATH)
     failed_ip = auth_security.record_failure(ip_address, auth_security.GLOBAL_USERNAME_KEY, db_path=config.DB_PATH)
@@ -1972,9 +1993,235 @@ def dashboard_users_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         except (TypeError, ValueError):
             identity_tg_id = 0
         item["username"] = cabinet_service.public_username(
-            identity_tg_id, item.get("username"), item.get("latest_username")
+            identity_tg_id, item.get("username")
         )
     return users, snapshot
+
+
+def _require_webauthn_context(request: Request) -> tuple[str, str]:
+    try:
+        return webauthn_service.webauthn_context(request)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+def _passkey_imports() -> dict[str, Any]:
+    try:
+        return webauthn_service.get_webauthn()
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+
+
+def _passkey_session_login(request: Request, username: str, ip_address: str) -> None:
+    request.session.clear()
+    request.session["auth"] = True
+    request.session["auth_version"] = auth_credentials_version()
+    request.session["user"] = username
+    request.session["login_at"] = int(time.time())
+    request.session["csrf_token"] = secrets.token_urlsafe(32)
+    audit(username, "passkey_login_success", f"ip={ip_address}")
+
+
+@app.post("/api/webauthn/authentication/options")
+def passkey_authentication_options(request: Request):
+    _passkey_imports()
+    ip_address = request_ip(request)
+    ip_state = auth_security.check_login(ip_address, auth_security.GLOBAL_USERNAME_KEY, db_path=config.DB_PATH)
+    if not ip_state.allowed:
+        return JSONResponse({"ok": False, "detail": f"Слишком много попыток. Повторите через {ip_state.retry_after} сек."}, status_code=429, headers={"Retry-After": str(max(1, ip_state.retry_after))})
+    rp_id, origin = _require_webauthn_context(request)
+    options = webauthn_service.authentication_options(rp_id)
+    request.session["webauthn_auth_challenge"] = str(options.get("challenge") or "")
+    request.session["webauthn_auth_started_at"] = int(time.time())
+    request.session["webauthn_auth_rp_id"] = rp_id
+    request.session["webauthn_auth_origin"] = origin
+    return {"ok": True, "options": options}
+
+
+@app.post("/api/webauthn/authentication/verify")
+async def passkey_authentication_verify(request: Request):
+    _passkey_imports()
+    ip_address = request_ip(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    credential = payload.get("credential") if isinstance(payload, dict) else None
+    challenge = str(request.session.pop("webauthn_auth_challenge", "") or "")
+    started = int(request.session.pop("webauthn_auth_started_at", 0) or 0)
+    rp_id = str(request.session.pop("webauthn_auth_rp_id", "") or "")
+    origin = str(request.session.pop("webauthn_auth_origin", "") or "")
+    if not isinstance(credential, dict) or not challenge or not started or int(time.time()) - started > 300:
+        return JSONResponse({"ok": False, "detail": "Запрос passkey истёк. Повторите вход."}, status_code=400)
+    try:
+        current_rp, current_origin = _require_webauthn_context(request)
+        if (rp_id, origin) != (current_rp, current_origin):
+            raise ValueError("Домен панели изменился во время проверки passkey")
+        credential_id = str(credential.get("id") or credential.get("rawId") or "")
+        with database() as connection:
+            row = connection.execute(
+                "SELECT credential_id,user_name,public_key,sign_count FROM webauthn_credentials WHERE credential_id=?",
+                (credential_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError("Это устройство не зарегистрировано в панели")
+        username = str(row[1] or "")
+        if not _secure_text_compare(username, str(config.WEB_USERNAME)):
+            raise ValueError("Passkey не относится к текущей учётной записи панели")
+        verification = webauthn_service.verify_authentication(
+            credential, challenge, rp_id, origin, str(row[2] or ""), int(row[3] or 0)
+        )
+        with database() as connection:
+            connection.execute(
+                "UPDATE webauthn_credentials SET sign_count=?,last_used_at=CURRENT_TIMESTAMP WHERE credential_id=? AND user_name=?",
+                (int(verification.new_sign_count or 0), credential_id, username),
+            )
+        auth_security.record_success(ip_address, username, db_path=config.DB_PATH)
+        auth_security.record_success(ip_address, auth_security.GLOBAL_USERNAME_KEY, db_path=config.DB_PATH)
+        auth_security.prune(db_path=config.DB_PATH)
+        _passkey_session_login(request, username, ip_address)
+        return {"ok": True, "redirect": public_path("/")}
+    except HTTPException:
+        raise
+    except Exception as error:
+        failed = auth_security.record_failure(ip_address, auth_security.GLOBAL_USERNAME_KEY, db_path=config.DB_PATH)
+        audit("security", "passkey_login_failure", f"ip={ip_address}; reason={type(error).__name__}")
+        status = 429 if not failed.allowed else 401
+        detail = f"Слишком много попыток. Повторите через {failed.retry_after} сек." if status == 429 else "Не удалось подтвердить passkey. Используйте пароль или повторите попытку."
+        return JSONResponse({"ok": False, "detail": detail}, status_code=status, headers={"Retry-After": str(max(1, failed.retry_after))} if status == 429 else None)
+
+
+@app.post("/api/webauthn/registration/options")
+def passkey_registration_options(request: Request):
+    require_auth(request)
+    _passkey_imports()
+    username = str(request.session.get("user") or "").strip()
+    if not username:
+        raise HTTPException(401)
+    rp_id, origin = _require_webauthn_context(request)
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT credential_id FROM webauthn_credentials WHERE user_name=? ORDER BY created_at",
+            (username,),
+        ).fetchall()
+    options = webauthn_service.registration_options(
+        username, rp_id, str(getattr(config, "SERVICE_NAME", "FargoVPN")),
+        [str(row[0]) for row in rows],
+    )
+    request.session["webauthn_register_challenge"] = str(options.get("challenge") or "")
+    request.session["webauthn_register_started_at"] = int(time.time())
+    request.session["webauthn_register_rp_id"] = rp_id
+    request.session["webauthn_register_origin"] = origin
+    return {"ok": True, "options": options}
+
+
+@app.post("/api/webauthn/registration/verify")
+async def passkey_registration_verify(request: Request):
+    require_auth(request)
+    _passkey_imports()
+    username = str(request.session.get("user") or "").strip()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    credential = payload.get("credential") if isinstance(payload, dict) else None
+    label = str(payload.get("label") or "Passkey на этом устройстве").strip()[:80] if isinstance(payload, dict) else "Passkey на этом устройстве"
+    challenge = str(request.session.pop("webauthn_register_challenge", "") or "")
+    started = int(request.session.pop("webauthn_register_started_at", 0) or 0)
+    rp_id = str(request.session.pop("webauthn_register_rp_id", "") or "")
+    origin = str(request.session.pop("webauthn_register_origin", "") or "")
+    if not isinstance(credential, dict) or not challenge or not started or int(time.time()) - started > 300:
+        raise HTTPException(400, "Запрос регистрации passkey истёк. Повторите попытку.")
+    current_rp, current_origin = _require_webauthn_context(request)
+    if (rp_id, origin) != (current_rp, current_origin):
+        raise HTTPException(400, "Домен панели изменился во время регистрации passkey")
+    try:
+        verified = webauthn_service.verify_registration(credential, challenge, rp_id, origin)
+        credential_id = webauthn_service.encode_bytes(verified.credential_id)
+        public_key = webauthn_service.encode_bytes(verified.credential_public_key)
+        transports = webauthn_service.clean_transports((credential.get("response") or {}).get("transports"))
+        with database() as connection:
+            connection.execute(
+                "INSERT INTO webauthn_credentials(credential_id,user_name,public_key,sign_count,device_type,backed_up,transports,label) VALUES(?,?,?,?,?,?,?,?)",
+                (credential_id, username, public_key, int(verified.sign_count or 0), str(getattr(verified, "credential_device_type", "") or ""), int(bool(getattr(verified, "credential_backed_up", False))), transports, label or "Passkey на этом устройстве"),
+            )
+    except HTTPException:
+        raise
+    except Exception as error:
+        LOGGER.warning("Регистрация passkey отклонена (%s)", type(error).__name__)
+        raise HTTPException(400, "Не удалось зарегистрировать passkey. Проверьте домен и повторите попытку.") from error
+    audit(username, "passkey_registered", f"credential={credential_id[:12]}")
+    return {"ok": True, "detail": "Вход по Face ID / Touch ID включён."}
+
+
+@app.get("/api/webauthn/credentials")
+def passkey_credentials(request: Request):
+    require_auth(request)
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT credential_id,label,created_at,last_used_at,device_type,backed_up,transports FROM webauthn_credentials WHERE user_name=? ORDER BY created_at DESC",
+            (str(request.session.get("user") or ""),),
+        ).fetchall()
+    keys = ("credential_id", "label", "created_at", "last_used_at", "device_type", "backed_up", "transports")
+    return {"items": [dict(zip(keys, tuple(row))) for row in rows]}
+
+
+@app.delete("/api/webauthn/credentials/{credential_id}")
+def passkey_credential_delete(request: Request, credential_id: str):
+    require_auth(request)
+    username = str(request.session.get("user") or "")
+    with database() as connection:
+        result = connection.execute(
+            "DELETE FROM webauthn_credentials WHERE credential_id=? AND user_name=?",
+            (str(credential_id), username),
+        )
+    if int(getattr(result, "rowcount", 0) or 0) <= 0:
+        raise HTTPException(404, "Устройство не найдено")
+    audit(username, "passkey_removed", f"credential={str(credential_id)[:12]}")
+    return {"ok": True}
+
+
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request):
+    require_auth(request)
+    username = str(request.session.get("user") or "")
+    token = html.escape(session_csrf_token(request), quote=True)
+    try:
+        with database() as connection:
+            rows = connection.execute(
+                "SELECT credential_id,label,created_at,last_used_at,device_type,backed_up FROM webauthn_credentials WHERE user_name=? ORDER BY created_at DESC",
+                (username,),
+            ).fetchall()
+    except Exception as error:
+        LOGGER.warning("Не удалось загрузить passkeys профиля: %s", error)
+        rows = []
+    devices = []
+    for row in rows:
+        credential_id, label, created_at, last_used_at, device_type, backed_up = tuple(row)
+        device_label = html.escape(str(label or "Passkey на этом устройстве"))
+        created_text = html.escape(str(created_at or "Дата неизвестна"))
+        used_text = html.escape(str(last_used_at or "Ещё не использовался"))
+        devices.append(
+            f'<div class="card passkey-device"><div><strong>{device_label}</strong><div class="muted">Добавлено: {created_text} · Последний вход: {used_text}</div></div>'
+            f'<button class="secondary passkey-remove" type="button" data-credential="{html.escape(str(credential_id), quote=True)}">Удалить устройство</button></div>'
+        )
+    body = r'''<header><div><h1>Профиль и вход</h1><div class="subtitle">Управление устройствами для входа в панель FargoVPN</div></div></header>
+<div class="grid"><div class="card full"><h2>Face ID / Touch ID</h2><p>После регистрации passkey можно входить в панель с помощью биометрии устройства. Пароль остаётся доступен как резервный способ. Для регистрации и входа нужен HTTPS и домен, заданный в WEB_DOMAIN.</p><div class="actions"><button type="button" id="passkey-register" data-csrf="__TOKEN__">Включить вход по Face ID / Touch ID</button></div><div id="passkey-profile-status" class="muted" aria-live="polite"></div></div><div class="card full"><h2>Зарегистрированные устройства</h2><div id="passkey-device-list">__DEVICES__</div></div><div class="card full"><h2>Сессия панели</h2><p>Срок сессии настраивается в разделе «Настройки». При изменении логина или пароля существующие сессии и passkey-входы проверяются повторно.</p><p class="muted">В целях безопасности здесь не отображаются секреты и данные публичных ключей.</p></div></div>
+<script>
+(function(){
+ const base=__BASE__,csrf=document.getElementById('passkey-register')?.dataset.csrf||'',btn=document.getElementById('passkey-register'),status=document.getElementById('passkey-profile-status'),list=document.getElementById('passkey-device-list');
+ function fromB64(s){const v=String(s||'').replace(/-/g,'+').replace(/_/g,'/');const b=atob(v+'='.repeat((4-v.length%4)%4));return Uint8Array.from(b,c=>c.charCodeAt(0));}
+ function toB64(buf){let s='';for(const b of new Uint8Array(buf))s+=String.fromCharCode(b);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+ function publicKeyOptions(o){o.challenge=fromB64(o.challenge);if(o.user&&o.user.id)o.user.id=fromB64(o.user.id);for(const k of ['allowCredentials','excludeCredentials'])for(const c of (o[k]||[]))c.id=fromB64(c.id);return o;}
+ function credentialJSON(c){const r=c.response,out={id:c.id,rawId:toB64(c.rawId),type:c.type,clientExtensionResults:c.getClientExtensionResults?c.getClientExtensionResults():{},authenticatorAttachment:c.authenticatorAttachment||null,response:{}};for(const k of ['clientDataJSON','attestationObject','authenticatorData','signature','userHandle'])if(r[k])out.response[k]=toB64(r[k]);if(r.getTransports)out.response.transports=r.getTransports();return out;}
+ async function beginRegistration(){if(!window.isSecureContext||!navigator.credentials||!window.PublicKeyCredential)throw new Error('Биометрия недоступна в этом браузере или соединение не HTTPS.');const o=await fetch(base+'api/webauthn/registration/options',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Accept':'application/json'},cache:'no-store'});const od=await o.json();if(!o.ok||!od.ok)throw new Error(od.detail||'Не удалось начать регистрацию');const cred=await navigator.credentials.create({publicKey:publicKeyOptions(od.options)});const label=prompt('Название устройства','iPhone / Face ID')||'Passkey на этом устройстве';const r=await fetch(base+'api/webauthn/registration/verify',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Accept':'application/json'},body:JSON.stringify({credential:credentialJSON(cred),label}),cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Не удалось сохранить passkey');status.textContent='✅ '+(d.detail||'Passkey зарегистрирован');location.reload();}
+ btn?.addEventListener('click',async()=>{btn.disabled=true;status.textContent='Запускаю регистрацию passkey…';try{await beginRegistration();}catch(e){status.textContent='❌ '+(e.message||'Ошибка регистрации');}finally{btn.disabled=false;}});
+ list?.querySelectorAll('.passkey-remove').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Удалить это устройство? Вход по нему больше не будет работать.'))return;b.disabled=true;try{const r=await fetch(base+'api/webauthn/credentials/'+encodeURIComponent(b.dataset.credential||''),{method:'DELETE',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Accept':'application/json'},cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Ошибка удаления');location.reload();}catch(e){status.textContent='❌ '+(e.message||'Ошибка удаления');b.disabled=false;}}));
+ if(new URLSearchParams(location.search).get('setup_passkey')==='1'){setTimeout(()=>{if(confirm('Включить вход по Face ID / Touch ID на этом устройстве?'))btn?.click();},250);}
+})();
+</script>'''
+    body = body.replace("__TOKEN__", token).replace("__DEVICES__", "".join(devices) if devices else '<div class="empty-state">Устройства для биометрического входа пока не зарегистрированы.</div>').replace("__BASE__", json.dumps(public_path("/") ))
+    return page(request, "Профиль и вход", body, "profile")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2060,7 +2307,10 @@ def dashboard(request: Request):
 
     message_items: list[str] = []
     for row in recent_events:
-        name = str(row["username"] or f"id_{int(row['tg_id'])}")
+        name = _panel_user_label(
+            int(row["tg_id"] or 0), row.get("display_username") or row.get("username"),
+            row.get("display_name"), row.get("notes")
+        )
         message_items.append(
             f'<a class="dash-message" href="/messages?tg_id={int(row["tg_id"])}">'
             f'<span class="avatar avatar-{(int(row["tg_id"]) % 5) + 1}">{html.escape(initials(name))}</span>'
@@ -2600,6 +2850,7 @@ def users_page(
                 tg_id,
                 str(item.get("username") or ""),
                 str(item.get("display_name") or ""),
+                str(item.get("comment") or item.get("notes") or ""),
             )
             if tg_id > 0
             else str(item.get("display_name") or item.get("username") or item.get("email") or "Без Telegram-привязки")
@@ -3007,7 +3258,7 @@ def user_detail_page(request: Request, tg_id: int):
     with database() as connection:
         linked_rows = connection.execute(
             """SELECT l.telegram_id,COALESCE(u.username,'') AS username,
-                      COALESCE(u.display_name,'') AS display_name
+                      COALESCE(u.display_name,'') AS display_name,COALESCE(u.notes,'') AS notes
                  FROM telegram_profile_links l
                  LEFT JOIN users u ON u.tg_id=l.telegram_id
                 WHERE l.profile_tg_id=? AND l.telegram_id<>?
@@ -3015,7 +3266,7 @@ def user_detail_page(request: Request, tg_id: int):
             (int(tg_id), int(tg_id)),
         ).fetchall()
     linked_html = ''.join(
-        f'<li>{html.escape(billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or "")))} · TG {int(x[0])}</li>'
+        f'<li>{html.escape(billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")))} · TG {int(x[0])}</li>'
         for x in linked_rows
     ) or '<li>Дополнительных аккаунтов нет</li>'
     price_value = str(row.get("custom_payment_price") or "")
@@ -3384,6 +3635,13 @@ def panel_messages_feed_api(
     events = user_events.recent_all_events(after_id=after_id, limit=500, db_path=config.DB_PATH)
     changed_ids = {int(event.get("tg_id") or 0) for event in events if int(event.get("tg_id") or 0) > 0}
     changed_dialogs = user_events.conversation_users_for_ids(changed_ids, db_path=config.DB_PATH)
+    # Return the same server-resolved identity label as the initial page and
+    # event API; the browser must not maintain a second identity policy.
+    for dialog in changed_dialogs:
+        dialog_tg_id = int(dialog.get("tg_id") or 0)
+        dialog["display_label"] = _panel_user_label(
+            dialog_tg_id, dialog.get("username"), dialog.get("display_name"), dialog.get("notes")
+        )
     try:
         unread = user_events.unread_messages_summary(db_path=config.DB_PATH)
     except Exception as error:
@@ -3533,6 +3791,7 @@ def cabinet_page(request: Request, access: str = ""):
         int(user.get("tg_id") or 0),
         str(user.get("username") or ""),
         str(user.get("display_name") or ""),
+        str(user.get("notes") or user.get("comment") or ""),
     )
     sub_id = str(user.get("sub_id") or "").strip()
     sub_url = ""
@@ -3725,6 +3984,7 @@ def messages_page(
             selected,
             selected_user.get("username"),
             selected_user.get("display_name"),
+            selected_user.get("notes"),
         )
         if selected_user else (f"ID {selected}" if selected else "Все сообщения")
     )
@@ -3770,7 +4030,7 @@ def messages_page(
         unread_count = max(0, int((unread_map.get(tid) or {}).get("count") or 0))
         badge = f'<span class="message-unread-badge">{unread_count}</span>' if unread_count else ""
         user_label = _panel_user_label(
-            tid, item.get("username"), item.get("display_name")
+            tid, item.get("username"), item.get("display_name"), item.get("notes")
         )
         user_rows.append(
             '<a class="message-user-row %s%s" data-tg-id="%s" href="%s"><span class="message-user-main"><strong>%s</strong><span>#%s</span></span>%s<small>%s входящих · %s исходящих</small></a>'
@@ -3803,7 +4063,7 @@ def messages_page(
         text = html.escape(str(event.get("text") or "").strip())
         user_label = html.escape(
             _panel_user_label(
-                tid, event.get("display_username"), event.get("display_name")
+                tid, event.get("display_username"), event.get("display_name"), event.get("notes")
             )
         )
         at = html.escape(fmt_event_timestamp(event.get("created_at")))
@@ -3845,7 +4105,7 @@ def messages_page(
     body = f'''<header class="page-header"><div><h1>Сообщения</h1><div class="subtitle">Входящие, исходящие и служебные события · {range_start}–{range_end} из {total_events}</div></div><div class="actions">{" ".join(direction_filters)} {" ".join(type_filters)} {card_link}</div></header>
 <div class="card messages-toolbar"><form method="get" action="/messages"><input type="hidden" name="tg_id" value="{selected}"><input type="hidden" name="direction" value="{html.escape(direction)}"><input type="hidden" name="message_kind" value="{html.escape(message_kind)}"><label>Поиск <input type="search" name="q" value="{html.escape(q)}" placeholder="Текст, @username или Telegram ID"></label><label>На странице <select name="per_page"><option value="25" {"selected" if per_page == 25 else ""}>25</option><option value="50" {"selected" if per_page == 50 else ""}>50</option><option value="100" {"selected" if per_page == 100 else ""}>100</option></select></label><button class="button small" type="submit">Искать</button></form></div>
 <div class="messages-layout messages-layout-modern" data-message-live-feed="1"><section class="card messages-users"><div class="compact-panel-head"><div><strong>Диалоги</strong><span class="muted">Нажмите пользователя для открытия чата</span></div><span class="badge" data-message-dialog-count>{len(participants)}</span></div><label class="messages-search"><span>⌕</span><input type="search" placeholder="Фильтр списка пользователей" data-message-search autocomplete="off"></label><div class="messages-users-list" data-message-list>{"".join(user_rows) or '<p class="muted">Сообщений ещё нет.</p>'}</div></section>
-<section class="card messages-history"><div class="chat-head"><div><strong>@{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div>{card_link}</div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
+<section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div>{card_link}</div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
     messages_path_js = json.dumps(public_path("/messages"))
     messages_feed_path_js = json.dumps(public_path("/api/panel/messages/feed"))
     scripts = f'''<script>(function(){{
@@ -3867,7 +4127,7 @@ let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').replace(/^@/,'');const label=username?'@'+username:(String(item.display_name||'').trim()||('ID '+tid));if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{1,100}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id_'+tid;const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('a');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.href=messagesPath+'?tg_id='+encodeURIComponent(tid);row.innerHTML='<span class="message-user-main"><strong></strong><span>#'+tid+'</span></span><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
 function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.textContent=direction+' · '+kind+' · '+String(item.display_label||item.display_username||('ID '+item.tg_id))+' · '+String(item.created_at||'')+' · #'+id+' · '+status;const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
@@ -4310,7 +4570,14 @@ def broadcast_start(
 def payments(request: Request):
     require_auth(request)
     with database() as connection:
-        rows = connection.execute("SELECT * FROM payments ORDER BY id DESC LIMIT 500").fetchall()
+        rows = connection.execute(
+            """SELECT payments.*,
+                      COALESCE(users.username,'') AS current_username,
+                      COALESCE(users.display_name,'') AS current_display_name,
+                      COALESCE(users.notes,'') AS user_notes
+                 FROM payments LEFT JOIN users ON users.tg_id=payments.tg_id
+                ORDER BY payments.id DESC LIMIT 500"""
+        ).fetchall()
     table_rows: list[str] = []
     for row in rows:
         actions = f'<a class="button small secondary" href="/payments/{row["id"]}/receipt" target="_blank">Чек</a>'
@@ -4350,8 +4617,12 @@ def payments(request: Request):
             error_note = f'<br><small style="color:var(--red)">{html.escape(str(row["last_error"]))}</small>'
         actual_amount = row["receipt_amount"] if row["receipt_amount"] is not None else row["amount"]
         amount_text = f"{float(actual_amount):g} ₽" if actual_amount is not None else "—"
+        payment_user_label = billing.telegram_identity_label(
+            int(row["tg_id"] or 0), str(row["current_username"] or ""),
+            str(row["current_display_name"] or ""), str(row["user_notes"] or "")
+        )
         table_rows.append(
-            f'<tr class="payment-row"><td data-label="ID">#{row["id"]}</td><td data-label="Пользователь">@{html.escape(row["username"] or "нет")}<br><small>ID {row["tg_id"]}</small></td><td data-label="Сумма">{amount_text}</td><td data-label="Получен">{html.escape(row["created_at"] or "")}</td><td data-label="OCR">{ocr_badge}{ocr_note}</td><td data-label="Статус">{badge}{error_note}</td><td data-label="Действия"><div class="payment-actions">{actions}</div></td></tr>'
+            f'<tr class="payment-row"><td data-label="ID">#{row["id"]}</td><td data-label="Пользователь">{html.escape(payment_user_label)}<br><small>ID {row["tg_id"]}</small></td><td data-label="Сумма">{amount_text}</td><td data-label="Получен">{html.escape(row["created_at"] or "")}</td><td data-label="OCR">{ocr_badge}{ocr_note}</td><td data-label="Статус">{badge}{error_note}</td><td data-label="Действия"><div class="payment-actions">{actions}</div></td></tr>'
         )
     body = f'''<header><div><h1>Платежи</h1><div class="subtitle">Все чеки в одном списке: новые платежи всегда сверху, статус и результат OCR видны в строке</div></div><span class="badge">{len(rows)} записей</span></header><div class="card table-wrap payments-table"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Сумма чека</th><th>Получен</th><th>OCR</th><th>Статус</th><th>Действия</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="7"><div class="empty-state">Платежей пока нет.</div></td></tr>'}</tbody></table></div>'''
     return page(request, "Платежи", body, "payments")
@@ -4361,7 +4632,14 @@ def payments(request: Request):
 def receipt(request: Request, payment_id: int):
     require_auth(request)
     with database() as connection:
-        row = connection.execute("SELECT * FROM payments WHERE id=?", (payment_id,)).fetchone()
+        row = connection.execute(
+            """SELECT payments.*,
+                      COALESCE(users.username,'') AS current_username,
+                      COALESCE(users.display_name,'') AS current_display_name,
+                      COALESCE(users.notes,'') AS user_notes
+                 FROM payments LEFT JOIN users ON users.tg_id=payments.tg_id
+                WHERE payments.id=?""", (payment_id,)
+        ).fetchone()
     if not row:
         raise HTTPException(404)
     if not row["telegram_file_id"]:
@@ -4388,7 +4666,11 @@ def receipt(request: Request, payment_id: int):
     reasons = details.get("reasons") or []
     reasons_html = "" if not reasons else '<p class="muted">Причины ручной проверки: ' + html.escape("; ".join(map(str, reasons))) + '</p>'
     ocr_text = html.escape(str(row["ocr_text"] or "Текст не распознан"))
-    body = f'''<header><div><h1>Чек #{payment_id}</h1><div class="subtitle">@{html.escape(str(row["username"] or "нет"))} · Telegram ID {row["tg_id"]} · {html.escape(str(row["created_at"] or ""))}</div></div><a class="button secondary" href="/payments">Назад</a></header>{duplicate_html}<div class="grid"><div class="card wide" style="text-align:center"><img src="/payments/{payment_id}/receipt/image" alt="Чек #{payment_id}" style="display:block;max-width:100%;max-height:78vh;margin:auto;border-radius:10px;object-fit:contain" loading="eager"></div><div class="card side"><h2>Результат OCR</h2><p>Статус: <span class="code">{status}</span></p><p>Сумма: <strong>{amount}</strong><br>Дата: <strong>{html.escape(str(row["receipt_date"] or "—"))}</strong><br>Имя: <strong>{html.escape(str(row["receipt_receiver"] or "—"))}</strong><br>Номер: <strong>{html.escape(str(row["receipt_phone"] or "—"))}</strong></p>{checks_html}{reasons_html}</div><div class="card full"><h2>Распознанный текст</h2><pre>{ocr_text}</pre></div></div>'''
+    payment_user_label = billing.telegram_identity_label(
+        int(row["tg_id"] or 0), str(row["current_username"] or ""),
+        str(row["current_display_name"] or ""), str(row["user_notes"] or "")
+    )
+    body = f'''<header><div><h1>Чек #{payment_id}</h1><div class="subtitle">{html.escape(payment_user_label)} · Telegram ID {row["tg_id"]} · {html.escape(str(row["created_at"] or ""))}</div></div><a class="button secondary" href="/payments">Назад</a></header>{duplicate_html}<div class="grid"><div class="card wide" style="text-align:center"><img src="/payments/{payment_id}/receipt/image" alt="Чек #{payment_id}" style="display:block;max-width:100%;max-height:78vh;margin:auto;border-radius:10px;object-fit:contain" loading="eager"></div><div class="card side"><h2>Результат OCR</h2><p>Статус: <span class="code">{status}</span></p><p>Сумма: <strong>{amount}</strong><br>Дата: <strong>{html.escape(str(row["receipt_date"] or "—"))}</strong><br>Имя: <strong>{html.escape(str(row["receipt_receiver"] or "—"))}</strong><br>Номер: <strong>{html.escape(str(row["receipt_phone"] or "—"))}</strong></p>{checks_html}{reasons_html}</div><div class="card full"><h2>Распознанный текст</h2><pre>{ocr_text}</pre></div></div>'''
     return page(request, f"Чек #{payment_id}", body, "payments")
 
 
@@ -4850,6 +5132,13 @@ def reminders_page(request: Request):
         rows = connection.execute(
             "SELECT action, details, created_at FROM audit_log WHERE action='reminder_sent' ORDER BY id DESC LIMIT 300"
         ).fetchall()
+        identity_rows = connection.execute(
+            "SELECT tg_id,username,notes FROM users WHERE tg_id>0"
+        ).fetchall()
+    identity_by_id = {
+        int(item[0]): {"tg_id": int(item[0]), "username": item[1], "notes": item[2]}
+        for item in identity_rows
+    }
     total = len(rows)
     by_bucket: dict[int, int] = {}
     recent_html = []
@@ -4863,7 +5152,10 @@ def reminders_page(request: Request):
         except Exception:
             pass
         if days is not None: by_bucket[days] = by_bucket.get(days, 0) + 1
-        who = f"@{username}" if username else (f"TG ID {tg_id}" if tg_id else "Пользователь")
+        # Resolve labels from the current user row in one batch, not from a stale
+        # nickname snapshot stored in the historical audit payload.
+        identity = identity_by_id.get(tg_id, {"tg_id": tg_id, "username": "", "notes": ""})
+        who = billing.get_display_name(identity, tg_id)
         recent_html.append(f'<tr><td>{html.escape(str(row[2] or ""))}</td><td>{html.escape(who)}</td><td>{html.escape("сегодня" if days == 0 else (f"за {days} дн." if days is not None else "—"))}</td></tr>')
     bucket_html = ''.join(f'<span class="badge good">{("сегодня" if day == 0 else f"за {day} дн.")}: {by_bucket.get(day, 0)}</span>' for day in configured)
     body = f'''<header><div><h1>Напоминания</h1><div class="subtitle">Автоматические уведомления о скором окончании подписки.</div></div><span class="badge good">Настроено: {", ".join(map(str, configured)) or "нет"}</span></header>
@@ -5293,7 +5585,7 @@ def settings(request: Request):
             <div class="setting"><label for="setting-web_username">Логин панели</label><input id="setting-web_username" name="web_username" value="{_config_text('WEB_USERNAME', 'admin')}" maxlength="100" required></div>
             <div class="setting"><label for="setting-web_password">Новый пароль</label><input id="setting-web_password" type="password" name="web_password" placeholder="Пусто — оставить текущий" autocomplete="new-password"></div>
             <div class="setting"><label for="setting-web_password_confirm">Подтверждение пароля</label><input id="setting-web_password_confirm" type="password" name="web_password_confirm" placeholder="Только при смене пароля" autocomplete="new-password"></div>
-            <div class="setting"><label for="setting-web_session_max_age_seconds">Срок сессии, сек.</label><input id="setting-web_session_max_age_seconds" type="number" name="web_session_max_age_seconds" value="{int(getattr(config, 'WEB_SESSION_MAX_AGE_SECONDS', 28800))}" min="900" max="604800"></div>
+            <div class="setting"><label for="setting-web_session_max_age_seconds">Срок сессии, сек.</label><input id="setting-web_session_max_age_seconds" type="number" name="web_session_max_age_seconds" value="{int(getattr(config, 'WEB_SESSION_MAX_AGE_SECONDS', 604800))}" min="900" max="604800"></div>
             <div class="setting"><label for="setting-web_login_max_attempts">Максимум ошибок входа</label><input id="setting-web_login_max_attempts" type="number" name="web_login_max_attempts" value="{int(getattr(config, 'WEB_LOGIN_MAX_ATTEMPTS', 5))}" min="2" max="20"></div>
             <div class="setting"><label for="setting-web_login_window_seconds">Окно ошибок, сек.</label><input id="setting-web_login_window_seconds" type="number" name="web_login_window_seconds" value="{int(getattr(config, 'WEB_LOGIN_WINDOW_SECONDS', 900))}" min="30" max="86400"></div>
             <div class="setting"><label for="setting-web_login_block_seconds">Первая блокировка, сек.</label><input id="setting-web_login_block_seconds" type="number" name="web_login_block_seconds" value="{int(getattr(config, 'WEB_LOGIN_BLOCK_SECONDS', 900))}" min="30" max="86400"></div>
@@ -5643,7 +5935,7 @@ def _save_settings(request: Request, form):
         "WEB_USERNAME": web_username,
         "WEB_COOKIE_HTTPS_ONLY": True,
         "WEB_TRUST_PROXY_HEADERS": True,
-        "WEB_SESSION_MAX_AGE_SECONDS": _form_int(form, "web_session_max_age_seconds", 28_800, 900, 604_800, "Срок сессии"),
+        "WEB_SESSION_MAX_AGE_SECONDS": _form_int(form, "web_session_max_age_seconds", 604_800, 900, 604_800, "Срок сессии"),
         "WEB_LOGIN_MAX_ATTEMPTS": _form_int(form, "web_login_max_attempts", 5, 2, 20, "Ошибки входа"),
         "WEB_LOGIN_WINDOW_SECONDS": _form_int(form, "web_login_window_seconds", 900, 30, 86_400, "Окно ошибок"),
         "WEB_LOGIN_BLOCK_SECONDS": login_block,

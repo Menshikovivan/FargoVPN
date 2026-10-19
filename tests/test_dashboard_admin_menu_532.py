@@ -44,7 +44,7 @@ def test_dashboard_keeps_live_snapshot_when_users_exist():
 
     users, actual_snapshot = helper()
 
-    assert users[0]["username"] == "real_user"
+    assert users[0]["username"] == ""
     assert actual_snapshot is snapshot
     assert actual_snapshot["stale"] is False
     assert actual_snapshot["server_traffic_summary"]["up"] == 123
@@ -59,7 +59,7 @@ def test_dashboard_falls_back_to_local_users_and_marks_snapshot_stale():
     helper = _dashboard_snapshot_helper(fail_live, lambda: local)
     users, snapshot = helper()
 
-    assert users[0]["username"] == "local_nick"
+    assert users[0]["username"] == ""
     assert snapshot["stale"] is True
     assert snapshot["error"] == "upstream unavailable"
     assert snapshot["server_traffic_summary"] == {}

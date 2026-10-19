@@ -679,30 +679,12 @@ def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) 
     with _connect(db_path) as connection:
         rows = connection.execute(
             """SELECT events.tg_id,
-                COALESCE(
-                    NULLIF((SELECT canonical.username
-                           FROM users AS canonical
-                           WHERE canonical.tg_id=events.tg_id
-                             AND TRIM(COALESCE(canonical.username,''))<>''
-                             AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
-                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                             )
-                           LIMIT 1), ''),
-                    NULLIF((SELECT latest.username
-                           FROM user_events AS latest
-                           WHERE latest.tg_id=events.tg_id
-                             AND TRIM(COALESCE(latest.username,''))<>''
-                             AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
-                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                             )
-                           ORDER BY latest.id DESC
-                           LIMIT 1), ''),
-                    ''
-                ) AS username,
+                COALESCE((SELECT NULLIF(TRIM(canonical.username),'')
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS username,
                 COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
-                          FROM users AS canonical
-                          WHERE canonical.tg_id=events.tg_id
-                          LIMIT 1), '') AS display_name,
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name,
+                COALESCE((SELECT NULLIF(TRIM(canonical.notes),'')
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS notes,
                 COUNT(*) AS total_events,
                 SUM(CASE WHEN events.direction='in' THEN 1 ELSE 0 END) AS incoming_events,
                 SUM(CASE WHEN events.direction='out' THEN 1 ELSE 0 END) AS outgoing_events,
@@ -712,7 +694,7 @@ def conversation_users(*, limit: int = 2000, db_path: str | Path | None = None) 
             GROUP BY events.tg_id
             ORDER BY last_event_id DESC LIMIT ?""", (limit,)).fetchall()
     return [dict(tg_id=int(r['tg_id']), username=str(r['username'] or ''),
-        display_name=str(r['display_name'] or ''),
+        display_name=str(r['display_name'] or ''), notes=str(r['notes'] or ''),
         total_events=int(r['total_events'] or 0), incoming_events=int(r['incoming_events'] or 0),
         outgoing_events=int(r['outgoing_events'] or 0), last_event_id=int(r['last_event_id'] or 0),
         last_event_at=str(r['last_event_at'] or '')) for r in rows]
@@ -748,20 +730,12 @@ def all_events(
     where, params = _event_filters(tg_id=tg_id, direction=direction, message_kind=message_kind, query_text=query_text)
     query = (
         "SELECT events.*, "
-        "COALESCE("
-        "NULLIF((SELECT canonical.username FROM users AS canonical "
-        "WHERE canonical.tg_id=events.tg_id "
-        "AND TRIM(COALESCE(canonical.username,''))<>'' "
-        "AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN "
-        "('id_' || CAST(events.tg_id AS TEXT),CAST(events.tg_id AS TEXT)) LIMIT 1),''),"
-        "NULLIF((SELECT latest.username FROM user_events AS latest "
-        "WHERE latest.tg_id=events.tg_id "
-        "AND TRIM(COALESCE(latest.username,''))<>'' "
-        "AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN "
-        "('id_' || CAST(events.tg_id AS TEXT),CAST(events.tg_id AS TEXT)) "
-        "ORDER BY latest.id DESC LIMIT 1),''),'') AS display_username, "
+        "COALESCE((SELECT NULLIF(TRIM(canonical.username),'') FROM users AS canonical "
+        "WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_username, "
         "COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'') FROM users AS canonical "
-        "WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name "
+        "WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name, "
+        "COALESCE((SELECT NULLIF(TRIM(canonical.notes),'') FROM users AS canonical "
+        "WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS notes "
         "FROM user_events AS events LEFT JOIN users ON users.tg_id=events.tg_id" + where
     )
     if int(before_id) > 0:
@@ -774,6 +748,7 @@ def all_events(
         item = _event_from_row(row)
         item["display_username"] = str(row["display_username"] or "")
         item["display_name"] = str(row["display_name"] or "")
+        item["notes"] = str(row["notes"] or "")
         result.append(item)
     return result
 
@@ -833,25 +808,12 @@ def recent_all_events(
     with _connect(db_path) as connection:
         rows = connection.execute(
             """SELECT events.*,
-                      COALESCE(
-                          NULLIF((SELECT canonical.username FROM users AS canonical
-                                  WHERE canonical.tg_id=events.tg_id
-                                    AND TRIM(COALESCE(canonical.username,''))<>''
-                                    AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
-                                        'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                                    )
-                                  LIMIT 1), ''),
-                          NULLIF((SELECT latest.username FROM user_events AS latest
-                                  WHERE latest.tg_id=events.tg_id
-                                    AND TRIM(COALESCE(latest.username,''))<>''
-                                    AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
-                                        'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                                    )
-                                  ORDER BY latest.id DESC LIMIT 1), '')
-                      ) AS display_username,
-                      COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
-                                FROM users AS canonical
-                                WHERE canonical.tg_id=events.tg_id LIMIT 1), '') AS display_name
+                      COALESCE((SELECT NULLIF(TRIM(canonical.username),'') FROM users AS canonical
+                                WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_username,
+                      COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'') FROM users AS canonical
+                                WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name,
+                      COALESCE((SELECT NULLIF(TRIM(canonical.notes),'') FROM users AS canonical
+                                WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS notes
                  FROM user_events AS events
                 WHERE events.id>? ORDER BY events.id ASC LIMIT ?""",
             (after_id, limit),
@@ -861,6 +823,7 @@ def recent_all_events(
         item = _event_from_row(row)
         item["display_username"] = str(row["display_username"] or "")
         item["display_name"] = str(row["display_name"] or "")
+        item["notes"] = str(row["notes"] or "")
         result.append(item)
     return result
 
@@ -879,30 +842,12 @@ def conversation_users_for_ids(
     with _connect(db_path) as connection:
         rows = connection.execute(
             f"""SELECT events.tg_id,
-                COALESCE(
-                    NULLIF((SELECT canonical.username
-                           FROM users AS canonical
-                           WHERE canonical.tg_id=events.tg_id
-                             AND TRIM(COALESCE(canonical.username,''))<>''
-                             AND LOWER(REPLACE(TRIM(canonical.username),'@','')) NOT IN (
-                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                             )
-                           LIMIT 1), ''),
-                    NULLIF((SELECT latest.username
-                           FROM user_events AS latest
-                           WHERE latest.tg_id=events.tg_id
-                             AND TRIM(COALESCE(latest.username,''))<>''
-                             AND LOWER(REPLACE(TRIM(latest.username),'@','')) NOT IN (
-                                 'id_' || CAST(events.tg_id AS TEXT), CAST(events.tg_id AS TEXT)
-                             )
-                           ORDER BY latest.id DESC
-                           LIMIT 1), ''),
-                    ''
-                ) AS username,
+                COALESCE((SELECT NULLIF(TRIM(canonical.username),'')
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS username,
                 COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'')
-                          FROM users AS canonical
-                          WHERE canonical.tg_id=events.tg_id
-                          LIMIT 1), '') AS display_name,
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_name,
+                COALESCE((SELECT NULLIF(TRIM(canonical.notes),'')
+                          FROM users AS canonical WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS notes,
                 COUNT(*) AS total_events,
                 SUM(CASE WHEN events.direction='in' THEN 1 ELSE 0 END) AS incoming_events,
                 SUM(CASE WHEN events.direction='out' THEN 1 ELSE 0 END) AS outgoing_events,
@@ -916,7 +861,7 @@ def conversation_users_for_ids(
     return [dict(
         tg_id=int(row["tg_id"]),
         username=str(row["username"] or ""),
-        display_name=str(row["display_name"] or ""),
+        display_name=str(row["display_name"] or ""), notes=str(row["notes"] or ""),
         total_events=int(row["total_events"] or 0),
         incoming_events=int(row["incoming_events"] or 0),
         outgoing_events=int(row["outgoing_events"] or 0),
@@ -956,14 +901,8 @@ def unread_messages_summary(
     with _connect(db_path) as connection:
         users_exists = _table_exists(connection, "users")
         join = "LEFT JOIN users ON users.tg_id=state.tg_id" if users_exists else ""
-        username = (
-            "COALESCE(NULLIF(users.username,''),"
-            "(SELECT NULLIF(latest.username,'') FROM user_events AS latest "
-            "WHERE latest.tg_id=state.tg_id ORDER BY latest.id DESC LIMIT 1),'')"
-            if users_exists
-            else "COALESCE((SELECT NULLIF(latest.username,'') FROM user_events AS latest "
-            "WHERE latest.tg_id=state.tg_id ORDER BY latest.id DESC LIMIT 1),'')"
-        )
+        username = "COALESCE(users.username,'')" if users_exists else "''"
+        notes = "COALESCE(users.notes,'')" if users_exists else "''"
         known_user = "CASE WHEN users.tg_id IS NULL THEN 0 ELSE 1 END" if users_exists else "0"
         admins = _admin_ids()
         admin_sql = ""
@@ -989,6 +928,7 @@ def unread_messages_summary(
                 state.last_message_at,
                 state.last_message_text,
                 {username} AS username,
+                {notes} AS notes,
                 {known_user} AS known_user
             FROM user_message_state AS state
             {join}
@@ -1006,6 +946,7 @@ def unread_messages_summary(
             "last_message_at": str(row["last_message_at"] or ""),
             "preview": str(row["last_message_text"] or "")[:MAX_PREVIEW],
             "username": str(row["username"] or ""),
+            "notes": str(row["notes"] or ""),
             "known_user": bool(row["known_user"]),
         }
         for row in rows

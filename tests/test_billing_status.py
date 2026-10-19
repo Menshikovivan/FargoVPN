@@ -73,10 +73,10 @@ def test_removed_family_member_does_not_inherit_owner_subscription():
     }) == 'Без подписки'
 
 
-def test_telegram_identity_falls_back_from_username_to_full_name_then_id():
-    assert telegram_identity_label(10, '@nick', 'Иван Петров') == '@nick'
-    assert telegram_identity_label(10, '', '  Иван   Петров ') == 'Иван Петров'
-    assert telegram_identity_label(10, '', '') == 'ID 10'
+def test_telegram_identity_uses_username_then_operator_comment_then_id():
+    assert telegram_identity_label(10, '@nick', 'Telegram Full Name', 'Комментарий') == '@nick'
+    assert telegram_identity_label(10, '', 'Telegram Full Name', '  Иван   Петров ') == 'Иван Петров'
+    assert telegram_identity_label(10, '', 'Telegram Full Name', '') == 'ID 10'
 
 
 def test_family_profile_map_reads_owner_updates_and_stops_after_unlink(monkeypatch):

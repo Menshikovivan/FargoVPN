@@ -30,11 +30,13 @@ def _report_function(connection, logger=None):
     node.decorator_list = []
     namespace = {
         "database_adapter": SimpleNamespace(connect=lambda _path, timeout: connection),
-        "config": SimpleNamespace(DB_PATH="unused"),
+        "config": SimpleNamespace(DB_PATH="unused", PAYMENT_PRICE=150),
         "time": SimpleNamespace(time=lambda: NOW_SECONDS),
         "html": html,
         "billing": billing,
         "logger": logger or SimpleNamespace(warning=Mock()),
+        "SUBSCRIPTION_REPORT_PAGE_SIZE": 8,
+        "re": re,
         "local_date_from_timestamp": lambda value: datetime.fromtimestamp(value).date(),
         "now_local": lambda: datetime.fromtimestamp(NOW_SECONDS),
     }
@@ -49,7 +51,7 @@ def test_family_report_tracks_owner_expiry_extension_expiration_and_unlink():
         CREATE TABLE users (
             tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, expiry_time INTEGER,
             last_reminder_days INTEGER, enable INTEGER, uuid TEXT, email TEXT, sub_id TEXT,
-            registration_status TEXT
+            registration_status TEXT, notes TEXT, custom_payment_price INTEGER
         );
         CREATE TABLE telegram_profile_links (telegram_id INTEGER, profile_tg_id INTEGER);
         CREATE TABLE user_events (id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT);
@@ -57,13 +59,13 @@ def test_family_report_tracks_owner_expiry_extension_expiration_and_unlink():
     )
     connection.executemany(
         """INSERT INTO users
-           (tg_id,username,display_name,expiry_time,last_reminder_days,enable,uuid,email,sub_id,registration_status)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+           (tg_id,username,display_name,expiry_time,last_reminder_days,enable,uuid,email,sub_id,registration_status,notes)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         [
-            (100, "owner", "Owner Name", NOW_MS + 86_400_000, -1, 1, "owner-uuid", "owner@example", "owner-sub", "active"),
-            (200, "", "Иван Петров", 0, -1, 1, "", "", "", "active"),
-            (300, "", "", 0, -1, 1, "", "", "", "active"),
-            (400, "lifetime", "Lifetime User", 0, -1, 1, "lifetime-uuid", "lifetime@example", "lifetime-sub", "active"),
+            (100, "owner", "Owner Name", NOW_MS + 86_400_000, -1, 1, "owner-uuid", "owner@example", "owner-sub", "active", ""),
+            (200, "", "Telegram Иван Петров", 0, -1, 1, "", "", "", "active", "Иван Петров"),
+            (300, "", "", 0, -1, 1, "", "", "", "active", ""),
+            (400, "lifetime", "Lifetime User", 0, -1, 1, "lifetime-uuid", "lifetime@example", "lifetime-sub", "active", ""),
         ],
     )
     connection.execute("INSERT INTO telegram_profile_links VALUES(200,100)")
@@ -72,44 +74,46 @@ def test_family_report_tracks_owner_expiry_extension_expiration_and_unlink():
     report = _report_function(connection)
 
     first = report()
-    assert "Иван Петров — семейная · до " in first
-    assert "@owner — до " in first
-    assert "@owner — семейная" not in first
-    assert "ID 300 — семейная" not in first
-    assert first.count("семейная ·") == 1
-    assert "@lifetime — Бессрочная подписка 🟢 ♾" in first
+    assert "👤 <b>Иван Петров</b>" in first
+    assert "👤 <b>@owner</b>" in first
+    assert "👤 <b>ID 300</b>" in first
+    assert "👨‍👩‍👧 Тип: Семейная" in first
+    assert "👨‍👩‍👧 Тип: Обычная" in first
+    assert "👤 <b>@lifetime</b>" in first and "Активна · бессрочно" in first
     assert "истёк 01.01.1970" not in first
-    assert "Без подписки 🟡" in first
-    assert "Иван Петров — бессрочно" not in first
+    assert "Статус: ⚪ Без подписки" in first
+    assert "Страница 1/1" in first
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS - 1,))
     expired = report()
-    assert "Иван Петров — семейная · истёк " in expired
-    assert "🟡" in expired
+    assert "👤 <b>Иван Петров</b>" in expired
+    assert "Статус: 🔴 Истекла" in expired
     assert "❌" not in expired
 
     connection.execute("UPDATE users SET expiry_time=0 WHERE tg_id=100")
     family_lifetime = report()
-    assert "Иван Петров — Семейная · бессрочная подписка 🟢 ♾" in family_lifetime
+    assert "👤 <b>Иван Петров</b>" in family_lifetime
+    assert "Статус: 🟢 Активна · бессрочно" in family_lifetime
+    assert "👨‍👩‍👧 Тип: Семейная" in family_lifetime
     assert "истёк 01.01.1970" not in family_lifetime
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS + 20 * 86_400_000,))
-    assert "Иван Петров — семейная · до " in report()
+    assert "👤 <b>Иван Петров</b>" in report()
 
     connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=200")
     unlinked = report()
-    assert "Иван Петров — Без подписки 🟡" in unlinked
-    assert "Иван Петров — бессрочно" not in unlinked
+    assert "👤 <b>Иван Петров</b>" in unlinked
+    assert "Статус: ⚪ Без подписки" in unlinked
 
     connection.execute("INSERT INTO user_events VALUES(1,200,'family_member')")
-    assert "@family_member — Без подписки 🟡" in report()
+    assert "👤 <b>Иван Петров</b>" in report()
     connection.close()
 
 
 def test_subscription_report_skips_null_rows_and_handles_compat_row_slices():
     row = (
         "alice", "Alice", 123, NOW_MS + 86_400_000, -1, 1, "alice-uuid", "", "",
-        "active", None, None, None, None, None, None, None,
+        "active", None, None, None, None, None, None, None, "", 0, None, None,
     )
 
     class Result:
@@ -134,7 +138,7 @@ def test_subscription_report_skips_null_rows_and_handles_compat_row_slices():
     logger = SimpleNamespace(warning=Mock())
     report = _report_function(Connection(), logger)()
 
-    assert "@alice — до " in report
+    assert "👤 <b>@alice</b>" in report
     logger.warning.assert_called_once()
 
 
@@ -202,9 +206,11 @@ def test_subscription_report_chunks_preserve_lines_and_html_entities():
     answer = AsyncMock()
     sender_namespace = {
         "asyncio": asyncio,
-        "subscription_report_text": lambda: text,
+        "subscription_report_text": lambda _page_no=1: text,
         "split_subscription_report": namespace["split_subscription_report"],
         "get_admin_menu": lambda: menu,
+        "subscription_report_keyboard": lambda *_args: menu,
+        "re": re,
     }
     exec(
         compile(ast.Module(body=[sender], type_ignores=[]), "send_subscription_report", "exec"),
@@ -240,6 +246,7 @@ def test_admin_subscription_callback_reaches_report():
         "config": SimpleNamespace(ADMIN_IDS=[7]),
         "safe_callback_answer": acknowledge,
         "send_subscription_report": report,
+        "re": re,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "dynamic_admin_menu", "exec"), namespace)
     message = SimpleNamespace()
@@ -276,6 +283,7 @@ def test_admin_subscription_callback_reports_failure_to_user_and_logs_it():
         "send_subscription_report": report,
         "logger": logger,
         "get_admin_menu": lambda: menu,
+        "re": re,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "dynamic_admin_menu", "exec"), namespace)
     message = SimpleNamespace(answer=answer)
@@ -310,7 +318,7 @@ def test_home_menu_passes_current_telegram_identity_to_cabinet_link():
     namespace = {
         "asyncio": asyncio,
         "billing": SimpleNamespace(payment_profile_id=lambda user_id, _path: user_id),
-        "config": SimpleNamespace(DB_PATH="unused"),
+        "config": SimpleNamespace(DB_PATH="unused", PAYMENT_PRICE=150),
         "resolve_user": resolve_user,
         "home_text": lambda **_kwargs: "home",
         "get_user_menu_async": get_user_menu,

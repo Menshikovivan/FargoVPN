@@ -75,6 +75,7 @@ from services import billing
 from services.subscription_status import has_subscription, has_active_subscription
 from telegram_registration_middleware import InvitationAccessMiddleware, PendingInviteCodeFilter, send_registration_prompt
 import registration_access
+from user_identity import get_display_name, normalize_username
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
                     handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
@@ -439,32 +440,69 @@ class JournalBot(Bot):
         return result
 
 
+
+_LABEL_UNSET = object()
+
+
+def telegram_display_label(tg_id: int, username: Any = _LABEL_UNSET, display_name: Any = "") -> str:
+    """Resolve one label using the current event username and stored operator comment."""
+    try:
+        numeric_id = int(tg_id)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    if numeric_id <= 0:
+        return "Пользователь"
+    stored_username = ""
+    comment = ""
+    if username is _LABEL_UNSET:
+        query_username = True
+    else:
+        query_username = False
+    try:
+        with database_adapter.connect(config.DB_PATH, timeout=10) as connection:
+            row = connection.execute(
+                "SELECT username,notes FROM users WHERE tg_id=?", (numeric_id,)
+            ).fetchone()
+        if row:
+            if query_username:
+                stored_username = str(row[0] or "")
+            comment = str(row[1] or "")
+    except Exception as error:
+        logger.debug("Не удалось загрузить комментарий пользователя %s: %s", numeric_id, error)
+    candidate = stored_username if query_username else username
+    return get_display_name({"tg_id": numeric_id, "username": candidate, "notes": comment})
+
 def refresh_telegram_identity(tg_id: int, username: str | None, display_name: str | None = None) -> None:
     """Refresh Telegram identity with a low-cost throttle on every interaction."""
     tg_id = int(tg_id)
     if tg_id <= 0:
         return
-    clean_username = str(username or "").strip().lstrip("@")[:100]
+    clean_username = normalize_username(username, tg_id)
     clean_display_name = re.sub(
         r"[\x00-\x1f\x7f]+", " ", str(display_name or "").strip()
     )[:160].strip()
+    if clean_display_name.casefold() in {"none", "null", "undefined"}:
+        clean_display_name = ""
     now = time.monotonic()
     due = now - _IDENTITY_REFRESHED_AT.get(tg_id, 0.0) >= IDENTITY_REFRESH_SECONDS
     with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
         connection.execute("PRAGMA busy_timeout=20000")
         row = connection.execute("SELECT username,email,display_name FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-        if row and (
-            (clean_username and clean_username != str(row[0] or ""))
-            or (clean_display_name and clean_display_name != str(row[2] or ""))
-        ):
-            connection.execute(
-                """UPDATE users
-                   SET username=CASE WHEN ?<>'' THEN ? ELSE username END,
-                       display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END,
-                       identity_source='telegram',identity_updated_at=CURRENT_TIMESTAMP
-                   WHERE tg_id=?""",
-                (clean_username, clean_username, clean_display_name, clean_display_name, tg_id),
-            )
+        if row:
+            stored_username = normalize_username(row[0], tg_id)
+            stored_display_name = re.sub(r"[\x00-\x1f\x7f]+", " ", str(row[2] or "")).strip()
+            if stored_display_name.casefold() in {"none", "null", "undefined"}:
+                stored_display_name = ""
+            # Update the username even when it becomes empty: Telegram users can
+            # remove or change a handle, and an old handle must not live forever.
+            if clean_username != stored_username or clean_display_name != stored_display_name:
+                connection.execute(
+                    """UPDATE users
+                       SET username=?, display_name=?,
+                           identity_source='telegram',identity_updated_at=CURRENT_TIMESTAMP
+                       WHERE tg_id=?""",
+                    (clean_username or None, clean_display_name or None, tg_id),
+                )
     # Do not create a new local user merely because Telegram sent an update.
     # A new Telegram contact must pass referral registration from /start first.
     if not row:
@@ -472,7 +510,8 @@ def refresh_telegram_identity(tg_id: int, username: str | None, display_name: st
     if not due and row[1]:
         return
     try:
-        recover_user_identity_sync(tg_id, clean_username, config.DB_PATH, False)
+        if clean_username:
+            recover_user_identity_sync(tg_id, clean_username, config.DB_PATH, False)
         _IDENTITY_REFRESHED_AT[tg_id] = now
     except Exception as error:
         logger.debug("Не удалось обновить Telegram-привязку %s: %s", tg_id, error)
@@ -1432,13 +1471,7 @@ async def process_referral_code(msg: Message, state: FSMContext):
     if result.registered:
         await state.clear()
         owner = result.owner or {}
-        owner_username = str(owner.get("username") or "").strip().lstrip("@")
-        owner_name = str(owner.get("display_name") or owner.get("name") or "").strip()
-        owner_label = (
-            f"@{owner_username}"
-            if owner_username
-            else (owner_name or f"ID {int(owner.get('tg_id') or 0)}")
-        )
+        owner_label = get_display_name(owner, int(owner.get("tg_id") or 0))
         try:
             reply_markup = await get_user_menu_async(
                 int(msg.from_user.id),
@@ -1905,13 +1938,13 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     try:
         admin_username = str(getattr(config, "WEB_USERNAME", "admin") or "admin").strip()
         payment_amount = expected_amount
-        payer_username = str(msg.from_user.username or "нет")
+        payer_label = telegram_display_label(msg.from_user.id, msg.from_user.username)
         payment_url = str(getattr(config, "WEB_PUBLIC_PREFIX", "") or "") + "/payments"
         _schedule_panel_push(
             config.DB_PATH,
             admin_username,
             "Кто-то закинул мне бабок 💸",
-            f"Новая оплата от @{payer_username} · {payment_amount} ₽ · чек #{payment_id}",
+            f"Новая оплата от {payer_label} · {payment_amount} ₽ · чек #{payment_id}",
             payment_url,
             "payment-received",
             "high",
@@ -1962,8 +1995,9 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     else:
         user_reply = "⏳ Ваш чек принят и отправлен на проверку администратору."
 
+    receipt_user_label = html.escape(telegram_display_label(msg.from_user.id, msg.from_user.username))
     user_info = (
-        f"📑 Чек #{payment_id} от @{html.escape(msg.from_user.username or 'нет')} "
+        f"📑 Чек #{payment_id} от {receipt_user_label} "
         f"(ID: <code>{msg.from_user.id}</code>)"
     )
     if analysis:
@@ -1988,7 +2022,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     admin_caption = user_info
     if len(admin_caption) > 1024:
         admin_caption = (
-            f"📑 Чек #{payment_id} от @{html.escape(msg.from_user.username or 'нет')} "
+            f"📑 Чек #{payment_id} от {receipt_user_label} "
             f"(ID: <code>{msg.from_user.id}</code>)\n\n"
             "⚠ Подробный результат OCR слишком длинный; откройте чек в веб-панели."
         )
@@ -2044,7 +2078,7 @@ async def process_support_msg(msg: Message, state: FSMContext):
     for admin_id in config.ADMIN_IDS:
         try:
             heading = (
-                f"📬 Поддержка от @{msg.from_user.username or 'нет'} "
+                f"📬 Поддержка от {telegram_display_label(msg.from_user.id, msg.from_user.username)} "
                 f"(ID: {msg.from_user.id})"
             )
             if media_label:
@@ -2076,15 +2110,11 @@ async def send_crm_list(message: Message) -> None:
         with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
             return connection.execute(
                 """SELECT tg_id,
-                          COALESCE(NULLIF(u.username,''),(
-                              SELECT NULLIF(e.username,'') FROM user_events e
-                               WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
-                               ORDER BY e.id DESC LIMIT 1
-                          ),'') AS username,
+                          COALESCE(u.username,'') AS username,
                           display_name,enable,expiry_time,uuid,email,sub_id,
-                          registration_status
+                          registration_status,COALESCE(notes,'') AS notes
                      FROM users u
-                    ORDER BY LOWER(COALESCE(NULLIF(u.username,''),NULLIF(u.display_name,''),'')),u.tg_id
+                    ORDER BY LOWER(COALESCE(NULLIF(u.username,''),NULLIF(u.notes,''),NULLIF(u.display_name,''),'')),u.tg_id
                     LIMIT 100"""
             ).fetchall()
     rows = await asyncio.to_thread(_load_crm_users)
@@ -2093,7 +2123,7 @@ async def send_crm_list(message: Message) -> None:
         return
     family_profiles = await asyncio.to_thread(billing.family_profile_map, config.DB_PATH)
     builder = InlineKeyboardBuilder()
-    for tg_id, username, display_name, enabled, expiry, uuid_value, email, sub_id, registration in rows:
+    for tg_id, username, display_name, enabled, expiry, uuid_value, email, sub_id, registration, notes in rows:
         account = {
             "tg_id": int(tg_id),
             "username": str(username or ""),
@@ -2104,11 +2134,12 @@ async def send_crm_list(message: Message) -> None:
             "uuid": str(uuid_value or ""),
             "email": str(email or ""),
             "sub_id": str(sub_id or ""),
+            "notes": str(notes or ""),
         }
         account.update(family_profiles.get(int(tg_id), {}))
         state = billing.subscription_label(account)
         icon = billing.subscription_status_emoji(state)
-        label = billing.telegram_identity_label(int(tg_id), account["username"], account["display_name"])
+        label = billing.telegram_identity_label(int(tg_id), account["username"], account["display_name"], str(notes or ""))
         builder.button(text=f"{icon} {label} · {state}"[:48], callback_data=f"crmv_{tg_id}")
     builder.button(text="⬅ Админ-меню", callback_data="menu:admin")
     builder.adjust(2)
@@ -2164,25 +2195,32 @@ def admin_summary_text() -> str:
     )
 
 
-def subscription_report_text() -> str:
+SUBSCRIPTION_REPORT_PAGE_SIZE = 8
+
+
+def subscription_report_text(page_no: int = 1) -> str:
+    """Render a safe, readable page of the current subscriber list."""
     with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
         users = connection.execute(
-            """SELECT COALESCE(NULLIF(u.username,''),(
-                          SELECT NULLIF(e.username,'') FROM user_events e
-                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
-                           ORDER BY e.id DESC LIMIT 1
-                      ),'') AS username,
+            """SELECT COALESCE(u.username,'') AS username,
                       u.display_name,u.tg_id,u.expiry_time,u.last_reminder_days,
                       u.enable,u.uuid,u.email,u.sub_id,u.registration_status,
                       l.profile_tg_id,p.uuid,p.email,p.sub_id,p.expiry_time,p.enable,
-                      p.last_reminder_days
+                      p.last_reminder_days,COALESCE(u.notes,'') AS notes,
+                      CASE WHEN EXISTS (
+                          SELECT 1 FROM telegram_profile_links family_link
+                           WHERE (family_link.profile_tg_id=u.tg_id AND family_link.telegram_id<>u.tg_id)
+                              OR (family_link.telegram_id=u.tg_id AND family_link.profile_tg_id<>u.tg_id)
+                      ) THEN 1 ELSE 0 END AS has_family,
+                      u.custom_payment_price AS custom_payment_price,
+                      p.custom_payment_price AS profile_custom_payment_price
                  FROM users u
                  LEFT JOIN telegram_profile_links l ON l.telegram_id=u.tg_id
                  LEFT JOIN users p ON p.tg_id=l.profile_tg_id
                 ORDER BY COALESCE(p.expiry_time,u.expiry_time),u.tg_id"""
         ).fetchall()
     if not users:
-        return "📭 Пользователи не найдены."
+        return "📭 Пользователи не найдены. · Страница 1/1"
     invalid_rows = sum(row is None for row in users)
     if invalid_rows:
         logger.warning(
@@ -2192,55 +2230,91 @@ def subscription_report_text() -> str:
         users = [row for row in users if row is not None]
         if not users:
             raise RuntimeError("Запрос списка подписок вернул только пустые строки")
-    now_ms = int(time.time() * 1000)
-    lines = ["📋 <b>Подписки и уведомления</b>\n"]
-    for row in users:
-        username, display_name, tg_id = row[:3]
-        profile_tg_id = int(row[10] or 0)
-        family_owner = profile_tg_id > 0 and profile_tg_id != int(tg_id)
-        owner_profile = row[11:15]
-        account = {
-            "tg_id": int(tg_id),
-            "username": str(username or ""),
-            "display_name": str(display_name or ""),
-            "registration_status": str(row[9] or "active"),
-            "enable": bool(row[5]),
-            "expiry_time": int(row[3] or 0),
-            "uuid": str(row[6] or ""),
-            "email": str(row[7] or ""),
-            "sub_id": str(row[8] or ""),
-            "family_subscription": family_owner,
-            "family_owner_tg_id": profile_tg_id if family_owner else 0,
-            "family_owner_has_subscription": any(str(value or "").strip() for value in owner_profile[:3]),
-            "family_owner_expiry_time": int(row[14] or 0) if family_owner else 0,
-            "family_owner_enable": bool(row[15]) if family_owner and row[15] is not None else False,
-        }
-        if family_owner:
-            account["enable"] = account["family_owner_enable"]
-        mention = html.escape(
-            billing.telegram_identity_label(int(tg_id), str(username or ""), str(display_name or ""))
-        )
-        label = billing.subscription_label(account, now_ms)
-        if label in {"Не зарегистрирован", "Без подписки", "Семейная · без подписки"}:
-            state = f"{label} {billing.subscription_status_emoji(label)}"
-        elif label == "Заблокирован" or "отключён" in label.lower():
-            state = f"{label} {billing.subscription_status_emoji(label)}"
-        elif label.casefold().endswith("бессрочная подписка"):
-            state = f"{label} {billing.subscription_status_emoji(label)} ♾"
-        else:
-            expiry_value = int(row[14] or 0) if family_owner else int(row[3] or 0)
-            last_reminder = row[16] if family_owner else row[4]
-            expiry_date = local_date_from_timestamp(expiry_value / 1000).strftime("%d.%m.%Y")
-            prefix = "семейная · " if family_owner else ""
-            if expiry_value <= now_ms:
-                state = f"{prefix}истёк {expiry_date} {billing.subscription_status_emoji(label)}"
-            else:
-                days_left = max(0, (local_date_from_timestamp(expiry_value / 1000) - now_local().date()).days)
-                reminder = "не отправлялось" if int(last_reminder or -1) == -1 else f"за {last_reminder} дн."
-                state = f"{prefix}до {expiry_date} · {days_left} дн. · уведомление {reminder} {billing.subscription_status_emoji(label)}"
-        lines.append(f"• {mention} — {state}")
-    return "\n".join(lines)
 
+    page_size = SUBSCRIPTION_REPORT_PAGE_SIZE
+    total_pages = max(1, (len(users) + page_size - 1) // page_size)
+    page_no = max(1, min(int(page_no or 1), total_pages))
+    selected = users[(page_no - 1) * page_size:page_no * page_size]
+    now_ms = int(time.time() * 1000)
+    tariff_days = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
+    lines = [f"📋 <b>Подписки и уведомления</b> · Страница {page_no}/{total_pages} · записей: {len(users)}", ""]
+    for row in selected:
+        username, display_name, tg_id = row[:3]
+        tg_id = int(tg_id or 0)
+        profile_tg_id = int(row[10] or 0)
+        family_member = profile_tg_id > 0 and profile_tg_id != tg_id
+        is_family = family_member or bool(row[18])
+        effective_expiry = int(row[14] or 0) if family_member else int(row[3] or 0)
+        effective_enabled = bool(row[15]) if family_member and row[15] is not None else bool(row[5])
+        uuid_value = str(row[11] or "") if family_member else str(row[6] or "")
+        email_value = str(row[12] or "") if family_member else str(row[7] or "")
+        sub_value = str(row[13] or "") if family_member else str(row[8] or "")
+        has_subscription = any(value.strip() for value in (uuid_value, email_value, sub_value))
+        label = billing.telegram_identity_label(
+            tg_id, str(username or ""), str(display_name or ""), str(row[17] or "")
+        )
+        # Username/comment can be user-controlled; escape every dynamic field before HTML parsing.
+        label = html.escape(str(label)[:100])
+        if not has_subscription:
+            status_text, status_icon = "Без подписки", "⚪"
+            expiry_text, remaining_text = "—", "—"
+        elif not effective_enabled:
+            status_text, status_icon = "Отключена", "🔴"
+            expiry_text = local_date_from_timestamp(effective_expiry / 1000).strftime("%d.%m.%Y") if effective_expiry > 0 else "Бессрочно"
+            remaining_text = "—"
+        elif effective_expiry <= 0:
+            status_text, status_icon = "Активна · бессрочно", "🟢"
+            expiry_text, remaining_text = "Бессрочно", "∞"
+        elif effective_expiry <= now_ms:
+            status_text, status_icon = "Истекла", "🔴"
+            expiry_text = local_date_from_timestamp(effective_expiry / 1000).strftime("%d.%m.%Y")
+            remaining_text = "0 дн."
+        else:
+            expiry_date = local_date_from_timestamp(effective_expiry / 1000)
+            days_left = max(0, (expiry_date - now_local().date()).days)
+            expiry_text = expiry_date.strftime("%d.%m.%Y")
+            remaining_text = f"{days_left} дн."
+            if days_left <= 7:
+                status_text, status_icon = "Скоро закончится", "🟡"
+            else:
+                status_text, status_icon = "Активна", "🟢"
+        reminder_value = row[16] if family_member else row[4]
+        reminder_text = "не отправлялось" if int(reminder_value or -1) == -1 else f"за {int(reminder_value)} дн."
+        family_type = "Семейная" if is_family else "Обычная"
+        custom_price = row[20] if family_member else row[19]
+        if custom_price is None:
+            custom_price = getattr(config, "PAYMENT_PRICE", None)
+        try:
+            price_text = f" · {int(custom_price)} ₽" if custom_price is not None else ""
+        except (TypeError, ValueError, OverflowError):
+            price_text = ""
+        lines.extend([
+            f"👤 <b>{label}</b> · TG <code>{tg_id}</code>",
+            f"🏷 Тариф: период {tariff_days} дн.{price_text}",
+            f"📊 Статус: {status_icon} {html.escape(status_text)}",
+            f"📅 Окончание: {html.escape(expiry_text)}",
+            f"⏳ Осталось: {html.escape(remaining_text)}",
+            f"👨‍👩‍👧 Тип: {family_type}",
+            f"🔔 Уведомление: {html.escape(reminder_text)}",
+            "━━━━━━━━━━━━━━━━━━",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def subscription_report_keyboard(page_no: int, total_pages: int):
+    """Create compact page navigation without adding buttons to a single-page list."""
+    if total_pages <= 1:
+        return get_admin_menu()
+    builder = InlineKeyboardBuilder()
+    if page_no > 1:
+        builder.button(text="⬅ Назад", callback_data=f"admin:subscriptions:page:{page_no - 1}")
+    builder.button(text=f"Стр. {page_no}/{total_pages}", callback_data="admin:subscriptions:page:current")
+    if page_no < total_pages:
+        builder.button(text="Вперёд ➡", callback_data=f"admin:subscriptions:page:{page_no + 1}")
+    builder.button(text="🏠 Админ-меню", callback_data="menu:admin")
+    builder.adjust(3, 1)
+    return builder.as_markup()
 
 def split_subscription_report(text: str, max_length: int = 3900) -> list[str]:
     chunks: list[str] = []
@@ -2283,16 +2357,23 @@ def split_subscription_report(text: str, max_length: int = 3900) -> list[str]:
     return chunks or [text]
 
 
-async def send_subscription_report(message: Message) -> None:
+async def send_subscription_report(message: Message, page_no: int = 1, edit: bool = False) -> None:
     # Keep the synchronous PostgreSQL query off the Telegram event loop.
-    text = await asyncio.to_thread(subscription_report_text)
-    chunks = split_subscription_report(text)
+    text = await asyncio.to_thread(subscription_report_text, page_no)
+    match = re.search(r"Страница\s+(\d+)/(\d+)", text)
+    current_page, total_pages = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
+    chunks = split_subscription_report(text, max_length=3900)
     for index, chunk in enumerate(chunks):
-        await message.answer(
-            chunk,
-            parse_mode="HTML",
-            reply_markup=get_admin_menu() if index == len(chunks) - 1 else None,
-        )
+        last = index == len(chunks) - 1
+        keyboard = subscription_report_keyboard(current_page, total_pages) if last else None
+        if edit and len(chunks) == 1 and hasattr(message, "edit_text"):
+            await message.edit_text(chunk, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await message.answer(
+                chunk,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
 
 
 async def run_admin_backup(message: Message) -> None:
@@ -2318,7 +2399,12 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
         await safe_callback_answer(call, "Недостаточно прав", show_alert=True)
         return
     action = str(call.data or "").split(":", 1)[-1]
-    if action == "subscriptions":
+    subscription_page = None
+    page_match = re.fullmatch(r"subscriptions:page:(current|[1-9][0-9]{0,4})", action)
+    if page_match:
+        subscription_page = 1 if page_match.group(1) == "current" else int(page_match.group(1))
+        action = "subscriptions:page"
+    if action in {"subscriptions", "subscriptions:page"}:
         await safe_callback_answer(call, "Формирую отчёт подписок…")
     else:
         await safe_callback_answer(call)
@@ -2330,9 +2416,12 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
         await send_crm_list(call.message)
     elif action == "sync":
         await run_admin_sync(call.message)
-    elif action == "subscriptions":
+    elif action == "subscriptions" or action == "subscriptions:page":
         try:
-            await send_subscription_report(call.message)
+            if subscription_page is None:
+                await send_subscription_report(call.message)
+            else:
+                await send_subscription_report(call.message, subscription_page, edit=True)
         except Exception:
             logger.exception("Не удалось отправить отчёт подписок из Telegram-админки")
             try:
@@ -2580,7 +2669,8 @@ async def crmview_card(call: CallbackQuery):
         date_str += " · " + panel_from_timestamp(u["expiry_time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
     amount = await asyncio.to_thread(billing.expected_payment_amount, tg_id, config.DB_PATH)
     linked = await asyncio.to_thread(billing.linked_count, tg_id, config.DB_PATH)
-    card = f"<b>👤 КЛИЕНТ CRM:</b>\n\n🆔 TG ID: <code>{tg_id}</code>\n👤 Ник: @{u['username'] or 'нет'}\n📧 Email: <code>{u['email']}</code>\n📅 Статус: <code>{html.escape(date_str)}</code>\n👨‍👩‍👧 Telegram аккаунтов: <code>{linked}</code>\n💳 Платёж за период: <code>{amount}</code> ₽"
+    client_label = html.escape(get_display_name(u, tg_id))
+    card = f"<b>👤 КЛИЕНТ CRM:</b>\n\n🆔 TG ID: <code>{tg_id}</code>\n👤 Имя: <code>{client_label}</code>\n📧 Email: <code>{html.escape(str(u.get('email') or '—'))}</code>\n📅 Статус: <code>{html.escape(date_str)}</code>\n👨‍👩‍👧 Telegram аккаунтов: <code>{linked}</code>\n💳 Платёж за период: <code>{amount}</code> ₽"
     await call.message.answer(card, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("crmmod_"))
@@ -2955,7 +3045,7 @@ async def main():
                 ]
                 for item in items:
                     username = str(item.get("username") or "").strip()
-                    who = f"@{username}" if username else f"TG ID {int(item.get('tg_id') or 0)}"
+                    who = get_display_name(item, int(item.get('tg_id') or 0))
                     count = int(item.get("count") or 0)
                     preview = " ".join(str(item.get("preview") or "").split())[:140]
                     suffix = f": {preview}" if preview else ""

@@ -15,3 +15,6 @@ psycopg[binary]>=3.2,<4
 
 # PostgreSQL SQLAlchemy runtime used by db.py
 SQLAlchemy>=2.0,<3
+
+# WebAuthn / passkeys for optional Face ID and Touch ID panel login
+webauthn>=2.7,<3

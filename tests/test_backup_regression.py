@@ -36,10 +36,10 @@ def test_backup_delivery_has_no_duplicate_scheduler_launcher():
 
 
 def test_release_files_are_current():
-    assert read("VERSION").strip() == "5.1.32"
+    assert read("VERSION").strip() == "5.1.33"
     repo_readme = Path(ROOT.parent / "README.md").read_text(encoding="utf-8")
-    assert repo_readme.startswith("# FargoVPN 5.1.32")
-    assert "**Текущая версия: 5.1.32**" in repo_readme
+    assert repo_readme.startswith("# FargoVPN 5.1.33")
+    assert "**Текущая версия: 5.1.33**" in repo_readme
     assert not list(ROOT.glob("RELEASE_NOTES_*.md"))
     assert not (ROOT / "INSTALLED_CHANGELOG.md").exists()
     assert not (ROOT / "INSTALLED_CHANGELOG_VERSION").exists()

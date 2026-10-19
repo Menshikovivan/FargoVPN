@@ -70,7 +70,7 @@ WEB_USERNAME = "admin"
 WEB_PASSWORD_HASH = ""
 WEB_SECRET_KEY = ""
 WEB_COOKIE_HTTPS_ONLY = True
-WEB_SESSION_MAX_AGE_SECONDS = 28800
+WEB_SESSION_MAX_AGE_SECONDS = 604800
 CABINET_LINK_TTL_SECONDS = 86400
 # Включайте только на короткое время миграции: старые ссылки не имеют срока действия.
 CABINET_ALLOW_LEGACY_TOKENS = False

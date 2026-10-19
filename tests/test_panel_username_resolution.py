@@ -5,6 +5,8 @@ import re
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+
+from user_identity import normalize_username, get_display_name
 from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +25,9 @@ def test_panel_user_query_skips_synthetic_history_and_label_uses_safe_fallback(t
     with sqlite3.connect(db_path) as connection:
         connection.executescript(
             """
-            CREATE TABLE users(tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT);
+            CREATE TABLE users(tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, notes TEXT);
             CREATE TABLE user_events(id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT);
-            INSERT INTO users VALUES(100, 'id_100', 'Owner Name');
+            INSERT INTO users VALUES(100, 'id_100', 'Telegram Full Name', 'Комментарий владельца');
             INSERT INTO user_events VALUES(1, 100, 'owner_real');
             INSERT INTO user_events VALUES(2, 100, '@id_100');
             INSERT INTO user_events VALUES(3, 100, '100');
@@ -49,17 +51,18 @@ def test_panel_user_query_skips_synthetic_history_and_label_uses_safe_fallback(t
     )
     rows = panel_namespace["_local_users"]()
     assert rows[0]["username"] == "id_100"
-    assert rows[0]["latest_username"] == "owner_real"
+    assert "latest_username" not in rows[0]
+    assert rows[0]["notes"] == "Комментарий владельца"
 
     cabinet_source = ROOT / "app/cabinet_service.py"
     public_username = _function(cabinet_source, "public_username")
-    cabinet_namespace = {"Any": Any, "re": re}
+    cabinet_namespace = {"Any": Any, "re": re, "normalize_username": normalize_username}
     exec(
         compile(ast.Module(body=[public_username], type_ignores=[]), "public_username", "exec"),
         cabinet_namespace,
     )
     billing_identity_label = _function(ROOT / "app/services/billing.py", "telegram_identity_label")
-    billing_namespace = {}
+    billing_namespace = {"get_display_name": get_display_name}
     exec(
         compile(
             ast.Module(body=[billing_identity_label], type_ignores=[]),
@@ -81,14 +84,14 @@ def test_panel_user_query_skips_synthetic_history_and_label_uses_safe_fallback(t
         label_namespace,
     )
     assert label_namespace["_panel_user_label"](
-        100, rows[0]["username"], rows[0]["display_name"]
-    ) == "Owner Name"
-    assert label_namespace["_panel_user_label"](100, "id_100", "") == "ID 100"
+        100, rows[0]["username"], rows[0]["display_name"], rows[0]["notes"]
+    ) == "Комментарий владельца"
+    assert label_namespace["_panel_user_label"](100, "id_100", "Telegram Full Name", "") == "ID 100"
 
 
 def test_panel_username_resolution_keeps_real_handle_and_rejects_numeric_id():
     public_username = _function(ROOT / "app/cabinet_service.py", "public_username")
-    namespace = {"Any": Any, "re": re}
+    namespace = {"Any": Any, "re": re, "normalize_username": normalize_username}
     exec(
         compile(ast.Module(body=[public_username], type_ignores=[]), "public_username", "exec"),
         namespace,
@@ -105,13 +108,13 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     with sqlite3.connect(db_path) as connection:
         connection.executescript(
             """
-            CREATE TABLE users(tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT);
+            CREATE TABLE users(tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, notes TEXT);
             CREATE TABLE user_events(
                 id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT,
                 direction TEXT, created_at TEXT
             );
-            INSERT INTO users VALUES(100, 'id_100', 'Owner Name');
-            INSERT INTO users VALUES(200, '200', 'Member Name');
+            INSERT INTO users VALUES(100, 'id_100', 'Telegram Full Name', 'Комментарий владельца');
+            INSERT INTO users VALUES(200, '200', 'Member Name', 'Комментарий участника');
             INSERT INTO user_events VALUES(1, 100, '@id_100', 'in', '2026-01-01');
             INSERT INTO user_events VALUES(2, 100, 'owner_nickname', 'in', '2026-01-02');
             INSERT INTO user_events VALUES(3, 200, 'id_200', 'in', '2026-01-03');
@@ -138,9 +141,10 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
 
     rows = namespace["conversation_users_for_ids"]([100, 200], db_path=db_path)
     by_id = {row["tg_id"]: row for row in rows}
-    assert by_id[100]["username"] == "owner_nickname"
-    assert by_id[100]["display_name"] == "Owner Name"
-    assert by_id[200]["username"] == ""
+    assert by_id[100]["username"] == "id_100"
+    assert by_id[100]["display_name"] == "Telegram Full Name"
+    assert by_id[100]["notes"] == "Комментарий владельца"
+    assert by_id[200]["username"] == "200"
     assert by_id[200]["display_name"] == "Member Name"
 
     all_dialogs = _function(ROOT / "app/user_events.py", "conversation_users")
@@ -156,8 +160,8 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     )
     initial_rows = all_namespace["conversation_users"](db_path=db_path)
     initial_by_id = {row["tg_id"]: row for row in initial_rows}
-    assert initial_by_id[100]["username"] == "owner_nickname"
-    assert initial_by_id[200]["username"] == ""
+    assert initial_by_id[100]["username"] == "id_100"
+    assert initial_by_id[200]["username"] == "200"
 
     events_namespace = {
         "Any": Any,
@@ -176,8 +180,8 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
         events_namespace,
     )
     paged_events = events_namespace["all_events"](tg_id=100, db_path=db_path)
-    assert paged_events[0]["display_username"] == "owner_nickname"
-    assert paged_events[0]["display_name"] == "Owner Name"
+    assert paged_events[0]["display_username"] == "id_100"
+    assert paged_events[0]["display_name"] == "Telegram Full Name"
 
     recent_events = _function(ROOT / "app/user_events.py", "recent_all_events")
     exec(
@@ -186,6 +190,6 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     )
     live_events = events_namespace["recent_all_events"](db_path=db_path)
     live_by_id = {event["id"]: event for event in live_events}
-    assert live_by_id[1]["display_username"] == "owner_nickname"
-    assert live_by_id[3]["display_username"] == ""
+    assert live_by_id[1]["display_username"] == "id_100"
+    assert live_by_id[3]["display_username"] == "200"
     assert live_by_id[3]["display_name"] == "Member Name"

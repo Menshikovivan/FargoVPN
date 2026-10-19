@@ -57,14 +57,20 @@ def subscription_status_emoji(label: str | None) -> str:
     return {"bad": "🔴", "warn": "🟡", "good": "🟢"}[subscription_status_tone(label)]
 
 
-def telegram_identity_label(tg_id: int, username: str = "", display_name: str = "") -> str:
-    clean_username = str(username or "").strip().lstrip("@")
-    if clean_username:
-        return f"@{clean_username}"
-    clean_display_name = " ".join(str(display_name or "").split())
-    if clean_display_name:
-        return clean_display_name
-    return f"ID {int(tg_id)}" if int(tg_id or 0) > 0 else "Пользователь"
+def get_display_name(user: Any, tg_id: int | None = None) -> str:
+    """Canonical display name shared by bot, panel, chats and notifications."""
+    from user_identity import get_display_name as _get_display_name
+    return _get_display_name(user, tg_id=tg_id)
+
+
+def telegram_identity_label(
+    tg_id: int, username: str = "", display_name: str = "", comment: str = ""
+) -> str:
+    # display_name is retained for API compatibility; it is Telegram profile
+    # metadata, not the operator's explicit comment and is not used as a label.
+    return get_display_name(
+        {"tg_id": tg_id, "username": username, "display_name": display_name, "notes": comment}
+    )
 
 
 def family_profile_map(db_path: str | None = None) -> dict[int, dict[str, Any]]:
@@ -154,12 +160,9 @@ def profile_accounts(tg_id: int, db_path: str | None = None) -> list[dict[str, A
     with db.connect(db_path) as connection:
         rows = connection.execute(
             """SELECT u.tg_id,
-                      COALESCE(NULLIF(u.username,''),(
-                          SELECT NULLIF(e.username,'') FROM user_events e
-                           WHERE e.tg_id=u.tg_id AND TRIM(COALESCE(e.username,''))<>''
-                           ORDER BY e.id DESC LIMIT 1
-                      ),'') AS username,
-                      u.display_name
+                      COALESCE(NULLIF(TRIM(u.username),''),'') AS username,
+                      COALESCE(NULLIF(TRIM(u.display_name),''),'') AS display_name,
+                      COALESCE(NULLIF(TRIM(u.notes),''),'') AS notes
                  FROM telegram_profile_links l
                  JOIN users u ON u.tg_id=l.telegram_id
                 WHERE l.profile_tg_id=?
@@ -171,7 +174,8 @@ def profile_accounts(tg_id: int, db_path: str | None = None) -> list[dict[str, A
             "tg_id": int(row[0]),
             "username": str(row[1] or ""),
             "display_name": str(row[2] or ""),
-            "label": telegram_identity_label(int(row[0]), str(row[1] or ""), str(row[2] or "")),
+            "notes": str(row[3] or ""),
+            "label": telegram_identity_label(int(row[0]), str(row[1] or ""), str(row[2] or ""), str(row[3] or "")),
         }
         for row in rows
     ]

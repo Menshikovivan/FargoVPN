@@ -1716,7 +1716,10 @@ else:
 ensure("WEB_USERNAME", "admin")
 ensure("WEB_PASSWORD_HASH", "")
 set_value("WEB_COOKIE_HTTPS_ONLY", True)
-ensure("WEB_SESSION_MAX_AGE_SECONDS", 28800)
+ensure("WEB_SESSION_MAX_AGE_SECONDS", 604800)
+# Upgrade the historical default only; preserve any custom lifetime chosen by the admin.
+if int(literal("WEB_SESSION_MAX_AGE_SECONDS", 604800) or 604800) == 28800:
+    set_value("WEB_SESSION_MAX_AGE_SECONDS", 604800)
 ensure("BOT_PANEL_URL", "")
 domain_value = str(literal("WEB_DOMAIN", "") or literal("WEB_TLS_SERVER_NAME", "") or "").strip()
 if domain_value and prefix:
@@ -1907,6 +1910,7 @@ for module in modules:
 importlib.import_module("webapp")
 print("Проверка импортов и синтаксиса Python: успешно")
 PY
+run_timed 360 "Резервная копия БД и нормализация Telegram-идентичностей" "$TARGET/.venv/bin/python" "$TARGET/normalize_user_identities.py"
 "$TARGET/.venv/bin/python" "$TARGET/init_db.py"
 VPN_UPDATE_PROGRESS=89
 write_update_status "migrating" "Конфигурация и структура базы данных проверены" "$VPN_UPDATE_PROGRESS" "database"

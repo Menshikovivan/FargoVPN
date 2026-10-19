@@ -11,6 +11,8 @@ import subprocess
 from types import SimpleNamespace
 from html.parser import HTMLParser
 
+from user_identity import normalize_username, get_display_name
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,20 +36,19 @@ def cabinet_functions(sub_url='https://example.test/sub'):
     ns = dict(Any=object, Request=object, html=html, json=json,
         time=SimpleNamespace(time=lambda: 0),
         config=SimpleNamespace(SERVICE_NAME='Test', DB_PATH='unused', CABINET_PATH='/cabinet'),
-        update_manager=SimpleNamespace(current_version=lambda: '5.1.20'),
+        update_manager=SimpleNamespace(current_version=lambda: '5.1.33'),
         public_path=lambda path: '/private123' + path,
         _cabinet_bot_username=lambda: 'testbot',
         referral_codes=SimpleNamespace(ensure_referral_code=lambda *args: 'TEST'),
         cabinet_service=SimpleNamespace(public_username=lambda tg_id, *values: next(
-            (str(value).strip().lstrip('@') for value in values
-             if value and str(value).strip().lstrip('@') not in {str(tg_id), f'id_{tg_id}'}),
+            (normalize_username(value, tg_id) for value in values if normalize_username(value, tg_id)),
             ''
         )),
         bytes_to_gb=lambda value: 0, remaining_label=lambda *args: '0',
         panel_from_timestamp=lambda _value: __import__('datetime').datetime.fromtimestamp(0),
         billing=SimpleNamespace(
-            telegram_identity_label=lambda tg_id, username, display_name:
-                '@' + username if username else display_name or f'ID {tg_id}',
+            telegram_identity_label=lambda tg_id, username, display_name, comment='':
+                get_display_name({'tg_id': tg_id, 'username': username, 'display_name': display_name, 'notes': comment}),
             subscription_label=lambda user, now_ms: 'Без подписки',
             subscription_status_tone=lambda label: (
                 'bad' if 'отключён' in str(label).casefold()
@@ -69,15 +70,16 @@ def test_cabinet_stylesheet_and_telegram_script_are_separate_elements():
     ns = cabinet_functions()
     markup = ns['_cabinet_markup']('tester', {'tg_id': 1}, 'https://example.test/sub')
     tags = Tags(markup).tags
-    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.20'}) in tags
+    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.33'}) in tags
     assert ('script', {'src': 'https://telegram.org/js/telegram-web-app.js'}) in tags
 
 
-def test_cabinet_uses_full_name_when_telegram_username_is_missing():
+def test_cabinet_uses_comment_when_telegram_username_is_missing():
     ns = cabinet_functions()
-    markup = ns['_cabinet_markup']('', {'tg_id': 2, 'display_name': 'Иван Петров'}, '')
+    markup = ns['_cabinet_markup']('не должен подменять имя', {'tg_id': 2, 'display_name': 'Telegram Full Name', 'notes': 'Иван Петров'}, '')
     assert '<h1>Иван Петров</h1>' in markup
-    assert '<h1>@ID 2</h1>' not in markup
+    assert '<h1>@Иван Петров</h1>' not in markup
+    assert 'Telegram Full Name</h1>' not in markup
 
 
 def test_cabinet_prefers_telegram_username_to_numeric_id():
@@ -108,12 +110,14 @@ def test_cabinet_render_uses_safe_fallback_for_synthetic_member_and_owner_userna
     markup = ns['_cabinet_markup']('', {
         'tg_id': 20,
         'username': 'id_20',
-        'display_name': 'Иван Петров',
+        'display_name': 'Telegram Full Name',
+        'notes': 'Иван Петров',
         'uuid': 'member-uuid',
         'family_subscription': True,
         'family_owner_tg_id': 10,
         'family_owner_username': 'id_10',
-        'family_owner_display_name': 'Мария',
+        'family_owner_display_name': 'Telegram Мария',
+        'family_owner_notes': 'Мария',
     }, '')
 
     assert '<h1>Иван Петров<br><small>Семейная подписка пользователя Мария</small></h1>' in markup
@@ -174,8 +178,9 @@ def test_family_cabinet_keeps_member_identity_and_owner_subscription():
         'Path': Path,
         'Any': object,
         're': re,
+        'normalize_username': normalize_username,
         '_connect': connect,
-        '_latest_username': lambda *_args: 'membernick',
+        '_latest_username': lambda *_args: '',
         'get_user': lambda tg_id, _path: members.get(tg_id),
     }
     exec(compile(ast.Module(body=[public_username], type_ignores=[]), 'public_username', 'exec'), namespace)
@@ -183,7 +188,7 @@ def test_family_cabinet_keeps_member_identity_and_owner_subscription():
     user = namespace['resolve_user_for_cabinet'](20, 'unused')
 
     assert user['tg_id'] == 20
-    assert user['username'] == 'membernick'
+    assert user['username'] == ''
     assert user['display_name'] == 'Иван Петров'
     assert user['sub_id'] == 'owner-sub'
     assert user['family_subscription'] is True
@@ -214,7 +219,7 @@ def test_connection_page_preserves_public_prefix(sub_url):
     ns = cabinet_functions(sub_url)
     response = ns['cabinet_connection_page'](object())
     tags = Tags(response.body).tags
-    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.20'}) in tags
+    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.33'}) in tags
     anchors = [attrs['href'] for tag, attrs in tags if tag == 'a']
     assert '/private123/cabinet' in anchors
     assert '/cabinet' not in anchors
