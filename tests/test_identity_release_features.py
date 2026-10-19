@@ -106,6 +106,11 @@ def test_login_page_keeps_password_fallback_and_passkey_button_and_javascript_pa
     body = namespace["login_page"](object())
     assert "Войти по паролю" in body
     assert "Войти по Face ID / Touch ID" in body
+    assert 'autocomplete="username"' in body
+    assert 'autocomplete="current-password"' in body
+    assert 'method="post" action="/panel/login"' in body
+    assert "fetch(f.action" not in body
+    assert ".replace(/\\+/g,'-').replace(/\\//g,'_')" in body
     assert "api/webauthn/authentication/options" in body
     assert "api/webauthn/authentication/verify" in body
     scripts = [script for script in re.findall(r"<script[^>]*>(.*?)</script>", body, re.S) if script.strip()]
@@ -117,6 +122,23 @@ def test_login_page_keeps_password_fallback_and_passkey_button_and_javascript_pa
             path.write_text(script, encoding="utf-8")
             checked = subprocess.run([node_bin, "--check", str(path)], capture_output=True, text=True, timeout=20)
             assert checked.returncode == 0, checked.stderr
+        profile_node = next(
+            item for item in ast.parse(source).body
+            if isinstance(item, ast.FunctionDef) and item.name == "profile_page"
+        )
+        profile_literals = [
+            item.value for item in ast.walk(profile_node)
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            and "function fromB64" in item.value and "function credentialJSON" in item.value
+        ]
+        assert profile_literals, "Не найден скрипт регистрации passkey в профиле"
+        profile_script = re.search(r"<script>(.*?)</script>", profile_literals[0], re.S).group(1)
+        assert ".replace(/\\+/g,'-').replace(/\\//g,'_')" in profile_script
+        assert "setTimeout(()=>{if(confirm(" not in profile_script
+        path = tmp_path / "profile-passkey.js"
+        path.write_text(profile_script, encoding="utf-8")
+        checked = subprocess.run([node_bin, "--check", str(path)], capture_output=True, text=True, timeout=20)
+        assert checked.returncode == 0, checked.stderr
 
 
 def shutil_which(name: str) -> str | None:
@@ -197,6 +219,7 @@ def test_identity_migration_backs_up_first_reports_changes_and_is_idempotent(tmp
     users, events = _migration_users(), [
         {"id": 1, "tg_id": 4, "username": "id_4"},
         {"id": 2, "tg_id": 1, "username": "alice"},
+        {"id": 3, "tg_id": 4, "username": "member_real"},
     ]
     operations = []
     connection = _MigrationConnection(users, events, operations=operations)
@@ -218,13 +241,15 @@ def test_identity_migration_backs_up_first_reports_changes_and_is_idempotent(tmp
     assert report["usernames_normalized"] == 5
     assert report["comments_normalized"] == 2
     assert report["display_names_normalized"] == 2
-    assert report["events_checked"] == 2
+    assert report["events_checked"] == 3
     assert report["event_usernames_normalized"] == 1
+    assert report["historical_usernames_recovered"] == 1
     assert Path(report["backup"]).stat().st_mode & 0o777 == 0o600
     assert users[0]["username"] == "alice"
     assert users[0]["display_name"] == "Alice Smith"
     assert users[0]["notes"] == "Клиент A"
     assert users[1]["username"] is None and users[1]["display_name"] is None and users[1]["notes"] is None
+    assert users[3]["username"] == "member_real"
     assert events[0]["username"] is None
 
     operations.clear()
@@ -232,6 +257,7 @@ def test_identity_migration_backs_up_first_reports_changes_and_is_idempotent(tmp
     assert second["users_checked"] == 5
     assert second["users_changed"] == 0
     assert second["event_usernames_normalized"] == 0
+    assert second["historical_usernames_recovered"] == 0
 
 
 def test_identity_migration_handles_old_schema_without_notes_or_event_table(tmp_path, monkeypatch):

@@ -58,6 +58,7 @@ import push_service
 import restore_manager
 from security_policy import PANEL_CONTENT_SECURITY_POLICY
 import registration_access
+from user_identity import build_unique_identity_index, match_local_identity, normalize_username
 from detached_jobs import DetachedJobError, launch_detached
 from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local
 from backup import read_live_state, request_backup_now
@@ -1061,6 +1062,33 @@ def _panel_user_label(tg_id: int, username: Any, display_name: Any = "", comment
     )
 
 
+def _user_actions_html(tg_id: int, identity_conflict: bool, enabled: bool) -> str:
+    """Render actions only when a stable, positive Telegram identity is confirmed.
+
+    3x-ui may contain clients not linked to Telegram. Giving these rows a
+    /users/id/0 or /users/0/delete URL can look like a valid action and makes
+    several unrelated clients point to the same nonexistent identity. Keep such
+    rows non-destructive until an administrator explicitly resolves the link.
+    """
+    try:
+        tg_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        tg_id = 0
+    if identity_conflict or tg_id <= 0:
+        label = "Проверить привязку" if identity_conflict else "Привязать Telegram"
+        return (
+            '<a class="button small secondary" href="/users/import-identities">'
+            + label + '</a>'
+        )
+    base_button_label = "Открыть чат"
+    message_button = (
+        f'<a class="button small secondary" href="/users/id/{tg_id}" '
+        f'data-chat-button data-base-label="{base_button_label}">{base_button_label}</a>'
+    )
+    toggle_label = "Блокировать" if enabled else "Включить"
+    return message_button + f"""<details class="row-more"><summary aria-label="Дополнительные действия">•••</summary><div class="row-more-menu"><form class="inline" method="post" action="/users/{tg_id}/days"><input name="days" type="number" value="30" min="-3650" max="3650" step="1" aria-label="Изменение срока в днях" title="Изменить дни"><button class="small" title="Изменить дни">Срок</button></form><form method="post" action="/users/{tg_id}/toggle"><button class="small secondary">{toggle_label}</button></form><form method="post" action="/users/{tg_id}/delete" onsubmit="return confirm('Удалить пользователя из базы и 3x-ui?')"><button class="small danger">Удалить</button></form></div></details>"""
+
+
 def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Merge live 3x-ui values with local Telegram metadata.
 
@@ -1076,8 +1104,21 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
         LOGGER.warning("3x-ui недоступна для страницы пользователей: %s", error)
         snapshot = {"stale": True, "error": str(error)}
     local = _local_users()
-    by_email = {str(row.get("email") or "").strip().lower(): row for row in local if row.get("email")}
-    by_uuid = {str(row.get("uuid") or "").strip().lower(): row for row in local if row.get("uuid")}
+    by_email, ambiguous_emails = build_unique_identity_index(local, "email")
+    by_uuid, ambiguous_uuids = build_unique_identity_index(local, "uuid")
+    # Recover real handles only for rows whose current username is blank or a
+    # known synthetic ID label. This is one bounded window query, not an N+1 loop.
+    history_usernames: dict[int, str] = {}
+    missing_handles = [
+        int(row.get("tg_id") or 0) for row in local
+        if int(row.get("tg_id") or 0) > 0
+        and not normalize_username(row.get("username"), int(row.get("tg_id") or 0))
+    ]
+    if missing_handles:
+        try:
+            history_usernames = user_events.latest_valid_usernames(missing_handles, db_path=config.DB_PATH)
+        except Exception as error:
+            LOGGER.warning("Не удалось восстановить исторические Telegram-ники списка подписок: %s", type(error).__name__)
     family_profiles = billing.family_profile_map(config.DB_PATH)
     now_ms = int(time.time() * 1000)
 
@@ -1107,7 +1148,15 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
     for client in source_clients:
         email_key = str(client.get("email") or "").strip().lower()
         uuid_key = str(client.get("uuid") or "").strip().lower()
-        row = by_email.get(email_key) or (by_uuid.get(uuid_key) if uuid_key else None) or {}
+        matched_row, identity_conflict = match_local_identity(
+            email_key, uuid_key, by_email, by_uuid, ambiguous_emails, ambiguous_uuids
+        )
+        row = matched_row or {}
+        if identity_conflict:
+            LOGGER.error(
+                "Неоднозначная привязка клиента 3x-ui скрыта из пользовательских действий: email_key_present=%s uuid_present=%s",
+                bool(email_key), bool(uuid_key),
+            )
         if row.get("tg_id") is not None:
             try:
                 matched_local_ids.add(int(row.get("tg_id") or 0))
@@ -1119,15 +1168,19 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
         total = int(client.get("total") or 0)
         used = up + down
         quota_remaining = max(0, total - used) if total > 0 else None
-        tg_id = int(row.get("tg_id") or client.get("tg_id") or 0)
+        # Never trust a TG ID carried by a detached 3x-ui client unless that
+        # client was matched to the same local user's email/UUID. This prevents
+        # a click from opening another Telegram user's card on conflicting data.
+        tg_id = int(row.get("tg_id") or 0)
         item = {
+            "identity_conflict": bool(identity_conflict),
             **client,
             "registered_at": row.get("registered_at") or "",
             "registration_status": str(row.get("registration_status") or "active"),
             "custom_payment_price": row.get("custom_payment_price"),
             "tg_id": tg_id,
             "username": cabinet_service.public_username(
-                tg_id, row.get("username")
+                tg_id, row.get("username"), history_usernames.get(tg_id)
             ),
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or client.get("comment") or "")[:255],
@@ -1182,8 +1235,9 @@ def live_users(force: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any
             **family,
             "tg_id": local_tg_id,
             "username": cabinet_service.public_username(
-                local_tg_id, row.get("username")
+                local_tg_id, row.get("username"), history_usernames.get(local_tg_id)
             ),
+            "identity_conflict": False,
             "display_name": str(row.get("display_name") or ""),
             "comment": str(row.get("notes") or "")[:255],
             "expiry_time": expiry,
@@ -1788,20 +1842,12 @@ def login_page(request: Request):
     action = html.escape(public_path("/login"), quote=True)
     target = json.dumps(public_path("/"))
     service = html.escape(str(config.SERVICE_NAME))
-    body = """<div class="login-wrap"><div class="card login-card"><div class="login-brand"><div class="logo">V</div><div><strong>%s</strong><span>Control Panel</span></div></div><h1>Вход в панель</h1><p class="subtitle">Адаптировано для телефона, браузера и PWA.</p><form id="login-form" method="post" action="%s" novalidate><div class="setting"><label for="login-user">Логин</label><input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div><div class="setting"><label for="login-pass">Пароль</label><input id="login-pass" name="password" type="password" autocomplete="current-password" required></div><button id="login-submit" class="button" type="submit">Войти по паролю</button><button id="passkey-login" class="button secondary" type="button" data-target="%s" hidden>Войти по Face ID / Touch ID</button><p class="muted">Биометрический вход доступен при HTTPS и после регистрации passkey в профиле.</p><div id="login-status" class="login-status" aria-live="polite"></div></form></div></div><script>
+    body = """<div class="login-wrap"><div class="card login-card"><div class="login-brand"><div class="logo">V</div><div><strong>%s</strong><span>Control Panel</span></div></div><h1>Вход в панель</h1><p class="subtitle">Адаптировано для телефона, браузера и PWA.</p><form id="login-form" method="post" action="%s"><div class="setting"><label for="login-user">Логин</label><input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required></div><div class="setting"><label for="login-pass">Пароль</label><input id="login-pass" name="password" type="password" autocomplete="current-password" required></div><button id="login-submit" class="button" type="submit">Войти по паролю</button><button id="passkey-login" class="button secondary" type="button" data-target="%s" hidden>Войти по Face ID / Touch ID</button><p class="muted">Биометрический вход доступен при HTTPS и после регистрации passkey в профиле.</p><div id="login-status" class="login-status" aria-live="polite"></div></form></div></div><script>
 (function(){
- const f=document.getElementById('login-form'),b=document.getElementById('login-submit'),st=document.getElementById('login-status');
- if(!f)return;
- f.addEventListener('submit',async function(e){
-  e.preventDefault(); b.disabled=true; st.textContent='Проверяю данные…'; st.className='login-status';
-  try{
-   const r=await fetch(f.action,{method:'POST',credentials:'same-origin',headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'},body:new FormData(f),cache:'no-store'});
-   let d={}; try{d=await r.json();}catch(_){}
-   if(!r.ok || !d.ok) throw new Error(d.detail || 'Неверный логин или пароль');
-   st.textContent='Вход выполнен'; st.className='login-status ok'; window.location.replace(%s);
-  }catch(err){ st.textContent='❌ '+(err.message||'Ошибка входа'); st.className='login-status bad'; }
-  finally{ b.disabled=false; }
- });
+ // Keep password login as a real HTML form POST. iOS Safari and browser password
+ // managers can then detect successful login and offer to save/autofill it.
+ const f=document.getElementById('login-form');
+ if(f){f.addEventListener('submit',function(){const b=document.getElementById('login-submit');if(b)b.disabled=true;});}
 })();</script><script>
 (function(){
  const btn=document.getElementById('passkey-login'), status=document.getElementById('login-status');
@@ -1815,7 +1861,7 @@ def login_page(request: Request):
  function publicKeyOptions(o){o.challenge=fromB64(o.challenge);if(o.user&&o.user.id)o.user.id=fromB64(o.user.id);for(const k of ['allowCredentials','excludeCredentials'])for(const c of (o[k]||[]))c.id=fromB64(c.id);return o;}
  function credentialJSON(c){const r=c.response,out={id:c.id,rawId:toB64(c.rawId),type:c.type,clientExtensionResults:c.getClientExtensionResults?c.getClientExtensionResults():{},authenticatorAttachment:c.authenticatorAttachment||null,response:{}};for(const k of ['clientDataJSON','attestationObject','authenticatorData','signature','userHandle'])if(r[k])out.response[k]=toB64(r[k]);if(r.getTransports)out.response.transports=r.getTransports();return out;}
  btn.addEventListener('click',async()=>{btn.disabled=true;status.textContent='Ожидаю подтверждение биометрии…';status.className='login-status';try{const a=await fetch(optionsUrl,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'}});const ad=await a.json();if(!a.ok||!ad.ok)throw new Error(ad.detail||'Passkey недоступен');const cred=await navigator.credentials.get({publicKey:publicKeyOptions(ad.options)});const r=await fetch(verifyUrl,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','Accept':'application/json','X-Requested-With':'XMLHttpRequest'},body:JSON.stringify({credential:credentialJSON(cred)})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Проверка passkey не пройдена');status.textContent='Вход выполнен';status.className='login-status ok';window.location.replace(d.redirect||btn.dataset.target||'/');}catch(e){status.textContent='❌ '+(e.message||'Вход по passkey не выполнен');status.className='login-status bad';}finally{btn.disabled=false;}});
-})();</script>""" % (service, action, target, html.escape(public_path("/"), quote=True), json.dumps(public_path("/api/webauthn/authentication/options")), json.dumps(public_path("/api/webauthn/authentication/verify")))
+})();</script>""" % (service, action, target, json.dumps(public_path("/api/webauthn/authentication/options")), json.dumps(public_path("/api/webauthn/authentication/verify")))
     return page(request, "Вход", body)
 
 
@@ -1995,6 +2041,18 @@ def dashboard_users_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         item["username"] = cabinet_service.public_username(
             identity_tg_id, item.get("username")
         )
+        # live_users normally returns enriched rows. If its processing fails,
+        # _local_users() is the safe fallback; normalize its shape instead of
+        # indexing absent keys and turning the whole Overview into HTTP 500.
+        expiry = int(item.get("expiry_time") or 0)
+        enabled = bool(item.get("enable", True))
+        item.setdefault("enable", enabled)
+        item.setdefault("online", False)
+        item.setdefault("traffic_used", int(item.get("up") or 0) + int(item.get("down") or 0))
+        item.setdefault("quota_remaining", max(0, int(item.get("total") or 0) - int(item.get("up") or 0) - int(item.get("down") or 0)) if int(item.get("total") or 0) > 0 else None)
+        item.setdefault("active", enabled and bool(str(item.get("email") or "").strip() or str(item.get("uuid") or "").strip() or str(item.get("sub_id") or "").strip()) and (expiry <= 0 or expiry > int(time.time() * 1000)))
+        item.setdefault("last_online_ts", int(item.get("last_online_ts") or 0))
+        item.setdefault("remaining_days", remaining_days(expiry, int(time.time() * 1000)))
     return users, snapshot
 
 
@@ -2211,13 +2269,13 @@ def profile_page(request: Request):
 (function(){
  const base=__BASE__,csrf=document.getElementById('passkey-register')?.dataset.csrf||'',btn=document.getElementById('passkey-register'),status=document.getElementById('passkey-profile-status'),list=document.getElementById('passkey-device-list');
  function fromB64(s){const v=String(s||'').replace(/-/g,'+').replace(/_/g,'/');const b=atob(v+'='.repeat((4-v.length%4)%4));return Uint8Array.from(b,c=>c.charCodeAt(0));}
- function toB64(buf){let s='';for(const b of new Uint8Array(buf))s+=String.fromCharCode(b);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+ function toB64(buf){let s='';for(const b of new Uint8Array(buf))s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
  function publicKeyOptions(o){o.challenge=fromB64(o.challenge);if(o.user&&o.user.id)o.user.id=fromB64(o.user.id);for(const k of ['allowCredentials','excludeCredentials'])for(const c of (o[k]||[]))c.id=fromB64(c.id);return o;}
  function credentialJSON(c){const r=c.response,out={id:c.id,rawId:toB64(c.rawId),type:c.type,clientExtensionResults:c.getClientExtensionResults?c.getClientExtensionResults():{},authenticatorAttachment:c.authenticatorAttachment||null,response:{}};for(const k of ['clientDataJSON','attestationObject','authenticatorData','signature','userHandle'])if(r[k])out.response[k]=toB64(r[k]);if(r.getTransports)out.response.transports=r.getTransports();return out;}
  async function beginRegistration(){if(!window.isSecureContext||!navigator.credentials||!window.PublicKeyCredential)throw new Error('Биометрия недоступна в этом браузере или соединение не HTTPS.');const o=await fetch(base+'api/webauthn/registration/options',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Accept':'application/json'},cache:'no-store'});const od=await o.json();if(!o.ok||!od.ok)throw new Error(od.detail||'Не удалось начать регистрацию');const cred=await navigator.credentials.create({publicKey:publicKeyOptions(od.options)});const label=prompt('Название устройства','iPhone / Face ID')||'Passkey на этом устройстве';const r=await fetch(base+'api/webauthn/registration/verify',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Accept':'application/json'},body:JSON.stringify({credential:credentialJSON(cred),label}),cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Не удалось сохранить passkey');status.textContent='✅ '+(d.detail||'Passkey зарегистрирован');location.reload();}
  btn?.addEventListener('click',async()=>{btn.disabled=true;status.textContent='Запускаю регистрацию passkey…';try{await beginRegistration();}catch(e){status.textContent='❌ '+(e.message||'Ошибка регистрации');}finally{btn.disabled=false;}});
  list?.querySelectorAll('.passkey-remove').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Удалить это устройство? Вход по нему больше не будет работать.'))return;b.disabled=true;try{const r=await fetch(base+'api/webauthn/credentials/'+encodeURIComponent(b.dataset.credential||''),{method:'DELETE',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Accept':'application/json'},cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||'Ошибка удаления');location.reload();}catch(e){status.textContent='❌ '+(e.message||'Ошибка удаления');b.disabled=false;}}));
- if(new URLSearchParams(location.search).get('setup_passkey')==='1'){setTimeout(()=>{if(confirm('Включить вход по Face ID / Touch ID на этом устройстве?'))btn?.click();},250);}
+ if(new URLSearchParams(location.search).get('setup_passkey')==='1'&&status)status.textContent='Пароль сохранён? Теперь можно отдельно включить вход по Face ID / Touch ID кнопкой выше.';
 })();
 </script>'''
     body = body.replace("__TOKEN__", token).replace("__DEVICES__", "".join(devices) if devices else '<div class="empty-state">Устройства для биометрического входа пока не зарегистрированы.</div>').replace("__BASE__", json.dumps(public_path("/") ))
@@ -2250,7 +2308,11 @@ def dashboard(request: Request):
     bot_status = service_state("vpn-service-bot") == "active"
     web_status = service_state("vpn-service-web") == "active"
     xui_status = not bool(snapshot.get("stale"))
-    xui_control = fetch_control_snapshot_sync()
+    try:
+        xui_control = fetch_control_snapshot_sync()
+    except Exception as error:
+        LOGGER.warning("Не удалось загрузить телеметрию 3x-ui для главной: %s", type(error).__name__)
+        xui_control = {"status": {}, "fail2ban": {}, "xray_metrics": {}, "observatory": {}, "nodes": [], "error": str(error)}
     db_status = False
     backup_status = dashboard_backup_status()
 
@@ -2267,13 +2329,32 @@ def dashboard(request: Request):
         ).fetchone()[0] or 0)
         payment_count = int(connection.execute("SELECT COUNT(*) FROM payments WHERE status='approved' AND created_at>=?", (month_start,)).fetchone()[0] or 0)
         user_events_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_events'").fetchone())
+        users_table_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone())
         today_start = utc_sql_day_start_for_local(now_local())
         messages_today = int(connection.execute(
             "SELECT COUNT(*) FROM user_events WHERE direction IN ('in','out') AND created_at>=?", (today_start,)
         ).fetchone()[0] or 0) if user_events_exists else 0
-        recent_events = connection.execute(
-            "SELECT tg_id,username,direction,text,created_at FROM user_events WHERE direction IN ('in','out') ORDER BY id DESC LIMIT 6"
-        ).fetchall() if user_events_exists else []
+        if user_events_exists and users_table_exists:
+            recent_events = connection.execute(
+                """SELECT events.tg_id,events.username AS event_username,
+                          COALESCE(users.username,'') AS username,
+                          COALESCE(users.display_name,'') AS display_name,
+                          COALESCE(users.notes,'') AS notes,
+                          events.direction,events.text,events.created_at
+                     FROM user_events AS events
+                     LEFT JOIN users ON users.tg_id=events.tg_id
+                    WHERE events.direction IN ('in','out')
+                    ORDER BY events.id DESC LIMIT 6"""
+            ).fetchall()
+        elif user_events_exists:
+            recent_events = connection.execute(
+                """SELECT tg_id,username AS event_username,'' AS username,
+                          '' AS display_name,'' AS notes,direction,text,created_at
+                     FROM user_events WHERE direction IN ('in','out')
+                    ORDER BY id DESC LIMIT 6"""
+            ).fetchall()
+        else:
+            recent_events = []
 
         recent_audit = []
         try:
@@ -2306,10 +2387,25 @@ def dashboard(request: Request):
         return f'<span class="system-state {state}"><i></i>{html.escape(label)}</span>'
 
     message_items: list[str] = []
+    history_needed = sorted({
+        int(row["tg_id"] or 0) for row in recent_events
+        if int(row["tg_id"] or 0) > 0
+        and not normalize_username(row["username"], int(row["tg_id"] or 0))
+        and not normalize_username(row["event_username"], int(row["tg_id"] or 0))
+    })
+    recent_history: dict[int, str] = {}
+    if history_needed:
+        try:
+            recent_history = user_events.latest_valid_usernames(history_needed, db_path=config.DB_PATH)
+        except Exception as error:
+            LOGGER.warning("Не удалось восстановить ники последних сообщений на обзоре: %s", type(error).__name__)
     for row in recent_events:
+        event_tg_id = int(row["tg_id"] or 0)
+        current_handle = cabinet_service.public_username(
+            event_tg_id, row["username"], recent_history.get(event_tg_id), row["event_username"]
+        )
         name = _panel_user_label(
-            int(row["tg_id"] or 0), row.get("display_username") or row.get("username"),
-            row.get("display_name"), row.get("notes")
+            event_tg_id, current_handle, row["display_name"], row["notes"]
         )
         message_items.append(
             f'<a class="dash-message" href="/messages?tg_id={int(row["tg_id"])}">'
@@ -2855,11 +2951,10 @@ def users_page(
             if tg_id > 0
             else str(item.get("display_name") or item.get("username") or item.get("email") or "Без Telegram-привязки")
         )
-        base_button_label = "Открыть чат" if tg_id > 0 else "Открыть карточку"
-        button_label = base_button_label
-        message_button = (
-            f'<a class="button small secondary" href="/users/id/{tg_id}" '
-            f'data-chat-button data-base-label="{base_button_label}">{button_label}</a>'
+        user_actions_html = _user_actions_html(
+            tg_id,
+            bool(item.get("identity_conflict")),
+            bool(item.get("enable")),
         )
         registration_status = str(item.get("registration_status") or "active").lower()
         if registration_status in {"new", "awaiting_invite", "unregistered"}:
@@ -2919,7 +3014,7 @@ def users_page(
 <div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
 <div class="user-stat"><small>Лимит</small><b>{quota}</b><span>{"безлимит" if item["quota_remaining"] is None else "осталось"}</span></div>
-<div class="user-actions"><a class="button small secondary" href="/users/id/{tg_id}" data-chat-button data-base-label="{base_button_label}">{button_label}</a><details class="row-more"><summary aria-label="Дополнительные действия">•••</summary><div class="row-more-menu"><form class="inline" method="post" action="/users/{tg_id}/days"><input name="days" type="number" value="30" min="-3650" max="3650" step="1" aria-label="Изменение срока в днях" title="Изменить дни"><button class="small" title="Изменить дни">Срок</button></form><form method="post" action="/users/{tg_id}/toggle"><button class="small secondary">{"Блокировать" if item["enable"] else "Включить"}</button></form><form method="post" action="/users/{tg_id}/delete" onsubmit="return confirm('Удалить пользователя из базы и 3x-ui?')"><button class="small danger">Удалить</button></form></div></details></div>
+<div class="user-actions">{user_actions_html}</div>
 </article>'''
         )
     source_notice = ""

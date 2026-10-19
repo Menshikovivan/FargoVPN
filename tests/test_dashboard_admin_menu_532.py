@@ -22,9 +22,11 @@ def _dashboard_snapshot_helper(live_users, local_users):
     node = _function(ROOT / "app/webapp.py", "dashboard_users_snapshot")
     namespace = {
         "Any": object,
+        "time": SimpleNamespace(time=lambda: 1_800_000_000),
         "LOGGER": SimpleNamespace(exception=Mock()),
         "live_users": live_users,
         "_local_users": local_users,
+        "remaining_days": lambda expiry, now: max(0, (int(expiry or 0) - int(now)) // 86400000) if int(expiry or 0) > 0 else None,
         "cabinet_service": SimpleNamespace(
             public_username=lambda tg_id, *candidates: next(
                 (str(item).strip().lstrip("@") for item in candidates

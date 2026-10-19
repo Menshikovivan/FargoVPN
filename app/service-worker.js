@@ -43,26 +43,23 @@ self.addEventListener('push', event => {
       badge: `${BASE}static/icons/icon-192.png`,
       tag: String(data.tag || 'fargovpn').slice(0, 100),
       renotify: true,
-      data: { url: String(data.url || `${BASE}cabinet`) },
+      data: { source: 'fargovpn' },
     };
     await self.registration.showNotification(title, options);
   })());
 });
 
 self.addEventListener('notificationclick', event => {
+  // Never navigate to a URL received in push content. Push payloads can be
+  // supplied by remote infrastructure; opening a fixed same-origin panel path
+  // avoids redirect-style navigation and keeps this worker's trust boundary small.
   event.notification.close();
-  const raw = event.notification && event.notification.data && event.notification.data.url;
   event.waitUntil((async () => {
-    let targetUrl;
-    try { targetUrl = new URL(String(raw || `${BASE}cabinet`), self.location.origin); }
-    catch (_) { targetUrl = new URL(`${BASE}cabinet`, self.location.origin); }
-    if (targetUrl.origin !== self.location.origin || !targetUrl.pathname.startsWith(BASE)) {
-      targetUrl = new URL(`${BASE}cabinet`, self.location.origin);
-    }
-    const target = targetUrl.href;
+    const appPrefix = `${self.location.origin}${BASE}`;
+    const target = appPrefix;
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of clients) {
-      if ('focus' in client && new URL(client.url).pathname.startsWith(BASE)) {
+      if ('focus' in client && String(client.url || '').startsWith(appPrefix)) {
         try { await client.navigate(target); } catch (_) {}
         return client.focus();
       }

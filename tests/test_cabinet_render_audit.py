@@ -36,7 +36,7 @@ def cabinet_functions(sub_url='https://example.test/sub'):
     ns = dict(Any=object, Request=object, html=html, json=json,
         time=SimpleNamespace(time=lambda: 0),
         config=SimpleNamespace(SERVICE_NAME='Test', DB_PATH='unused', CABINET_PATH='/cabinet'),
-        update_manager=SimpleNamespace(current_version=lambda: '5.1.33'),
+        update_manager=SimpleNamespace(current_version=lambda: '5.1.35'),
         public_path=lambda path: '/private123' + path,
         _cabinet_bot_username=lambda: 'testbot',
         referral_codes=SimpleNamespace(ensure_referral_code=lambda *args: 'TEST'),
@@ -70,7 +70,7 @@ def test_cabinet_stylesheet_and_telegram_script_are_separate_elements():
     ns = cabinet_functions()
     markup = ns['_cabinet_markup']('tester', {'tg_id': 1}, 'https://example.test/sub')
     tags = Tags(markup).tags
-    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.33'}) in tags
+    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.35'}) in tags
     assert ('script', {'src': 'https://telegram.org/js/telegram-web-app.js'}) in tags
 
 
@@ -219,7 +219,7 @@ def test_connection_page_preserves_public_prefix(sub_url):
     ns = cabinet_functions(sub_url)
     response = ns['cabinet_connection_page'](object())
     tags = Tags(response.body).tags
-    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.33'}) in tags
+    assert ('link', {'rel': 'stylesheet', 'href': '/private123/static/panel.css?v=5.1.35'}) in tags
     anchors = [attrs['href'] for tag, attrs in tags if tag == 'a']
     assert '/private123/cabinet' in anchors
     assert '/cabinet' not in anchors

@@ -28,6 +28,7 @@ import psycopg
 import config
 from time_utils import from_timestamp as panel_from_timestamp
 import user_events
+from user_identity import build_unique_identity_index, match_local_identity, normalize_username
 
 logger = logging.getLogger(__name__)
 
@@ -1475,20 +1476,37 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
         rows = connection.execute(
             "SELECT tg_id,username,uuid,email,expiry_time,enable,last_reminder_days,notes FROM users"
         ).fetchall()
-        by_email = {str(row["email"] or "").strip().lower(): row for row in rows if row["email"]}
-        by_uuid = {str(row["uuid"] or "").strip().lower(): row for row in rows if row["uuid"]}
+        row_dicts = [dict(row) for row in rows]
+        by_email, ambiguous_emails = build_unique_identity_index(row_dicts, "email")
+        by_uuid, ambiguous_uuids = build_unique_identity_index(row_dicts, "uuid")
         matched_ids: set[int] = set()
+        protected_local_ids: set[int] = set()
 
         for item in clients:
             if not isinstance(item, dict) or not item.get("email"):
                 continue
             email = str(item["email"]).strip()
-            email_key = email.lower()
-            uuid_key = str(item.get("uuid") or "").strip().lower()
-            source_row = by_email.get(email_key) or (by_uuid.get(uuid_key) if uuid_key else None)
-            row = dict(source_row) if source_row else None
+            email_key = email.casefold()
+            uuid_key = str(item.get("uuid") or "").strip().casefold()
+            source_row, identity_conflict = match_local_identity(
+                email_key, uuid_key, by_email, by_uuid, ambiguous_emails, ambiguous_uuids
+            )
+            if identity_conflict:
+                # Keep every candidate intact and never let an ambiguous
+                # panel client overwrite a real Telegram account.
+                for candidate in row_dicts:
+                    candidate_email = str(candidate.get("email") or "").strip().casefold()
+                    candidate_uuid = str(candidate.get("uuid") or "").strip().casefold()
+                    if ((email_key and candidate_email == email_key) or
+                            (uuid_key and candidate_uuid == uuid_key)):
+                        protected_local_ids.add(int(candidate.get("tg_id") or 0))
+                logger.error(
+                    "Неоднозначная идентичность клиента 3x-ui; связь оставлена без изменения "
+                    "(email_present=%s uuid_present=%s)", bool(email_key), bool(uuid_key),
+                )
+            row = dict(source_row) if source_row and not identity_conflict else None
             panel_tg_id = _int(item.get("tg_id"))
-            inferred_tg_id = panel_tg_id if panel_tg_id > 0 else 0
+            inferred_tg_id = panel_tg_id if panel_tg_id > 0 and not identity_conflict else 0
 
             if row:
                 current_tg_id = int(row["tg_id"])
@@ -1499,15 +1517,37 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                     ).fetchone()
                     if existing:
                         existing_dict = dict(existing)
-                        if not existing_dict.get("username") and row.get("username"):
-                            connection.execute(
-                                "UPDATE users SET username=? WHERE tg_id=?",
-                                (row.get("username"), inferred_tg_id),
+                        # A placeholder may merge into a positive ID only if
+                        # the occupied row independently matches this client.
+                        occupied_email = str(existing_dict.get("email") or "").strip().casefold()
+                        occupied_uuid = str(existing_dict.get("uuid") or "").strip().casefold()
+                        identity_agrees = bool(
+                            (email_key and occupied_email == email_key) or
+                            (uuid_key and occupied_uuid == uuid_key)
+                        )
+                        conflicting_fields = bool(
+                            (occupied_email and email_key and occupied_email != email_key) or
+                            (occupied_uuid and uuid_key and occupied_uuid != uuid_key)
+                        )
+                        if identity_agrees and not conflicting_fields:
+                            if not existing_dict.get("username") and row.get("username"):
+                                connection.execute(
+                                    "UPDATE users SET username=? WHERE tg_id=?",
+                                    (row.get("username"), inferred_tg_id),
+                                )
+                                existing_dict["username"] = row.get("username")
+                            _rekey_related_rows(connection, current_tg_id, inferred_tg_id)
+                            connection.execute("DELETE FROM users WHERE tg_id=?", (current_tg_id,))
+                            row = existing_dict
+                            tg_id = inferred_tg_id
+                            changed += 1
+                        else:
+                            logger.error(
+                                "Запрошенное переназначение TG ID отклонено из-за конфликта identity "
+                                "(old_id=%s target_id=%s)", current_tg_id, inferred_tg_id,
                             )
-                            existing_dict["username"] = row.get("username")
-                        _rekey_related_rows(connection, current_tg_id, inferred_tg_id)
-                        connection.execute("DELETE FROM users WHERE tg_id=?", (current_tg_id,))
-                        row = existing_dict
+                            tg_id = current_tg_id
+                            protected_local_ids.add(current_tg_id)
                     else:
                         _rekey_related_rows(connection, current_tg_id, inferred_tg_id)
                         connection.execute(
@@ -1515,8 +1555,8 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                             (inferred_tg_id, current_tg_id),
                         )
                         row["tg_id"] = inferred_tg_id
-                    tg_id = inferred_tg_id
-                    changed += 1
+                        tg_id = inferred_tg_id
+                        changed += 1
                 else:
                     tg_id = current_tg_id
                     if panel_tg_id > 0 and current_tg_id > 0 and panel_tg_id != current_tg_id:
@@ -1526,6 +1566,27 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                         )
             else:
                 tg_id = inferred_tg_id or _stable_negative_id(email)
+                # A positive Telegram ID already owned by another local row is
+                # never sufficient evidence to overwrite that row.
+                if tg_id > 0:
+                    occupied = connection.execute(
+                        "SELECT tg_id,email,uuid FROM users WHERE tg_id=?", (tg_id,)
+                    ).fetchone()
+                    if occupied:
+                        occupied_dict = dict(occupied)
+                        email_matches = bool(email_key and str(occupied_dict.get("email") or "").strip().casefold() == email_key)
+                        uuid_matches = bool(uuid_key and str(occupied_dict.get("uuid") or "").strip().casefold() == uuid_key)
+                        if not (email_matches or uuid_matches):
+                            logger.error(
+                                "Клиент 3x-ui с занятым TG ID сохранён без привязки (tg_id=%s)", tg_id
+                            )
+                            protected_local_ids.add(tg_id)
+                            tg_id = _stable_negative_id(email)
+                        else:
+                            # It matches identity evidence despite an unmatched
+                            # local index; this can happen on legacy malformed keys.
+                            row = occupied_dict
+                            tg_id = int(occupied_dict["tg_id"])
 
             if tg_id in matched_ids:
                 logger.warning("Повторяющийся TG ID %s у клиента %s; запись оставлена без Telegram-привязки", tg_id, email)
@@ -1594,7 +1655,7 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                     ),
                 )
                 changed += 1
-            if panel_tg_id > 0 and (row is None or str(old.get("identity_source") or "") != "3x-ui"):
+            if panel_tg_id > 0 and tg_id == panel_tg_id and not identity_conflict and (row is None or str(old.get("identity_source") or "") != "3x-ui"):
                 connection.execute(
                     "UPDATE users SET identity_source='3x-ui',identity_updated_at=? WHERE tg_id=?",
                     (now_text, tg_id),
@@ -1605,7 +1666,7 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
         # rows that no longer exist in 3x-ui so reminders cannot target them.
         for source_row in rows:
             tg_id = int(source_row["tg_id"])
-            if source_row["email"] and tg_id not in matched_ids and _int(source_row["enable"], 1) != 0:
+            if source_row["email"] and tg_id not in matched_ids and tg_id not in protected_local_ids and _int(source_row["enable"], 1) != 0:
                 connection.execute(
                     "UPDATE users SET enable=0,last_sync_at=? WHERE tg_id=?",
                     (now_text, tg_id),

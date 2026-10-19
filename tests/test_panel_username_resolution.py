@@ -126,14 +126,17 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
         connection.row_factory = sqlite3.Row
         return connection
 
-    function = _function(ROOT / "app/user_events.py", "conversation_users_for_ids")
     namespace = {
         "Any": Any,
         "Iterable": Iterable,
         "Path": Path,
         "ensure_schema": lambda _db_path: None,
         "_connect": connect,
+        "normalize_username": normalize_username,
     }
+    helper = _function(ROOT / "app/user_events.py", "latest_valid_usernames")
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "latest_valid_usernames", "exec"), namespace)
+    function = _function(ROOT / "app/user_events.py", "conversation_users_for_ids")
     exec(
         compile(ast.Module(body=[function], type_ignores=[]), "conversation_users_for_ids", "exec"),
         namespace,
@@ -141,34 +144,27 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
 
     rows = namespace["conversation_users_for_ids"]([100, 200], db_path=db_path)
     by_id = {row["tg_id"]: row for row in rows}
-    assert by_id[100]["username"] == "id_100"
+    assert by_id[100]["username"] == "owner_nickname"
     assert by_id[100]["display_name"] == "Telegram Full Name"
     assert by_id[100]["notes"] == "Комментарий владельца"
-    assert by_id[200]["username"] == "200"
+    assert by_id[200]["username"] == ""
     assert by_id[200]["display_name"] == "Member Name"
 
     all_dialogs = _function(ROOT / "app/user_events.py", "conversation_users")
-    all_namespace = {
-        "Any": Any,
-        "Path": Path,
-        "ensure_schema": lambda _db_path: None,
-        "_connect": connect,
-    }
+    all_namespace = dict(namespace)
     exec(
         compile(ast.Module(body=[all_dialogs], type_ignores=[]), "conversation_users", "exec"),
         all_namespace,
     )
     initial_rows = all_namespace["conversation_users"](db_path=db_path)
     initial_by_id = {row["tg_id"]: row for row in initial_rows}
-    assert initial_by_id[100]["username"] == "id_100"
-    assert initial_by_id[200]["username"] == "200"
+    assert initial_by_id[100]["username"] == "owner_nickname"
+    assert initial_by_id[200]["username"] == ""
 
     events_namespace = {
-        "Any": Any,
-        "Path": Path,
-        "ensure_schema": lambda _db_path: None,
-        "_connect": connect,
+        **namespace,
         "_event_from_row": lambda row: dict(row),
+        "logger": SimpleNamespace(warning=lambda *a, **k: None),
         "_event_filters": lambda **kwargs: (
             " WHERE events.tg_id=?" if kwargs.get("tg_id") else " WHERE events.tg_id>0",
             [kwargs["tg_id"]] if kwargs.get("tg_id") else [],
@@ -180,7 +176,7 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
         events_namespace,
     )
     paged_events = events_namespace["all_events"](tg_id=100, db_path=db_path)
-    assert paged_events[0]["display_username"] == "id_100"
+    assert paged_events[0]["display_username"] == "owner_nickname"
     assert paged_events[0]["display_name"] == "Telegram Full Name"
 
     recent_events = _function(ROOT / "app/user_events.py", "recent_all_events")
@@ -190,6 +186,121 @@ def test_message_dialogs_resolve_real_username_and_use_name_when_unavailable(tmp
     )
     live_events = events_namespace["recent_all_events"](db_path=db_path)
     live_by_id = {event["id"]: event for event in live_events}
-    assert live_by_id[1]["display_username"] == "id_100"
-    assert live_by_id[3]["display_username"] == "200"
+    assert live_by_id[1]["display_username"] == "owner_nickname"
+    assert live_by_id[3]["display_username"] == ""
     assert live_by_id[3]["display_name"] == "Member Name"
+
+
+def test_local_identity_resolver_rejects_conflicting_email_and_uuid():
+    from user_identity import build_unique_identity_index, match_local_identity
+
+    rows = [
+        {"tg_id": 101, "email": "one@example.test", "uuid": "uuid-one"},
+        {"tg_id": 202, "email": "two@example.test", "uuid": "uuid-two"},
+    ]
+    by_email, dup_email = build_unique_identity_index(rows, "email")
+    by_uuid, dup_uuid = build_unique_identity_index(rows, "uuid")
+    matched, conflict = match_local_identity("one@example.test", "uuid-two", by_email, by_uuid, dup_email, dup_uuid)
+    assert matched is None and conflict is True
+    matched, conflict = match_local_identity("one@example.test", "uuid-one", by_email, by_uuid, dup_email, dup_uuid)
+    assert matched["tg_id"] == 101 and conflict is False
+
+
+def test_local_identity_index_marks_duplicate_identity_as_ambiguous():
+    from user_identity import build_unique_identity_index, match_local_identity
+
+    rows = [
+        {"tg_id": 101, "email": "shared@example.test", "uuid": "uuid-one"},
+        {"tg_id": 202, "email": "SHARED@example.test", "uuid": "uuid-two"},
+    ]
+    by_email, dup_email = build_unique_identity_index(rows, "email")
+    by_uuid, dup_uuid = build_unique_identity_index(rows, "uuid")
+    assert "shared@example.test" in dup_email
+    matched, conflict = match_local_identity("shared@example.test", "uuid-one", by_email, by_uuid, dup_email, dup_uuid)
+    assert matched is None and conflict is True
+
+
+def test_3xui_sync_never_overwrites_users_on_conflicting_email_uuid(tmp_path, monkeypatch):
+    """A conflicting live client must be detached, not saved over either owner."""
+    import importlib
+    import sys
+    import types
+
+    psycopg_stub = types.ModuleType("psycopg")
+    monkeypatch.setitem(sys.modules, "psycopg", psycopg_stub)
+    config_spec = importlib.util.spec_from_file_location("config", ROOT / "app" / "config.example.py")
+    config_module = importlib.util.module_from_spec(config_spec)
+    assert config_spec.loader is not None
+    config_spec.loader.exec_module(config_module)
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    xui_api = importlib.import_module("services.xui_api")
+    db_path = tmp_path / "xui-sync.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript("""
+            CREATE TABLE users(
+                tg_id INTEGER PRIMARY KEY, username TEXT, uuid TEXT, email TEXT,
+                expiry_time INTEGER DEFAULT 0, enable INTEGER DEFAULT 1,
+                up INTEGER DEFAULT 0, down INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
+                sub_id TEXT, last_reminder_days INTEGER DEFAULT -1, notes TEXT,
+                last_online TEXT, last_online_ts INTEGER DEFAULT 0, last_sync_at TEXT,
+                identity_source TEXT, identity_updated_at TEXT, display_name TEXT,
+                registered_at TEXT, registration_status TEXT
+            );
+            INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,last_reminder_days,notes)
+            VALUES(101,'alice','uuid-a','alice@example.test',1000,1,10,20,100,'sub-a',-1,'Alice comment');
+            INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,last_reminder_days,notes)
+            VALUES(202,'bob','uuid-b','bob@example.test',2000,1,30,40,200,'sub-b',-1,'Bob comment');
+        """)
+
+    def connect(path, timeout=20):
+        con = sqlite3.connect(path, timeout=timeout)
+        con.create_function("GREATEST", -1, lambda *values: max(v for v in values if v is not None))
+        return con
+
+    monkeypatch.setattr(xui_api.database_adapter, "connect", connect)
+    changed = xui_api.sync_snapshot_to_db({"clients": [{
+        "tg_id": 202, "email": "alice@example.test", "uuid": "uuid-b",
+        "expiry_time": 9999999999999, "enable": True, "up": 999,
+        "down": 888, "total": 100000, "sub_id": "incoming-sub", "last_online_ts": 0,
+    }]}, db_path=str(db_path))
+    assert changed > 0
+    with sqlite3.connect(db_path) as connection:
+        accounts = {row[0]: row[1:] for row in connection.execute(
+            "SELECT tg_id,username,uuid,email,expiry_time,enable,up,down,sub_id FROM users"
+        )}
+    assert accounts[101][0:3] == ("alice", "uuid-a", "alice@example.test")
+    assert accounts[202][0:3] == ("bob", "uuid-b", "bob@example.test")
+    assert accounts[101][4] == 1 and accounts[202][4] == 1
+    # The ambiguous panel client stays in a detached negative-ID record.
+    detached = [values for tg_id, values in accounts.items() if tg_id < 0]
+    assert len(detached) == 1
+    assert detached[0][2] == "alice@example.test"
+    package = sys.modules.get("services")
+    sys.modules.pop("services.xui_api", None)
+    if package is not None and getattr(package, "xui_api", None) is xui_api:
+        delattr(package, "xui_api")
+
+
+def test_unlinked_3xui_rows_never_render_user_zero_or_destructive_actions():
+    actions = _function(ROOT / "app/webapp.py", "_user_actions_html")
+    namespace = {}
+    exec(compile(ast.Module(body=[actions], type_ignores=[]), "_user_actions_html", "exec"), namespace)
+    render = namespace["_user_actions_html"]
+
+    unlinked = render(0, False, True)
+    assert "/users/import-identities" in unlinked
+    assert "/users/id/0" not in unlinked
+    assert "/users/0/days" not in unlinked
+    assert "/users/0/toggle" not in unlinked
+    assert "/users/0/delete" not in unlinked
+
+    conflicted = render(123, True, True)
+    assert "/users/import-identities" in conflicted
+    assert "/users/id/123" not in conflicted
+    assert "/users/123/delete" not in conflicted
+
+    linked = render(456, False, True)
+    assert "/users/id/456" in linked
+    assert "/users/456/days" in linked
+    assert "/users/456/toggle" in linked
+    assert "/users/456/delete" in linked

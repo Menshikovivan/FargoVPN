@@ -129,6 +129,9 @@ with sqlite3.connect(dashboard_db) as setup_db:
     setup_db.executescript("""
         CREATE TABLE payments (id INTEGER PRIMARY KEY, status TEXT, amount INTEGER, receipt_amount REAL, created_at TEXT);
         CREATE TABLE user_events (id INTEGER PRIMARY KEY, tg_id INTEGER, username TEXT, direction TEXT, text TEXT, created_at TEXT);
+        CREATE TABLE users (tg_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, notes TEXT);
+        INSERT INTO users (tg_id,username,display_name,notes) VALUES (123,'tester','Tester Profile','Canonical Tester');
+        INSERT INTO user_events (id,tg_id,username,direction,text,created_at) VALUES (1,123,'id_123','in','overview smoke message','2026-10-20 00:00:00');
         CREATE TABLE audit_log (id INTEGER PRIMARY KEY, actor TEXT, action TEXT, details TEXT, created_at TEXT);
     """)
 @contextlib.contextmanager

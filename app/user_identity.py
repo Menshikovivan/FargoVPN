@@ -33,7 +33,11 @@ def normalize_username(value: Any, tg_id: Any = 0) -> str:
         user_id = int(tg_id or 0)
     except (TypeError, ValueError, OverflowError):
         user_id = 0
-    if username.isdecimal() or (user_id > 0 and username.casefold() == f"id_{user_id}".casefold()):
+    synthetic_id = bool(
+        user_id > 0
+        and re.fullmatch(rf"id_?{re.escape(str(user_id))}", username, flags=re.IGNORECASE)
+    )
+    if username.isdecimal() or synthetic_id:
         return ""
     return username
 
@@ -42,6 +46,53 @@ def normalize_comment(value: Any) -> str:
     """Normalize an operator-supplied comment used as the display fallback."""
     return _clean(value, 255)
 
+
+
+def build_unique_identity_index(rows: list[dict[str, Any]], field: str) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Build a case-insensitive identity index without silently overwriting duplicates."""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _clean(row.get(field), 512).casefold()
+        if key:
+            buckets.setdefault(key, []).append(row)
+    index = {key: values[0] for key, values in buckets.items() if len(values) == 1}
+    ambiguous = {key for key, values in buckets.items() if len(values) > 1}
+    return index, ambiguous
+
+
+def match_local_identity(
+    email: Any,
+    uuid: Any,
+    by_email: Mapping[str, dict[str, Any]],
+    by_uuid: Mapping[str, dict[str, Any]],
+    ambiguous_emails: set[str] | None = None,
+    ambiguous_uuids: set[str] | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Match a 3x-ui client only when its local email/UUID evidence agrees.
+
+    Return ``(None, True)`` when an identity key is duplicated or email and UUID
+    point to different Telegram records. Callers must not manufacture a clickable
+    Telegram ID for that ambiguous client.
+    """
+    email_key = _clean(email, 512).casefold()
+    uuid_key = _clean(uuid, 256).casefold()
+    if (email_key and email_key in (ambiguous_emails or set())) or (
+        uuid_key and uuid_key in (ambiguous_uuids or set())
+    ):
+        return None, True
+    email_row = by_email.get(email_key) if email_key else None
+    uuid_row = by_uuid.get(uuid_key) if uuid_key else None
+    if email_row is not None and uuid_row is not None:
+        try:
+            email_id = int(email_row.get("tg_id") or 0)
+            uuid_id = int(uuid_row.get("tg_id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None, True
+        if email_id != uuid_id:
+            return None, True
+        return email_row, False
+    row = uuid_row or email_row
+    return row, False
 
 def get_display_name(user: Any, tg_id: Any = None) -> str:
     """Return the one canonical display label for a user-like mapping/object."""

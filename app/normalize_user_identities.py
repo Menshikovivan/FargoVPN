@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backup-first, idempotent normalization for the 5.1.33 identity policy."""
+"""Backup-first, idempotent normalization for the 5.1.35 identity policy."""
 from __future__ import annotations
 
 import argparse
@@ -35,7 +35,7 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
         or getattr(config, "BACKUP_DIR", "/var/lib/vpn-service/backups")
     ).expanduser()
     root.mkdir(parents=True, exist_ok=True)
-    backup_path = root / f"fargovpn-identity-pre-5.1.33-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.sql"
+    backup_path = root / f"fargovpn-identity-pre-5.1.35-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.sql"
     if not dry_run:
         dsn = database_adapter.database_url()
         previous_umask = os.umask(0o077)
@@ -89,6 +89,37 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
         select_sql = "SELECT " + ",".join(selected_columns) + " FROM users ORDER BY tg_id"
         rows = connection.execute(select_sql).fetchall()
         counts["users_checked"] = len(rows)
+        # Read valid historical handles before mutating either table. A previous
+        # release sometimes saved placeholders like id_123 as usernames; events
+        # for the same Telegram ID can preserve the genuine handle.
+        event_table_exists = bool(connection.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema=current_schema() AND table_name='user_events' LIMIT 1"
+        ).fetchone())
+        event_columns: set[str] = set()
+        events = []
+        historical_by_tg_id: dict[int, str] = {}
+        if event_table_exists:
+            event_columns = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name='user_events'"
+                ).fetchall()
+            }
+            if {"id", "tg_id", "username"}.issubset(event_columns):
+                events = connection.execute(
+                    "SELECT id,tg_id,username FROM user_events WHERE username IS NOT NULL ORDER BY id DESC"
+                ).fetchall()
+                counts["events_checked"] = len(events)
+                for event in events:
+                    event_id, event_tg_id, old_event_username = tuple(event)
+                    event_tg_id = int(event_tg_id or 0)
+                    if event_tg_id <= 0 or event_tg_id in historical_by_tg_id:
+                        continue
+                    valid_historical = normalize_username(old_event_username, event_tg_id)
+                    if valid_historical:
+                        historical_by_tg_id[event_tg_id] = valid_historical
+        counts["historical_usernames_recovered"] = 0
         user_updates: list[tuple[dict[str, Any], int]] = []
         for row in rows:
             values = dict(zip(selected_columns, tuple(row)))
@@ -96,7 +127,9 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
             changes: dict[str, Any] = {}
             if "username" in user_columns:
                 old_username = values.get("username")
-                username = normalize_username(old_username, tg_id) or None
+                username = normalize_username(old_username, tg_id) or historical_by_tg_id.get(tg_id) or None
+                if not normalize_username(old_username, tg_id) and username and username == historical_by_tg_id.get(tg_id):
+                    counts["historical_usernames_recovered"] += 1
                 if (old_username or None) != username:
                     changes["username"] = username
                     counts["usernames_normalized"] += 1
@@ -123,37 +156,23 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
                     (*changes.values(), tg_id),
                 )
 
-        # Avoid attempting an absent table: on PostgreSQL a failed statement
-        # would poison the transaction even if its exception were caught.
-        event_table_exists = bool(connection.execute(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema=current_schema() AND table_name='user_events' LIMIT 1"
-        ).fetchone())
-        if event_table_exists:
-            event_columns = {
-                str(row[0]) for row in connection.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema=current_schema() AND table_name='user_events'"
-                ).fetchall()
-            }
-            if {"id", "tg_id", "username"}.issubset(event_columns):
-                events = connection.execute(
-                    "SELECT id,tg_id,username FROM user_events WHERE username IS NOT NULL"
-                ).fetchall()
-                counts["events_checked"] = len(events)
-                event_updates: list[tuple[Any, int]] = []
-                for event in events:
-                    event_id, tg_id, old_username = tuple(event)
-                    normalized = normalize_username(old_username, tg_id) or None
-                    if (old_username or None) != normalized:
-                        counts["event_usernames_normalized"] += 1
-                        event_updates.append((normalized, int(event_id)))
-                if not dry_run:
-                    for normalized, event_id in event_updates:
-                        connection.execute(
-                            "UPDATE user_events SET username=? WHERE id=?",
-                            (normalized, event_id),
-                        )
+        # Normalize events only after they have served as recovery evidence.
+        # Avoid querying a missing table on PostgreSQL, where a failed query
+        # would poison the current transaction.
+        if event_table_exists and {"id", "tg_id", "username"}.issubset(event_columns):
+            event_updates: list[tuple[Any, int]] = []
+            for event in events:
+                event_id, event_tg_id, old_username = tuple(event)
+                normalized = normalize_username(old_username, event_tg_id) or None
+                if (old_username or None) != normalized:
+                    counts["event_usernames_normalized"] += 1
+                    event_updates.append((normalized, int(event_id)))
+            if not dry_run:
+                for normalized, event_id in event_updates:
+                    connection.execute(
+                        "UPDATE user_events SET username=? WHERE id=?",
+                        (normalized, event_id),
+                    )
 
     counts["backup"] = str(backup_path) if not dry_run else "not-created (dry-run)"
     counts["dry_run"] = bool(dry_run)
