@@ -90,17 +90,62 @@
     const data = new FormData(form);
     if (submitter && submitter.name) data.append(submitter.name, submitter.value || '');
     const target = submitter && submitter.getAttribute('formaction') ? new URL(submitter.getAttribute('formaction'), document.baseURI).href : (form.action || location.href);
+    const isMessagesForm = form.id === 'messages-compose-form';
+    const messageStatus = isMessagesForm ? form.querySelector('#messages-compose-status') : null;
+    const showMessageStatus = (message, ok = false) => {
+      if (!messageStatus) return;
+      messageStatus.hidden = !message;
+      messageStatus.textContent = String(message || '');
+      messageStatus.className = 'notice ' + (ok ? 'good' : 'bad');
+    };
     try {
+      const headers = noNavigation ? {'Accept':'application/json', 'X-Requested-With':'XMLHttpRequest'} : undefined;
       const response = await window.fetch(target, {
-        method: 'POST', body: data, credentials: 'same-origin', redirect: noNavigation ? 'manual' : 'follow', signal: AbortSignal.timeout(30000)
+        method: 'POST', body: data, credentials: 'same-origin', headers,
+        redirect: noNavigation ? 'manual' : 'follow', signal: AbortSignal.timeout(30000)
       });
       if (noNavigation) {
         if (response.type === 'opaqueredirect' || [301,302,303,307,308].includes(response.status)) {
-          throw new Error('Сервер вернул redirect вместо AJAX-ответа; проверьте обработчик страницы');
+          throw new Error('Сервер перенаправил AJAX-запрос. Возможно, сессия истекла: обновите страницу и войдите снова. Отправка не подтверждена.');
         }
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({}));
-          throw new Error(error.detail || ('HTTP ' + response.status));
+        const contentType = String(response.headers && response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('application/json')) {
+          let bodyText = '';
+          try { bodyText = await response.text(); } catch (_) {}
+          throw new Error('Сервер вернул не JSON-ответ; отправка не подтверждена. ' + String(bodyText || '').replace(/\s+/g, ' ').trim().slice(0, 160));
+        }
+        const payload = await response.json().catch(() => null);
+        if (!payload) throw new Error('Сервер вернул пустой или повреждённый JSON-ответ; отправка не подтверждена.');
+        if (!response.ok || payload.ok === false) {
+          const detail = payload && (payload.detail || payload.error || payload.message);
+          const error = detail && typeof detail === 'object' ? (detail.message || detail.detail || JSON.stringify(detail)) : detail;
+          throw new Error(error || ('HTTP ' + response.status));
+        }
+        if (isMessagesForm) {
+          showMessageStatus('Сообщение отправлено', true);
+          const textField = form.querySelector('[name="message"]');
+          const mediaField = form.querySelector('[name="media"]');
+          if (textField) textField.value = '';
+          if (mediaField) mediaField.value = '';
+          if (submitter) submitter.disabled = false;
+          if (payload && payload.event) {
+            const chat = document.querySelector('[data-message-chat]');
+            if (chat && payload.event.id && !chat.querySelector('[data-event-id="' + Number(payload.event.id) + '"]')) {
+              const box = document.createElement('div');
+              box.className = 'chat-message out message';
+              box.dataset.eventId = String(Number(payload.event.id));
+              const meta = document.createElement('div');
+              meta.className = 'muted';
+              meta.textContent = '→ Исходящее · сообщение · ' + String(payload.event.created_at || '') + ' · #' + String(payload.event.id);
+              const text = document.createElement('div');
+              text.className = 'chat-message-text';
+              text.textContent = String(payload.event.text || 'Сообщение отправлено');
+              box.append(meta, text);
+              chat.appendChild(box);
+              chat.scrollTop = chat.scrollHeight;
+            }
+          }
+          if (textField) textField.focus();
         }
         return;
       }
@@ -111,9 +156,14 @@
       }
     } catch (error) {
       if (submitter) submitter.disabled = false;
-      const status = document.getElementById('settings-save-status');
-      if (status) { status.hidden = false; status.textContent = 'Не удалось сохранить: ' + error.message; }
-      else window.panelToast('Запрос не выполнен: ' + error.message, 'bad');
+      if (isMessagesForm) {
+        showMessageStatus(error && error.message ? error.message : 'Не удалось отправить сообщение', false);
+        form.querySelector('[name="message"]')?.focus();
+      } else {
+        const status = document.getElementById('settings-save-status');
+        if (status) { status.hidden = false; status.textContent = 'Не удалось сохранить: ' + error.message; }
+        else window.panelToast('Запрос не выполнен: ' + error.message, 'bad');
+      }
     } finally { delete form.dataset.submitting; if (submitter) { submitter.disabled = false; submitter.removeAttribute('aria-busy'); } }
   });
 
@@ -472,7 +522,7 @@
     window.addEventListener('pagehide', () => clearTimeout(timer), {once:true});
   }
 
-  const PANEL_BUILD_VERSION = '5.1.37';
+  const PANEL_BUILD_VERSION = '5.1.38';
 
   function enforceClientVersion() {
     const meta = document.querySelector('meta[name="fargovpn-app-version"]');

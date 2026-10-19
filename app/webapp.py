@@ -1770,10 +1770,17 @@ def page(request: Request, title: str, body: str, active: str = "", scripts: str
 <script src="{html.escape(public_path('/static/panel.js'), quote=True)}?v={asset_version}" defer></script>{scripts}</body></html>'''
 
 
+def _request_wants_json_response(request: Request) -> bool:
+    """Recognize JSON/fetch clients even on HTML-oriented routes like message_user."""
+    accept = str(request.headers.get("accept") or "").casefold()
+    requested_with = str(request.headers.get("x-requested-with") or "").strip().casefold()
+    return "application/json" in accept or requested_with == "xmlhttprequest"
+
+
 @app.exception_handler(401)
 async def unauthorized(request: Request, error: Exception):
-    if request.url.path.startswith(("/api/", "/panel/api/")):
-        detail = str(getattr(error, "detail", "Требуется авторизация"))
+    detail = str(getattr(error, "detail", "Требуется авторизация"))
+    if request.url.path.startswith(("/api/", "/panel/api/")) or _request_wants_json_response(request):
         return JSONResponse({"ok": False, "data": None, "error": {"code": "unauthorized", "message": detail}, "detail": detail}, status_code=401)
     return RedirectResponse(public_path("/login"), 303)
 
@@ -4072,6 +4079,11 @@ def messages_page(
     per_page = max(10, min(int(per_page or 50), 100))
     q = str(q or "").strip()[:160]
     participants = user_events.conversation_users(db_path=config.DB_PATH)
+    # The plain /messages entry point should open a usable composer rather than
+    # hiding it until the administrator clicks a dialog. conversation_users is
+    # already ordered by newest journal event, so the first row is the latest chat.
+    if selected <= 0 and participants:
+        selected = int(participants[0].get("tg_id") or 0)
     total_events = user_events.count_events(
         tg_id=selected if selected > 0 else None,
         direction=direction,
@@ -4558,7 +4570,7 @@ def message_user(
     except Exception:
         pass
     background_tasks.add_task(audit, actor, "message_user", f"{tg_id}: {detail}")
-    wants_json = "application/json" in request.headers.get("accept", "")
+    wants_json = _request_wants_json_response(request)
     if not ok:
         friendly = friendly_telegram_error(detail)
         if wants_json:

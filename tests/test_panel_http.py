@@ -165,7 +165,31 @@ overview = client.get("/")
 assert overview.status_code == 200, (overview.status_code, overview.text[:1000])
 assert "Обзор" in overview.text and "Всего пользователей" in overview.text
 assert "Истёка" not in overview.text
+# Opening /messages without a query string must choose the newest dialog and
+# render the composer instead of leaving the operator with an empty send area.
+web.user_events.conversation_users = lambda **kw: [{
+    "tg_id": 123, "username": "tester", "display_name": "Tester", "notes": "",
+    "total_events": 1, "incoming_events": 1, "outgoing_events": 0,
+    "last_event_id": 1, "last_event_at": "2026-10-20 00:00:00",
+}]
+web.user_events.count_events = lambda **kw: 0
+web.user_events.all_events = lambda **kw: []
+web.user_events.mark_messages_read = lambda *a, **kw: {"ok": True}
+web.user_events.unread_messages_summary = lambda **kw: {"total": 0, "users": 0, "items": [], "last_event_id": 0}
+web._panel_user_label = lambda *a, **kw: "@tester"
+messages = client.get("/messages")
+assert messages.status_code == 200, (messages.status_code, messages.text[:1000])
+assert 'id="messages-compose-form"' in messages.text
+assert 'action="/users/123/message"' in messages.text
 client.cookies.clear()
+# JSON/fetch requests to the HTML-oriented send endpoint should receive a JSON
+# 401 instead of an opaque redirect when the session has expired.
+unauthorized_json = client.post("/users/123/message", headers={"Accept": "application/json"}, follow_redirects=False)
+assert unauthorized_json.status_code == 401, (unauthorized_json.status_code, unauthorized_json.text[:300])
+assert unauthorized_json.headers.get("content-type", "").startswith("application/json")
+assert unauthorized_json.json().get("detail")
+unauthorized_html = client.post("/users/123/message", follow_redirects=False)
+assert unauthorized_html.status_code == 303, (unauthorized_html.status_code, unauthorized_html.text[:300])
 for route in ("/settings", "/updates", "/diagnostics", "/api/diagnostics"):
     assert client.get(route, follow_redirects=False).status_code in (401, 303)
 print("HTTP routes, dashboard with a live user, diagnostics and publisher boundary passed")
