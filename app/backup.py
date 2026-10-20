@@ -861,7 +861,7 @@ def create_backup() -> Path:
             "inventory": inventory,
             "telegram_delivery": {"part_mb": min(49, max(5, int(getattr(config, "BACKUP_TELEGRAM_PART_MB", 45))))},
             "restore_notes": [
-                "users-only восстанавливает users/payments/referral_rewards и не заменяет security/audit/push/worker состояние.",
+                "users-only восстанавливает users/payments/referral_rewards/telegram_profile_links. Архивные сессии, passkeys и приглашения не импортируются; действующие ссылки кабинета и приглашения отзываются. Audit/push/worker состояние не импортируется.",
                 "full переносит данные FargoVPN и 3x-ui в установленную схему и только разрешенные бизнес-настройки; архивные исходники, .env, конфигурации сервисов, systemd units и VAPID key не применяются.",
                 "Существующие конфигурации и ключи целевого сервера остаются действующими; архивные копии этих файлов являются справочными данными.",
                 "Внешний Nginx/L4 reverse-proxy намеренно не входит в backup/restore.",

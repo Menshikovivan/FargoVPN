@@ -71,7 +71,11 @@ def _telegram_call(
                 except (TypeError, ValueError):
                     retry_after = 0
             if response.status_code == 429 and attempt < 3:
-                time.sleep(min(30, max(1, retry_after)))
+                # Never retry before Telegram's requested cooldown. Refuse an
+                # excessive wait rather than silently shortening it.
+                if retry_after > 3600:
+                    return False, payload, description + " (retry_after превышает час; повтор отложен)"
+                time.sleep(max(1, retry_after))
                 continue
             return False, payload, description
         except httpx.RequestError as error:
@@ -209,7 +213,7 @@ def run(job_id: str, startup_delay: float = 0.0) -> int:
                     failures.append(f"Некорректный TG ID: {item}")
                     continue
                 if kind == "text":
-                    ok, _payload, detail = _telegram_call(
+                    ok, response_payload, detail = _telegram_call(
                         client,
                         "sendMessage",
                         data={"chat_id": tg_id, "text": message},

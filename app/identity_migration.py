@@ -487,7 +487,12 @@ def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> b
 
 def _rekey_referral_rows(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
     """Keep referral history attached when a Telegram identity changes."""
-    if not _table_exists(connection, "referral_rewards") or old_tg_id == new_tg_id:
+    if old_tg_id == new_tg_id:
+        return
+    _rekey_family_metadata(connection, old_tg_id, new_tg_id)
+    if _column_exists(connection, "users", "referred_by_tg_id"):
+        connection.execute("UPDATE users SET referred_by_tg_id=? WHERE referred_by_tg_id=?", (new_tg_id, old_tg_id))
+    if not _table_exists(connection, "referral_rewards"):
         return
     connection.execute(
         "UPDATE referral_rewards SET referrer_tg_id=? WHERE referrer_tg_id=?",
@@ -499,12 +504,66 @@ def _rekey_referral_rows(connection: sqlite3.Connection, old_tg_id: int, new_tg_
     )
 
 
+def _rekey_family_metadata(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
+    # Owner/member keys cascade with users.tg_id; these attribution fields are
+    # deliberately not FKs and must follow a confirmed identity rekey too.
+    for table, column in (("telegram_profile_links", "linked_by"),
+                          ("telegram_profile_link_requests", "created_by")):
+        if _column_exists(connection, table, column):
+            connection.execute(f'UPDATE "{table}" SET "{column}"=? WHERE "{column}"=?', (new_tg_id, old_tg_id))
+
+
+def _merge_family_rows(connection: sqlite3.Connection, old_tg_id: int, new_tg_id: int) -> None:
+    if not _table_exists(connection, "telegram_profile_links"):
+        return
+    rows = connection.execute("SELECT telegram_id,profile_tg_id FROM telegram_profile_links WHERE telegram_id IN (?,?) OR profile_tg_id IN (?,?) FOR UPDATE",
+                              (old_tg_id, new_tg_id, old_tg_id, new_tg_id)).fetchall()
+    links = {int(row[0]): int(row[1]) for row in rows}
+    old_children = {member for member, owner in links.items() if owner == old_tg_id and member != old_tg_id}
+    new_children = {member for member, owner in links.items() if owner == new_tg_id and member != new_tg_id}
+    if old_children and new_children:
+        raise IdentityImportError("Конфликт семей: автоматическое объединение запрещено")
+    old_owner, new_owner = links.get(old_tg_id, old_tg_id), links.get(new_tg_id, new_tg_id)
+    if (old_owner not in {old_tg_id, new_tg_id} or new_owner not in {old_tg_id, new_tg_id}) and old_owner != new_owner:
+        raise IdentityImportError("Конфликт семейной принадлежности: требуется ручная сверка")
+    if len((old_children | new_children) - {old_tg_id, new_tg_id}) > 3:
+        raise IdentityImportError("Объединение превысит лимит семьи")
+    # The surviving user already exists. Move ownership before deleting the
+    # duplicate, otherwise ON DELETE CASCADE would silently erase its family.
+    connection.execute("UPDATE telegram_profile_links SET profile_tg_id=? WHERE profile_tg_id=?", (new_tg_id, old_tg_id))
+    if old_tg_id in links:
+        if new_tg_id in links:
+            connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=?", (old_tg_id,))
+        else:
+            connection.execute("UPDATE telegram_profile_links SET telegram_id=? WHERE telegram_id=?", (new_tg_id, old_tg_id))
+    if _table_exists(connection, "telegram_profile_link_requests"):
+        connection.execute("UPDATE telegram_profile_link_requests SET profile_tg_id=? WHERE profile_tg_id=?", (new_tg_id, old_tg_id))
+    _rekey_family_metadata(connection, old_tg_id, new_tg_id)
+
+
 def _merge_duplicate_user(
     connection: sqlite3.Connection,
     source_tg_id: int,
     target_tg_id: int,
     username: str,
 ) -> None:
+    survivor = dict(connection.execute("SELECT * FROM users WHERE tg_id=?", (source_tg_id,)).fetchone())
+    duplicate = dict(connection.execute("SELECT * FROM users WHERE tg_id=?", (target_tg_id,)).fetchone())
+    updates = []
+    for field in ("notes", "custom_payment_price", "uuid", "email", "sub_id", "expiry_time", "enable", "referred_by_tg_id", "referred_by_code"):
+        left, right = survivor.get(field), duplicate.get(field)
+        left_set, right_set = left is not None and str(left) != "", right is not None and str(right) != ""
+        # Subscription state matters only for actual VPN identities, not shell defaults.
+        if field in {"expiry_time", "enable"}:
+            left_set = left_set and any(survivor.get(key) for key in ("uuid", "email", "sub_id"))
+            right_set = right_set and any(duplicate.get(key) for key in ("uuid", "email", "sub_id"))
+        if left_set and right_set and str(left).casefold() != str(right).casefold():
+            raise IdentityImportError(f"Конфликт данных профилей ({field}); автоматическое объединение запрещено")
+        if not left_set and right_set:
+            updates.append((field, right))
+    _merge_family_rows(connection, int(target_tg_id), int(source_tg_id))
+    for field, value in updates:
+        connection.execute(f'UPDATE users SET "{field}"=? WHERE tg_id=?', (value, source_tg_id))
     # Move dependent history before deleting the placeholder row.  Payments and
     # events are safe to merge because both rows represent the same UUID/email.
     for table in ("payments", "message_log", "user_events"):

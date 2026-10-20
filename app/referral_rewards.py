@@ -28,6 +28,7 @@ PENDING = "pending"
 GRANTED = "granted"
 SKIPPED_UNLIMITED = "skipped_unlimited"
 LEGACY_IGNORED = "legacy_ignored"
+RECONCILE = "reconcile"
 
 
 def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -61,7 +62,7 @@ def _set_reward_status(
         """
         UPDATE referral_rewards
            SET status=?,
-               granted_at=CASE WHEN ? IN ('granted','skipped_unlimited','legacy_ignored') THEN CURRENT_TIMESTAMP ELSE granted_at END,
+               granted_at=CASE WHEN ? IN ('granted','skipped_unlimited','legacy_ignored') THEN CAST(CURRENT_TIMESTAMP AS TEXT) ELSE granted_at END,
                target_expiry_ms=COALESCE(?,target_expiry_ms),
                observed_expiry_before_ms=COALESCE(?,observed_expiry_before_ms),
                details=CASE WHEN ?<>'' THEN ? ELSE details END
@@ -242,6 +243,23 @@ def _reserve_target(
 
 
 def apply_referral_reward(
+    referred_tg_id: int, *, payment_id: int | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    # Use exactly the same cross-process lock as paid renewals, not a separate
+    # referral lock: both operations modify one remote expiry timestamp.
+    from services.subscriptions import _subscription_identity_lock_sync
+    with _connect(db_path) as connection:
+        ensure_schema(connection)
+        invited = _user_row(connection, int(referred_tg_id))
+        owner = int(invited["referred_by_tg_id"] or 0) if invited else 0
+    if owner <= 0:
+        return {"status": "not_eligible", "message": "Реферальная связь отсутствует"}
+    with _subscription_identity_lock_sync(owner, db_path):
+        return _apply_referral_reward_unlocked(referred_tg_id, payment_id=payment_id, db_path=db_path)
+
+
+def _apply_referral_reward_unlocked(
     referred_tg_id: int,
     *,
     payment_id: int | None = None,
@@ -258,7 +276,6 @@ def apply_referral_reward(
         return {"status": "not_eligible", "message": "Некорректный Telegram ID приглашённого"}
 
     with _connect(db_path) as connection:
-        ensure_schema(connection)
         invited = _user_row(connection, referred_tg_id)
         if not invited:
             return {"status": "not_eligible", "message": "Приглашённый пользователь не найден"}
@@ -278,6 +295,12 @@ def apply_referral_reward(
         if reward["status"] in {GRANTED, SKIPPED_UNLIMITED, LEGACY_IGNORED}:
             return {"status": str(reward["status"]), "already_processed": True, **reward}
         existing_target = int(reward.get("target_expiry_ms") or 0)
+        if reward["status"] == RECONCILE or existing_target > 0:
+            _set_reward_status(connection, referred_tg_id, RECONCILE,
+                               details="Неоднозначный результат предыдущей выдачи; требуется ручная сверка, повторное начисление запрещено")
+            connection.commit()
+            return {"status": RECONCILE, "message": "Требуется ручная сверка реферального бонуса",
+                    "referrer_tg_id": referrer_tg_id, "referred_tg_id": referred_tg_id}
 
     with _connect(db_path) as connection:
         referrer = _user_row(connection, referrer_tg_id)
@@ -412,6 +435,8 @@ def apply_referral_reward(
     except Exception as error:
         logger.exception("Не удалось начислить реферальный бонус за %s", referred_tg_id)
         with _connect(db_path) as connection:
-            _set_reward_status(connection, referred_tg_id, PENDING, details=f"Последняя ошибка: {str(error)[:700]}")
+            reserved = connection.execute("SELECT target_expiry_ms FROM referral_rewards WHERE referred_tg_id=?", (referred_tg_id,)).fetchone()
+            status = RECONCILE if reserved and int(reserved[0] or 0) > 0 else PENDING
+            _set_reward_status(connection, referred_tg_id, status, details=f"Требуется сверка: {str(error)[:700]}" if status == RECONCILE else f"Последняя ошибка: {str(error)[:700]}")
             connection.commit()
-        return {"status": "failed", "message": str(error), "referrer_tg_id": referrer_tg_id, "referred_tg_id": referred_tg_id}
+        return {"status": RECONCILE if status == RECONCILE else "failed", "message": str(error), "referrer_tg_id": referrer_tg_id, "referred_tg_id": referred_tg_id}

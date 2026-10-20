@@ -41,7 +41,12 @@ SAFE_PART_RE = re.compile(r"^(?P<base>.+\.tar\.gz)\.part(?P<index>\d{1,4})$")
 # These tables are the user/subscription state. Other PostgreSQL tables contain
 # security, audit, push, Telegram-update and worker state and are intentionally
 # left untouched by "users-only" restore.
-USERS_ONLY_TABLES = ("users", "payments", "referral_rewards")
+USERS_ONLY_TABLES = ("users", "payments", "referral_rewards", "telegram_profile_links")
+# Authentication/invitation state is never imported from an archive. Revoke the
+# current user-facing tokens atomically with the profile replacement.
+USERS_ONLY_REVOKE_TABLES = ("telegram_profile_link_requests", "telegram_link_requests",
+                            "cabinet_login_requests", "cabinet_access_tokens", "access_invites")
+USERS_ONLY_SNAPSHOT_TABLES = USERS_ONLY_TABLES + USERS_ONLY_REVOKE_TABLES
 APP_HEALTH_TABLES = ("users", "payments", "user_events", "audit_log")
 PROTECTED_CONFIG = {
     "DATABASE_URL", "DB_PATH", "BACKUP_DIR", "BACKUP_LOCK_PATH", "BACKUP_STATE_PATH",
@@ -752,7 +757,7 @@ def _clone_live_schema(schema_dsn: str, staging_dsn: str, *, section: str = "pre
         _restore_trusted_schema(schema, staging_dsn)
 
 
-def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tuple[str, ...] = ()) -> None:
+def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tuple[str, ...] = (), include_tables: tuple[str, ...] | None = None) -> None:
     """Restore archive DATA into current trusted schema; never execute archive SQL."""
     import psycopg
     from psycopg import sql
@@ -773,6 +778,10 @@ def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tupl
                                 writer.write_row(row)
                 _reset_table_sequences(conn, table, columns)
             for table, columns, rows in _copy_data_blocks(dump):
+                if include_tables is not None and table not in include_tables:
+                    for _ in rows:
+                        pass
+                    continue
                 if table in preserve_tables:
                     for _ in rows:
                         pass
@@ -837,40 +846,61 @@ def _sequence_names(conn: Any, table: str, columns: list[str]) -> list[tuple[str
 
 
 def _reset_table_sequences(conn: Any, table: str, columns: list[str]) -> None:
+    from psycopg import sql
     original_table = table
     table = table.replace(chr(34), chr(34) * 2)
     for sequence, column in _sequence_names(conn, original_table, columns):
-        seq_sql = sequence
         col = '"' + column.replace('"', '""') + '"'
-        # setval(..., max(id), true) makes the next INSERT safe. Empty tables are reset to 1.
+        names = conn.execute(
+            "SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=%s::regclass",
+            (sequence,),
+        ).fetchone()
+        current = conn.execute(sql.SQL("SELECT last_value,is_called FROM {}").format(sql.Identifier(*names))).fetchone()
+        maximum, has_rows = conn.execute(
+            f'SELECT COALESCE(MAX({col}),0),EXISTS(SELECT 1 FROM public."{table}") FROM public."{table}"'
+        ).fetchone()
+        # Sequence changes do not roll back with table changes. Never rewind a
+        # live sequence: a later validation failure must not make restored old
+        # rows collide with the next INSERT. Callers lock live tables while
+        # restoring; an aborted restore can leave harmless gaps, not duplicates.
         conn.execute(
-            f"SELECT setval(%s::regclass, COALESCE((SELECT MAX({col}) FROM public.\"{table}\"), 0) + CASE WHEN EXISTS (SELECT 1 FROM public.\"{table}\") THEN 0 ELSE 1 END, EXISTS (SELECT 1 FROM public.\"{table}\"))",
-            (seq_sql,),
+            "SELECT setval(%s::regclass,%s,%s)",
+            (sequence, max(1, int(current[0]), int(maximum)), bool(current[1]) or bool(has_rows)),
         )
+
+
+def _users_only_order(conn: Any) -> list[str]:
+    """Allow only the explicitly supported FK closure, in parent-first order."""
+    rows = conn.execute(
+        """SELECT child.relname, parent.relname, cn.nspname, pn.nspname
+           FROM pg_constraint fk
+           JOIN pg_class child ON child.oid=fk.conrelid
+           JOIN pg_namespace cn ON cn.oid=child.relnamespace
+           JOIN pg_class parent ON parent.oid=fk.confrelid
+           JOIN pg_namespace pn ON pn.oid=parent.relnamespace
+           WHERE fk.contype='f'
+             AND ((cn.nspname='public' AND child.relname = ANY(%s))
+               OR (pn.nspname='public' AND parent.relname = ANY(%s)))""",
+        (list(USERS_ONLY_SNAPSHOT_TABLES), list(USERS_ONLY_SNAPSHOT_TABLES)),
+    ).fetchall()
+    selected = set(USERS_ONLY_SNAPSHOT_TABLES)
+    if any(child not in selected or parent not in selected or cn != "public" or pn != "public"
+           for child, parent, cn, pn in rows):
+        raise RuntimeError("Users-only restore: обнаружена неподдерживаемая внешняя зависимость")
+    remaining = list(USERS_ONLY_SNAPSHOT_TABLES)
+    ordered: list[str] = []
+    while remaining:
+        ready = [table for table in remaining
+                 if not any(child == table and parent in remaining for child, parent, _cn, _pn in rows)]
+        if not ready:
+            raise RuntimeError("Users-only restore: циклические внешние ключи не поддерживаются")
+        ordered.extend(ready)
+        remaining = [table for table in remaining if table not in ready]
+    return ordered
 
 
 def _ensure_users_only_safe_constraints(conn: Any) -> None:
-    rows = conn.execute(
-        """SELECT
-               tc.table_name AS child_table,
-               ccu.table_name AS parent_table
-           FROM information_schema.table_constraints tc
-           JOIN information_schema.constraint_column_usage ccu
-             ON ccu.constraint_name = tc.constraint_name
-            AND ccu.constraint_schema = tc.constraint_schema
-           WHERE tc.constraint_type='FOREIGN KEY'
-             AND tc.constraint_schema='public'
-             AND (tc.table_name = ANY(%s) OR ccu.table_name = ANY(%s))
-           ORDER BY tc.table_name, ccu.table_name""",
-        (list(USERS_ONLY_TABLES), list(USERS_ONLY_TABLES)),
-    ).fetchall()
-    if rows:
-        pairs = ", ".join(f"{a}->{b}" for a, b in rows[:12])
-        raise RuntimeError(
-            "Users-only restore остановлен: выбранные таблицы связаны внешними ключами "
-            f"({pairs}). Безопасное частичное восстановление в этом состоянии запрещено, "
-            "чтобы не нарушить ссылочную целостность или не удалить сторонние данные."
-        )
+    _users_only_order(conn)
 
 def _selected_restore_with_snapshot(target_dsn: str, staging_dsn: str, expected: dict[str, Any]) -> dict[str, Any]:
     """Restore user/subscription tables transactionally and return post-commit counts."""
@@ -879,17 +909,22 @@ def _selected_restore_with_snapshot(target_dsn: str, staging_dsn: str, expected:
         conn.autocommit = False
         snapshot_schema = _pg_identifier(f"fargovpn_restore_snapshot_{int(time.time())}_{os.getpid()}"[:55], "схемы")
         try:
-            _ensure_users_only_safe_constraints(conn)
+            order = _users_only_order(conn)
+            conn.execute('LOCK TABLE ' + ', '.join(f'public."{table}"' for table in order) + ' IN ACCESS EXCLUSIVE MODE')
             conn.execute(f'CREATE SCHEMA "{snapshot_schema}"')
-            for table in USERS_ONLY_TABLES:
+            for table in order:
                 safe = _pg_identifier(table, "таблицы")
                 if not conn.execute("SELECT to_regclass(%s)", (f"public.{safe}",)).fetchone()[0]:
                     raise RuntimeError(f"Текущая БД не содержит таблицу {safe}")
                 conn.execute(f'CREATE TABLE "{snapshot_schema}"."{safe}" AS TABLE public."{safe}" WITH NO DATA')
                 conn.execute(f'INSERT INTO "{snapshot_schema}"."{safe}" SELECT * FROM public."{safe}"')
 
+            for table in reversed(order):
+                conn.execute(f'DELETE FROM public."{_pg_identifier(table, "таблицы")}"')
             counts: dict[str, int] = {}
-            for table in USERS_ONLY_TABLES:
+            for table in order:
+                if table not in USERS_ONLY_TABLES:
+                    continue
                 safe = _pg_identifier(table, "таблицы")
                 target_columns = _table_columns(conn, safe)
                 with psycopg.connect(raw_dsn(staging_dsn)) as source_conn:
@@ -900,7 +935,6 @@ def _selected_restore_with_snapshot(target_dsn: str, staging_dsn: str, expected:
                 if not common:
                     raise RuntimeError(f"Нет общих колонок для {safe}")
                 cols = _quoted_columns(common)
-                conn.execute(f'DELETE FROM public."{safe}"')
                 # Pull only the named table with a server-side postgres_fdw is intentionally
                 # avoided. Instead use a temporary table populated via COPY from psycopg in the
                 # same process/database connection below.
@@ -940,22 +974,28 @@ def _restore_selected_snapshot(target_dsn: str, snapshot_schema: str) -> None:
     snapshot_schema = _pg_identifier(snapshot_schema, "схемы")
     with psycopg.connect(raw_dsn(target_dsn)) as conn:
         conn.autocommit = False
+        restored = False
         try:
-            for table in USERS_ONLY_TABLES:
+            order = _users_only_order(conn)
+            for table in reversed(order):
+                conn.execute(f'DELETE FROM public."{_pg_identifier(table, "таблицы")}"')
+            for table in order:
                 safe = _pg_identifier(table, "таблицы")
                 columns = _table_columns(conn, safe)
                 cols = _quoted_columns(columns)
-                conn.execute(f'DELETE FROM public."{safe}"')
                 conn.execute(f'INSERT INTO public."{safe}" ({cols}) SELECT {cols} FROM "{snapshot_schema}"."{safe}"')
                 _reset_table_sequences(conn, safe, columns)
             conn.commit()
+            restored = True
         except Exception:
             conn.rollback()
             raise
         finally:
+            # A failed rollback must retain its recovery snapshot for manual repair.
             try:
-                conn.execute(f'DROP SCHEMA IF EXISTS "{snapshot_schema}" CASCADE')
-                conn.commit()
+                if restored:
+                    conn.execute(f'DROP SCHEMA IF EXISTS "{snapshot_schema}" CASCADE')
+                    conn.commit()
             except Exception:
                 conn.rollback()
 
@@ -967,10 +1007,10 @@ def _drop_snapshot_schema(target_dsn: str, snapshot_schema: str) -> None:
         logger.warning("Не удалось удалить snapshot schema %s: %s", snapshot_schema, exc)
 
 
-def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging_dsn: str) -> None:
+def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging_dsn: str, *, include_tables: tuple[str, ...] | None = None) -> None:
     kind, artifact = find_application_artifact(root, manifest)
     if kind == "PostgreSQL":
-        restore_dump(artifact, staging_dsn, schema_dsn=str(_cfg("DATABASE_URL", "")))
+        restore_dump(artifact, staging_dsn, schema_dsn=str(_cfg("DATABASE_URL", "")), include_tables=include_tables)
         return
     # SQLite is also untrusted data: never recreate its DDL/defaults/triggers.
     import psycopg
@@ -981,6 +1021,8 @@ def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging
         source.execute('PRAGMA trusted_schema=OFF')
         with psycopg.connect(raw_dsn(staging_dsn)) as conn:
             for (table,) in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                if include_tables is not None and table not in include_tables:
+                    continue
                 target_columns = _table_columns(conn, table)
                 if not target_columns:
                     raise RuntimeError(f"SQLite backup содержит неизвестную таблицу: {table}")
@@ -1124,6 +1166,22 @@ def start_services(full: bool) -> None:
             raise RuntimeError(f"Не удалось запустить {unit}: {detail[-1500:]}")
 
 
+def _restore_service_states(states: dict[str, dict[str, bool]]) -> None:
+    """Restore enabled and active independently; never activate a stopped unit."""
+    subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True, text=True, timeout=60)
+    for unit, state in states.items():
+        for operation in ("enable" if state.get("enabled") else "disable",
+                          "start" if state.get("active") else "stop"):
+            result = subprocess.run(["systemctl", operation, unit], check=False,
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise RuntimeError(f"Не удалось вернуть состояние службы {unit}: {operation}")
+    for unit, state in states.items():
+        active = subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0
+        if active != bool(state.get("active")):
+            raise RuntimeError(f"Не восстановлено исходное active состояние {unit}")
+
+
 def _verify_unit_active(unit: str) -> None:
     if not _service_exists(unit):
         raise RuntimeError(f"Служба {unit} не установлена")
@@ -1132,33 +1190,55 @@ def _verify_unit_active(unit: str) -> None:
         raise RuntimeError(f"{unit} не active после восстановления:\n{(detail.stdout or detail.stderr)[-4000:]}")
 
 
+def _wait_web_health(socket_path: Path, timeout: float = 60.0) -> None:
+    """Wait for ASGI readiness, which follows systemd Type=simple activation."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            for health_path in ("/healthz", "/health"):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                request_timeout = min(5.0, remaining)
+                try:
+                    completed = subprocess.run(
+                        ["curl", "--unix-socket", str(socket_path), "-fsS", "--max-time", str(request_timeout), f"http://localhost{health_path}"],
+                        check=False, capture_output=True, text=True,
+                        timeout=min(10.0, remaining),
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+                if completed.returncode == 0 and completed.stdout.strip().startswith("OK"):
+                    return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1.0, remaining))
+    raise RuntimeError("Health-check веб-панели после восстановления не пройден: истёк срок ожидания готовности")
+
+
 def verify_live(full: bool, config_path: Path | None = None) -> None:
     config_path = config_path or (APP_DIR / "config.py")
     values = parse_literal_config(config_path) if config_path.is_file() else {}
+    if "BOT_TOKEN" in values and not str(values.get("BOT_TOKEN") or "").strip():
+        raise RuntimeError("BOT_TOKEN не настроен; готовность Telegram-бота после восстановления не подтверждена")
     _verify_unit_active("vpn-service-bot.service")
     if not full:
         return
     _verify_unit_active("vpn-service-web.socket")
     _verify_unit_active("vpn-service-web.service")
     socket_path = Path(str(values.get("WEB_SOCKET_PATH", "/run/vpn-service/fargovpn.sock")))
-    if not socket_path.exists():
-        raise RuntimeError(f"Unix socket веб-панели отсутствует: {socket_path}")
     if not shutil.which("curl"):
         raise RuntimeError("curl не установлен; health-check веб-панели невозможен")
-    for health_path in ("/healthz", "/health"):
-        completed = subprocess.run(
-            ["curl", "--unix-socket", str(socket_path), "-fsS", "--max-time", "5", f"http://localhost{health_path}"],
-            check=False, capture_output=True, text=True, timeout=10,
-        )
-        if completed.returncode == 0 and completed.stdout.strip().startswith("OK"):
-            break
-    else:
-        raise RuntimeError("Health-check веб-панели после восстановления не пройден")
+    _wait_web_health(socket_path)
     panel_units = [u for u in ("x-ui.service", "3x-ui.service") if _service_exists(u)]
     if panel_units and not any(subprocess.run(["systemctl", "is-active", "--quiet", u], check=False).returncode == 0 for u in panel_units):
         raise RuntimeError("Ни одна служба 3x-ui не active после восстановления")
     if _service_exists("xray.service") and subprocess.run(["systemctl", "is-active", "--quiet", "xray.service"], check=False).returncode != 0:
         raise RuntimeError("xray.service не active после восстановления")
+    # A Type=simple bot can exit while the web application is warming up.
+    _verify_unit_active("vpn-service-web.socket")
+    _verify_unit_active("vpn-service-web.service")
+    _verify_unit_active("vpn-service-bot.service")
 
 
 def _current_xui_kind() -> str:
@@ -1474,10 +1554,11 @@ def _restore_users_only(root: Path, manifest: dict[str, Any], safety_archive: Pa
     suffix = time.strftime("%Y%m%d_%H%M%S")
     staging_dsn, staging_name = make_staging_db(target_dsn, suffix)
     snapshot_schema = ""
+    unit_states = _capture_service_states(_fargovpn_units())
     try:
         stop_services(include_xui=False)
-        restore_application_to_staging(root, manifest, staging_dsn)
-        staged_counts = app_counts(staging_dsn)
+        restore_application_to_staging(root, manifest, staging_dsn, include_tables=USERS_ONLY_TABLES)
+        staged_counts = app_counts(staging_dsn, USERS_ONLY_TABLES)
         result = _selected_restore_with_snapshot(target_dsn, staging_dsn, staged_counts)
         snapshot_schema = str(result["snapshot_schema"])
         # The health-check is intentionally done while services are still stopped
@@ -1504,9 +1585,9 @@ def _restore_users_only(root: Path, manifest: dict[str, Any], safety_archive: Pa
                 raise RuntimeError(f"Ошибка восстановления и отката users-only: {rollback_error}") from rollback_error
         drop_database(staging_name)
         try:
-            start_services(full=str(getattr(config, "INSTALL_PROFILE", "full")).lower() == "full")
+            _restore_service_states(unit_states)
         except Exception:
-            logger.exception("Не удалось перезапустить FargoVPN после неудачного users-only restore")
+            logger.exception("Не удалось вернуть состояния FargoVPN после неудачного users-only restore")
         raise
 
 
@@ -1597,11 +1678,7 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
                 _sqlite_xui_rollback(xui_current_db, xui_rollback_file)
             if current_snapshot:
                 _rollback_files(current_snapshot)
-            for unit, state in unit_states.items():
-                desired = state.get("enabled", False)
-                subprocess.run(["systemctl", "enable" if desired else "disable", unit], check=False, capture_output=True, text=True, timeout=30)
-            start_services(full=True)
-            verify_live(True, APP_DIR / "config.py")
+            _restore_service_states(unit_states)
             write_restore_state(job_id="", status="failed", phase="rollback_done", progress=100, message="Восстановление не применено; исходное состояние возвращено", mode="full", error=str(exc), rollback=True)
         except Exception as rollback_exc:  # noqa: BLE001
             rollback_error = rollback_exc

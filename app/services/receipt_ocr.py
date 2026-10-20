@@ -601,19 +601,21 @@ def find_duplicate_receipt(
     db_path: str | Path,
     payment_id: int,
     analysis: ReceiptAnalysis,
+    connection: Any = None,
 ) -> int | None:
-    connection = _connect(db_path)
+    owned_connection = connection is None
+    connection = _connect(db_path) if owned_connection else connection
     try:
         rows = connection.execute(
             """
             SELECT id,receipt_sha256,receipt_text_sha256,receipt_phash,receipt_amount,receipt_date
             FROM payments
-            WHERE id<>? AND status IN ('approved','declined') AND (
+            WHERE id<>? AND COALESCE(ocr_status,'')<>'duplicate' AND (
                 (?<>'' AND receipt_sha256=?) OR
                 (?<>'' AND receipt_text_sha256=?) OR
                 (?<>'' AND receipt_phash=?)
             )
-            ORDER BY id DESC LIMIT 100
+            ORDER BY id DESC
             """,
             (
                 int(payment_id),
@@ -626,7 +628,8 @@ def find_duplicate_receipt(
             ),
         ).fetchall()
     finally:
-        connection.close()
+        if owned_connection:
+            connection.close()
     for row in rows:
         if analysis.file_sha256 and row["receipt_sha256"] == analysis.file_sha256:
             return int(row["id"])
@@ -642,8 +645,9 @@ def find_duplicate_receipt(
     return None
 
 
-def save_analysis(db_path: str | Path, payment_id: int, analysis: ReceiptAnalysis) -> None:
-    connection = _connect(db_path)
+def save_analysis(db_path: str | Path, payment_id: int, analysis: ReceiptAnalysis, connection: Any = None) -> None:
+    owned_connection = connection is None
+    connection = _connect(db_path) if owned_connection else connection
     try:
         connection.execute(
             """
@@ -667,9 +671,28 @@ def save_analysis(db_path: str | Path, payment_id: int, analysis: ReceiptAnalysi
                 int(payment_id),
             ),
         )
-        connection.commit()
+        if owned_connection:
+            connection.commit()
     finally:
-        connection.close()
+        if owned_connection:
+            connection.close()
+
+
+def lock_receipt_fingerprints(connection: Any, analysis: ReceiptAnalysis) -> None:
+    """Serialize all matching receipt identities until their reservation commits.
+
+    Saved payments are the durable reservation, including pending requests.
+    Sorted keys avoid deadlocks when files and OCR text differ independently.
+    """
+    keys = []
+    if analysis.file_sha256:
+        keys.append("file:" + analysis.file_sha256)
+    if analysis.text_sha256:
+        keys.append("text:" + analysis.text_sha256)
+    if analysis.perceptual_hash and analysis.amount is not None and analysis.receipt_date_text:
+        keys.append(f"visual:{analysis.perceptual_hash}:{analysis.receipt_date_text}")
+    for key in sorted(set(keys)):
+        connection.execute("SELECT pg_advisory_xact_lock(496, hashtext(?))", (key,))
 
 
 def analyze_payment_receipt(
@@ -681,15 +704,20 @@ def analyze_payment_receipt(
 ) -> ReceiptAnalysis:
     analysis = analyze_receipt(content, **kwargs)
     analysis = replace(analysis, check_duplicate=bool(check_duplicate))
-    duplicate = find_duplicate_receipt(db_path, payment_id, analysis) if check_duplicate else None
-    if duplicate:
-        reasons = tuple(list(analysis.reasons) + [f"чек уже использован в платеже #{duplicate}"])
-        analysis = replace(
-            analysis,
-            passed=False,
-            status="duplicate",
-            duplicate_payment_id=duplicate,
-            reasons=reasons,
-        )
-    save_analysis(db_path, payment_id, analysis)
+    connection = _connect(db_path)
+    try:
+        if check_duplicate:
+            lock_receipt_fingerprints(connection, analysis)
+        duplicate = find_duplicate_receipt(db_path, payment_id, analysis, connection) if check_duplicate else None
+        if duplicate:
+            reasons = tuple(list(analysis.reasons) + [f"чек уже использован в платеже #{duplicate}"])
+            analysis = replace(analysis, passed=False, status="duplicate",
+                               duplicate_payment_id=duplicate, reasons=reasons)
+        save_analysis(db_path, payment_id, analysis, connection)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
     return analysis

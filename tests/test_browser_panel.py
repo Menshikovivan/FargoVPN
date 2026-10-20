@@ -127,17 +127,17 @@ def test_real_browser_update_progress_and_live_log_survive_status_poll():
 
 
 def _messages_script_511() -> str:
-    source = WEBAPP.read_text(encoding="utf-8")
-    start = source.index("    scripts = f" + "'''<script>(function(){{", source.index('def messages_page('))
-    end = source.index("</script>" + "'''", start)
-    script = source[start:end].split("<script>", 1)[1].replace("{{", "{").replace("}}", "}")
-    return (script.replace("__MESSAGES_PATH__", '"/messages"')
-            .replace("__MESSAGES_FEED_PATH__", '"/api/panel/messages/feed"')
-            .replace("__MESSAGES_CHAT_FEED_PATH__", '"/api/panel/messages/chat-feed"')
-            .replace("__MESSAGES_USER_EVENTS_PATH__", '"/api/users/123/events"')
-            .replace("{selected}", "123").replace("{direction}", "all")
-            .replace("{message_kind}", "all").replace("{global_last_id}", "0")
-            .replace("{selected_chat_last_id}", "900"))
+    import ast
+    import json
+    source = (APP / "webapp.py").read_text(encoding="utf-8") if "APP" in globals() else WEBAPP.read_text(encoding="utf-8")
+    page = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "messages_page")
+    assignment = next(n for n in ast.walk(page) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "scripts" for t in n.targets))
+    values = dict(selected=123, direction="all", message_kind="all", global_last_id=0, selected_chat_last_id=900,
+                  messages_path_js=json.dumps("/messages"), messages_feed_path_js=json.dumps("/api/panel/messages/feed"),
+                  messages_chat_feed_path_js=json.dumps("/api/panel/messages/chat-feed"), messages_user_events_path_js=json.dumps("/api/users/123/events"),
+                  json=json, public_path=lambda path: path)
+    rendered = eval(compile(ast.Expression(assignment.value), "actual-messages-template", "eval"), values)
+    return rendered.removeprefix("<script>").removesuffix("</script>")
 
 
 @pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")

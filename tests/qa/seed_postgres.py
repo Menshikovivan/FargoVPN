@@ -2,12 +2,23 @@
 """Standalone PostgreSQL QA seeder; ignores production config and refuses non-QA DSNs."""
 import argparse,importlib.util,os,pathlib,sys
 from urllib.parse import urlsplit
-ROOT=pathlib.Path(__file__).resolve().parents[2]
+ROOT=pathlib.Path(__file__).resolve().parents[2]/'app'
 sys.path.insert(0,str(ROOT))
 def main():
- p=argparse.ArgumentParser();p.add_argument('--count',type=int,default=1000);p.add_argument('--clean',action='store_true');a=p.parse_args()
- dsn=os.environ.get('QA_DATABASE_URL','');u=urlsplit(dsn.replace('postgresql+psycopg','postgresql'))
- if u.hostname not in ('localhost','127.0.0.1') or not u.path.endswith('_qa'):raise SystemExit('Refuse non-test DSN; QA_DATABASE_URL must use loopback and database ending _qa')
+ p=argparse.ArgumentParser();p.add_argument('--count',type=int,default=1000);p.add_argument('--clean',action='store_true')
+ p.add_argument('--allow-disposable-loopback',action='store_true',help='confirm that this local QA database may receive or clear synthetic rows')
+ a=p.parse_args()
+ dsn=os.environ.get('QA_DATABASE_URL','')
+ try:
+  u=urlsplit(dsn.replace('postgresql+psycopg://','postgresql://',1));port=u.port
+ except ValueError:
+  raise SystemExit('Refuse malformed disposable database URL') from None
+ database=u.path.lstrip('/')
+ if (not a.allow_disposable_loopback or u.scheme!='postgresql' or u.query or u.fragment
+     or u.hostname not in ('localhost','127.0.0.1','::1') or (port is not None and not 1<=port<=65535)
+     or not 1<=len(database)<=63 or not database.isascii() or not database.replace('_','').isalnum()
+     or u.path!='/'+database or not (database.endswith('_qa') or database.startswith('audit542_'))):
+  raise SystemExit('Refuse non-test DSN; require explicit disposable-loopback confirmation and an unambiguous QA database name without overrides')
  if not 200<=a.count<=10000:raise SystemExit('--count must be 200..10000')
  os.environ['FARGOVPN_DATABASE_URL']=dsn
  spec=importlib.util.spec_from_file_location('config',ROOT/'config.example.py');c=importlib.util.module_from_spec(spec);sys.modules['config']=c;spec.loader.exec_module(c);c.DATABASE_URL=dsn

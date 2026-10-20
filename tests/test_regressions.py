@@ -32,7 +32,7 @@ def test_concurrent_different_receipts_and_approved_duplicate(tmp_path, monkeypa
     from services import payment_submission as payments
     path = tmp_path / 'payments.db'
     with sqlite3.connect(path) as connection:
-        connection.execute("CREATE TABLE payments (id INTEGER PRIMARY KEY,tg_id INTEGER,username TEXT,telegram_file_id TEXT,amount INTEGER,expected_amount INTEGER,ocr_status TEXT,purchase_token TEXT UNIQUE,status TEXT DEFAULT 'pending')")
+        connection.execute("CREATE TABLE payments (id INTEGER PRIMARY KEY,tg_id INTEGER,username TEXT,telegram_file_id TEXT,amount INTEGER,expected_amount INTEGER,ocr_status TEXT,purchase_token TEXT UNIQUE,purchased_days INTEGER,status TEXT DEFAULT 'pending')")
     lock = threading.Lock()
     class Connection:
         def __init__(self, *args): self.conn = sqlite3.connect(path)

@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     up BIGINT DEFAULT 0, down BIGINT DEFAULT 0, total BIGINT DEFAULT 0,
     sub_id TEXT, last_online TEXT, last_online_ts BIGINT DEFAULT 0,
     last_sync_at TEXT, last_reminder_days INTEGER DEFAULT -1,
-    identity_source TEXT, identity_updated_at TEXT, notes TEXT,
+    identity_source TEXT, identity_updated_at TEXT, notes TEXT, remote_comment TEXT,
     referral_code TEXT, referred_by_tg_id BIGINT, referred_by_code TEXT,
     registered_at TEXT, referral_code_updated_at BIGINT DEFAULT 0,
     registration_status TEXT DEFAULT 'awaiting_invite',
@@ -35,11 +35,11 @@ CREATE TABLE IF NOT EXISTS users (
     custom_payment_price BIGINT
 );
 CREATE TABLE IF NOT EXISTS telegram_profile_links (
-    telegram_id BIGINT PRIMARY KEY, profile_tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
+    telegram_id BIGINT PRIMARY KEY REFERENCES users(tg_id) ON UPDATE CASCADE ON DELETE CASCADE, profile_tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON UPDATE CASCADE ON DELETE CASCADE,
     linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, linked_by BIGINT
 );
 CREATE TABLE IF NOT EXISTS telegram_profile_link_requests (
-    token_hash TEXT PRIMARY KEY, profile_tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
+    token_hash TEXT PRIMARY KEY, profile_tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON UPDATE CASCADE ON DELETE CASCADE,
     created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, consumed_at BIGINT, created_by BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS manual_keys (
@@ -420,6 +420,27 @@ def _unread_trigger(conn) -> None:
       FOR EACH ROW EXECUTE FUNCTION fargovpn_user_event_unread_fn()
     """)
 
+def _migrate_family_foreign_keys(conn) -> None:
+    """Repair legacy family references without retaining invisible paid slots."""
+    conn.execute("DELETE FROM telegram_profile_links WHERE NOT EXISTS (SELECT 1 FROM users WHERE tg_id=telegram_id)")
+    for table, column in (("telegram_profile_links", "telegram_id"),
+                          ("telegram_profile_links", "profile_tg_id"),
+                          ("telegram_profile_link_requests", "profile_tg_id")):
+        constraints = conn.execute("""
+            SELECT c.conname,c.confupdtype,c.confdeltype
+              FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+              JOIN pg_namespace n ON n.oid=t.relnamespace
+              JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=ANY(c.conkey)
+             WHERE n.nspname=current_schema() AND t.relname=? AND a.attname=? AND c.contype='f'
+        """, (table, column)).fetchall()
+        if len(constraints) == 1 and constraints[0][1] == 'c' and constraints[0][2] == 'c':
+            continue
+        for name, _, _ in constraints:
+            escaped = str(name).replace('"', '""')
+            conn.execute(f'ALTER TABLE "{table}" DROP CONSTRAINT "{escaped}"')
+        conn.execute(f'ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_fkey" FOREIGN KEY ("{column}") REFERENCES users(tg_id) ON UPDATE CASCADE ON DELETE CASCADE')
+
+
 def migrate() -> None:
     with database_adapter.connect() as conn:
         # Execute each statement independently so a prior partially-initialized
@@ -433,10 +454,10 @@ def migrate() -> None:
             "identity_source":"TEXT","identity_updated_at":"TEXT","notes":"TEXT","display_name":"TEXT",
             "referral_code":"TEXT","referred_by_tg_id":"BIGINT","referred_by_code":"TEXT",
             "registered_at":"TEXT","referral_code_updated_at":"BIGINT DEFAULT 0",
-            "custom_payment_price":"BIGINT",
+            "custom_payment_price":"BIGINT","remote_comment":"TEXT",
         })
         _ensure_columns(conn,"payments",{
-            "purchase_token":"TEXT",
+            "purchase_token":"TEXT","purchased_days":"BIGINT",
             "last_error":"TEXT","receipt_sha256":"TEXT","receipt_text_sha256":"TEXT",
             "receipt_phash":"TEXT","receipt_amount":"DOUBLE PRECISION","receipt_date":"TEXT",
             "receipt_phone":"TEXT","receipt_receiver":"TEXT","ocr_status":"TEXT DEFAULT 'not_checked'",
@@ -446,6 +467,7 @@ def migrate() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_status ON payments(tg_id,status)")
         conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS expected_amount BIGINT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_profile_links_owner ON telegram_profile_links(profile_tg_id)")
+        _migrate_family_foreign_keys(conn)
         # Self-map existing real accounts idempotently; this does not alter identities or subscriptions.
         conn.execute("""
             INSERT INTO telegram_profile_links(telegram_id,profile_tg_id)

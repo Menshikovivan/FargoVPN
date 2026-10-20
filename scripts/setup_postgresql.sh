@@ -2,7 +2,7 @@
 set -euo pipefail
 STEP=0
 step(){ STEP=$((STEP+1)); echo "[PostgreSQL] Шаг ${STEP}: $*"; }
-run_timed(){ local sec="$1" label="$2"; shift 2; echo "  Ожидается: ${label} (таймаут ${sec} с)"; timeout --kill-after=5s "${sec}s" "$@"; }
+run_timed(){ local sec="$1" label="$2"; shift 2; echo "  Ожидается: ${label} (таймаут ${sec} с)"; timeout --foreground --kill-after=5s "${sec}s" "$@"; }
 
 DB_NAME="${FARGOVPN_DB_NAME:-fargovpn}"
 DB_USER="${FARGOVPN_DB_USER:-fargovpn}"

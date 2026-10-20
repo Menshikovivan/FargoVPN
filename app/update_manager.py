@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,6 +30,7 @@ import config
 from detached_jobs import DetachedJobError, launch_detached
 
 APP_DIR = Path(__file__).resolve().parent
+LOGGER = logging.getLogger(__name__)
 _CHECK_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _STATUS_LOCK = threading.Lock()
@@ -718,14 +720,8 @@ def github_configuration_ready() -> bool:
 
 
 def publisher_enabled() -> bool:
-    """Проверяет возможность публикации GitHub с текущей панели.
-
-    Первичная настройка может выполняться из веб-панели без заранее заданной
-    publisher identity. После сохранения токена публикация разрешается самой
-    панели через её локальную GitHub-конфигурацию. Защищённый publisher digest
-    остаётся совместимым дополнительным способом назначения главной панели.
-    """
-    return is_publisher_username(getattr(config, "WEB_USERNAME", "")) or github_configuration_ready()
+    """Публикация доступна только защищённой учётной записи издателя."""
+    return is_publisher_username(getattr(config, "WEB_USERNAME", ""))
 
 
 def is_publisher_username(username: str) -> bool:
@@ -2641,12 +2637,20 @@ def write_status(state: str, **details: Any) -> None:
         except (TypeError, ValueError):
             revision = 1
         data = {
-            **previous,
+            **(previous if not incoming_job or same_job else {}),
             "state": state,
             "revision": revision,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **details,
         }
+        if state == "completed":
+            data["exit_code"] = 0
+            data.pop("error", None)
+        elif state == "failed":
+            try:
+                data["exit_code"] = int(data.get("exit_code") or 1) or 1
+            except (TypeError, ValueError):
+                data["exit_code"] = 1
         if "progress" in data:
             try:
                 data["progress"] = max(0, min(100, int(data["progress"])))

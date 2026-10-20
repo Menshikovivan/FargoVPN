@@ -7,11 +7,11 @@ import sys,importlib.util,logging,json,sqlite3,time,os
 from pathlib import Path
 from unittest.mock import patch
 root=Path(__file__).resolve().parents[2];private=Path(sys.argv[1]).resolve();private.mkdir(exist_ok=True);os.chmod(private,0o700)
-sys.path.insert(0,str(root));sys.path.insert(0,str(root/'tests/qa'))
+sys.path.insert(0,str(root/'app'));sys.path.insert(0,str(root/'tests/qa'))
 from backup_fixture import build_fixture
 fixture=private/'data.sqlite';fixture.unlink(missing_ok=True)
 counts=build_fixture(private/'fargovpn.sql',fixture);os.chmod(fixture,0o600)
-spec=importlib.util.spec_from_file_location('config',root/'config.example.py');config=importlib.util.module_from_spec(spec);sys.modules['config']=config;spec.loader.exec_module(config)
+spec=importlib.util.spec_from_file_location('config',root/'app'/'config.example.py');config=importlib.util.module_from_spec(spec);sys.modules['config']=config;spec.loader.exec_module(config)
 config.BOT_TOKEN='';config.ADMIN_IDS=[];config.MASTER_API_TOKEN='offline';config.DB_PATH=str(fixture);config.WEB_PUBLIC_PREFIX='/qa-panel';config.WEB_USERNAME='menshikovivan';config.UPDATE_DIR=str(private/'updates');config.XUI_MIN_REQUEST_INTERVAL_MS=0
 import psutil
 psutil.net_io_counters=lambda:type('Counters',(),{'bytes_recv':0,'bytes_sent':0})()

@@ -472,13 +472,6 @@ print_update_summary() {
 summary_running preflight "Проверка Python/systemd/disk"
 preflight
 summary_ok preflight "Система готова к установке"
-# An interrupted update may leave a systemd web unit pointing at a missing .venv.
-# Disable it temporarily so systemd cannot endlessly restart a known-broken process.
-if [[ -n "${UPDATE_PATH:-}" && ! -x "${UPDATE_PATH:-$TARGET}/.venv/bin/python" ]]; then
-  systemctl stop vpn-service-web.service vpn-service-web.socket fargovpn-web.service 2>/dev/null || true
-  systemctl disable vpn-service-web.service vpn-service-web.socket fargovpn-web.service 2>/dev/null || true
-  echo "ℹ Broken previous web service is disabled temporarily; the installer will recreate the virtualenv before enabling it."
-fi
 
 write_update_status() {
   local state=$1
@@ -504,6 +497,8 @@ with lock_path.open("a+") as lock_handle:
             previous = {}
     except Exception:
         previous = {}
+    if sys.argv[8] and sys.argv[8] != str(previous.get("job_id") or ""):
+        previous = {}
     data = {
         **previous,
         "state": sys.argv[2],
@@ -523,6 +518,9 @@ with lock_path.open("a+") as lock_handle:
         data["job_id"] = sys.argv[8]
     if sys.argv[2] in {"completed", "failed"}:
         data["finished_at"] = data["updated_at"]
+        data["exit_code"] = 0 if sys.argv[2] == "completed" else 1
+        if sys.argv[2] == "completed":
+            data.pop("error", None)
     tmp = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp"
     )
@@ -757,6 +755,24 @@ project_dir() {
   return 1
 }
 
+recover_missing_target_venv() {
+  # Recovery may affect only a validated installation and its own units.
+  local recovery_target recovery_unit recovery_dir recovery_project recovery_socket
+  recovery_target=$(project_dir "$TARGET" 2>/dev/null) || return 0
+  [[ -x "$recovery_target/.venv/bin/python" ]] && return 0
+  for recovery_unit in vpn-service-web.service fargovpn-web.service; do
+    recovery_dir=$(systemctl show -p WorkingDirectory --value "$recovery_unit" 2>/dev/null) || recovery_dir=""
+    [[ -n "$recovery_dir" ]] || continue
+    recovery_project=$(project_dir "$recovery_dir" 2>/dev/null) || recovery_project=""
+    [[ "$recovery_project" == "$recovery_target" ]] || continue
+    recovery_socket="${recovery_unit%.service}.socket"
+    systemctl stop "$recovery_unit" "$recovery_socket" 2>/dev/null || true
+    systemctl disable "$recovery_unit" "$recovery_socket" 2>/dev/null || true
+    echo "ℹ Broken target web service is disabled temporarily; the installer will recreate its virtualenv."
+  done
+  return 0
+}
+
 config_literal() {
   local path=$1 name=$2
   python3 - "$path" "$name" <<'PY'
@@ -847,6 +863,7 @@ if [[ -n $UPDATE_PATH ]]; then
   # Explicit --update-existing is intentionally non-interactive. The menu-based
   # The update path is non-interactive; only the application is replaced.
   NONINTERACTIVE=1
+  recover_missing_target_venv
 else
   cat <<EOF_MENU
 ========================================
@@ -887,7 +904,7 @@ EOF_MENU
     RESTORE_ROOT="$RESTORE_PREP/extracted/vpn_service_backup"
     echo
     echo 'Что восстановить:'
-    echo '1) Только пользователи и их подписки (users/payments/referral_rewards)'
+    echo '1) Пользователи, подписки и семейные связи (users/payments/referral_rewards/telegram_profile_links)'
     echo '2) Все данные FargoVPN/3x-ui и разрешенные параметры FargoVPN'
     read -rp 'Выберите вариант [1-2]: ' RESTORE_CHOICE
     case "$RESTORE_CHOICE" in
@@ -914,7 +931,7 @@ print('  Внешний Nginx/L4: НЕ восстанавливается')
 PY_RESTORE_INFO
     echo
     if [[ "$RESTORE_MODE" == "users-only" ]]; then
-      echo 'Будут заменены только users, payments и referral_rewards. Аудит, безопасность, Push и служебные таблицы FargoVPN сохранятся.'
+      echo 'Будут заменены users, payments, referral_rewards и telegram_profile_links. Архивные сессии и passkeys не импортируются; действующие ссылки кабинета и приглашения отзываются. Аудит и Push не импортируются.'
     else
       echo 'Будут заменены данные FargoVPN и 3x-ui; применятся название сервиса, реквизиты оплаты, дни напоминаний и часовые пояса из архива.'
       echo 'Текущие подключения, доступы и настройки 3x-ui сохраняются. Для нового сервера их нужно настроить отдельно.'

@@ -87,14 +87,20 @@ def _runtime_unit(
     if reload_result.returncode != 0:
         runtime_path.unlink(missing_ok=True)
         raise DetachedJobError((reload_result.stderr or reload_result.stdout).strip() or "systemctl daemon-reload завершился ошибкой")
-    start_result = subprocess.run(
-        ["systemctl", "--no-block", "start", service],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if start_result.returncode != 0 and not _loaded(unit):
+    try:
+        start_result = subprocess.run(
+            ["systemctl", "--no-block", "start", service],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise DetachedJobError(
+            "Подтверждение systemctl не получено; задача могла запуститься. "
+            "Проверьте состояние перед повтором: " + service
+        ) from error
+    if start_result.returncode != 0:
         raise DetachedJobError((start_result.stderr or start_result.stdout).strip() or "systemctl не запустил временную службу")
     return "runtime-unit"
 
@@ -162,16 +168,24 @@ def launch_detached(
             ],
         )
         for index, args in enumerate(attempts, start=1):
-            result = subprocess.run(
-                args,
-                cwd=str(workdir),
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            if result.returncode == 0 or _loaded(unit):
+            try:
+                result = subprocess.run(
+                    args,
+                    cwd=str(workdir),
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise DetachedJobError(
+                    "Подтверждение systemd не получено; задача могла запуститься. "
+                    "Проверьте состояние перед повтором: " + _service_name(unit)
+                ) from error
+            if result.returncode == 0:
                 return "systemd-run" if index == 1 else "systemd-run-compatible"
+            if _loaded(unit):
+                raise DetachedJobError("systemd вернул ошибку, но задача могла запуститься; проверьте состояние перед повтором: " + _service_name(unit))
             detail = (result.stderr or result.stdout or f"код {result.returncode}").strip()
             errors.append(detail[-1200:])
 

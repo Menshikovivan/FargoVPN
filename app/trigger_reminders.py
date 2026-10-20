@@ -6,6 +6,7 @@ import db as database_adapter
 
 import asyncio
 import fcntl
+import html
 import logging
 import json
 import re
@@ -73,7 +74,7 @@ def _reminder_text(days: int, tg_id: int = 0) -> str:
     period = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
     price_line = f"\n💳 Продление: <b>{price} ₽ / {period} дней</b>" if price > 0 else ""
     return (
-        f"⏳ <b>{config.SERVICE_NAME}</b>\n\n{remaining}{price_line}\n"
+        f"⏳ <b>{html.escape(str(config.SERVICE_NAME))}</b>\n\n{remaining}{price_line}\n"
         "Продлите доступ через кнопку ниже, чтобы подключение не прерывалось."
     )
 

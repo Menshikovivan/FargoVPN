@@ -1,4 +1,4 @@
-"""Regression tests for trusted Telegram identity and username-only links in 5.1.41."""
+"""Regression tests for trusted Telegram identity and username-only links in 5.1.42."""
 from __future__ import annotations
 
 import ast
@@ -76,19 +76,25 @@ def test_audit_layout_does_not_force_details_column_to_one_pixel():
 
 
 def test_version_strings_are_coherent_for_release():
-    assert (APP / "VERSION").read_text(encoding="utf-8").strip() == "5.1.41"
-    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == "5.1.41"
+    assert (APP / "VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
+    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
     js = (APP / "static/panel.js").read_text(encoding="utf-8")
-    assert "const PANEL_BUILD_VERSION = '5.1.41';" in js
+    assert "const PANEL_BUILD_VERSION = '5.1.42';" in js
 
 
-def test_family_member_and_payment_labels_are_clickable_telegram_profiles():
+def test_primary_panel_names_link_to_internal_numeric_cards():
+    fn = _function(APP / "webapp.py", "_panel_user_link")
+    namespace = {"Any": object, "html": html}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "panel_name", "exec"), namespace)
+    for identity in (123, -123):
+        link = namespace["_panel_user_link"](identity, "Имя <test>")
+        assert f'href="/users/id/{identity}"' in link
+        assert 'target="_blank"' not in link
+        assert "&lt;test&gt;" in link
+    assert 'href=' not in namespace["_panel_user_link"](0, "Не привязан")
     source = (APP / "webapp.py").read_text(encoding="utf-8")
-    assert 'billing.telegram_identity_label(int(x[0]' in source
-    assert '_telegram_profile_link(int(x[0]), billing.telegram_identity_label' in source
-    assert 'payment_user_link = _telegram_profile_link(' in source
-    assert '<td data-label="Пользователь">{payment_user_link}' in source
-    assert 'payment_user_link} · Telegram ID' in source
+    assert '_panel_user_link(int(x[0]), billing.telegram_identity_label' in source
+    assert 'payment_user_link = _panel_user_link(' in source
 
 
 def test_historical_username_display_fallback_helpers_are_not_used_or_shipped():

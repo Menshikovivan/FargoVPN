@@ -280,7 +280,8 @@ def test_identity_migration_handles_old_schema_without_notes_or_event_table(tmp_
     assert users[0]["display_name"] == "Legacy"
 
 
-def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit():
+@pytest.mark.parametrize("family_size", [2, 3, 4])
+def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(family_size):
     source = (APP / "main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "subscription_report_text")
@@ -305,12 +306,16 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
     )
     connection.commit()
     from services import billing
+    connection.executemany("INSERT INTO telegram_profile_links VALUES(?,1)", [(i,) for i in range(2, family_size + 1)])
+    def family_price(profile_id, db_path=None):
+        members = connection.execute("SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?", (profile_id, profile_id)).fetchone()[0]
+        return 200 * (1 + members)
     namespace = {
         "database_adapter": SimpleNamespace(connect=lambda _path, timeout: connection),
         "config": SimpleNamespace(DB_PATH="unused", PAYMENT_PRICE=150, SUBSCRIPTION_DAYS=30),
         "time": SimpleNamespace(time=lambda: now_seconds),
         "html": html,
-        "billing": billing,
+        "billing": SimpleNamespace(expected_payment_amount=family_price, telegram_identity_label=billing.telegram_identity_label),
         "logger": SimpleNamespace(warning=Mock(), debug=Mock()),
         "normalize_username": __import__("user_identity").normalize_username,
         "latest_trusted_telegram_usernames": __import__("user_identity").latest_trusted_telegram_usernames,
@@ -322,6 +327,8 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
     first = namespace["subscription_report_text"](1)
     last = namespace["subscription_report_text"](63)
     assert "Страница 1/63" in first
+    owner_card = first.split("━━━━━━━━━━━━━━━━━━", 1)[0]
+    assert f" · {family_size * 200} ₽" in owner_card
     assert first.count('<a href="https://t.me/') == 8
     assert "Страница 63/63" in last
     assert last.count('<a href="https://t.me/') == 4
@@ -414,7 +421,7 @@ def test_bot_crm_list_unpacks_comment_and_displays_comment_fallback():
         def __exit__(self, *_args):
             return False
 
-        def execute(self, _sql):
+        def execute(self, _sql, _params=()):
             return Rows()
 
     class Builder:
@@ -504,3 +511,5 @@ def test_identity_migration_recovers_handle_from_latest_direct_telegram_update_o
     assert users[1]["username"] is None
     assert users[0]["notes"] == "kiryan_avd"
     assert users[1]["notes"] == "id_693845923"
+
+

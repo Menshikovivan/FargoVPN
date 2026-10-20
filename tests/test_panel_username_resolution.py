@@ -433,12 +433,16 @@ def test_3xui_merge_never_copies_synthetic_name_into_real_telegram_profile(tmp_p
         "enable": True, "up": 0, "down": 0, "total": 0, "sub_id": "real-sub",
         "last_online_ts": 0, "comment": comment,
     }]}, db_path=str(db_path))
-    assert changed > 0
+    # Q6-A: matching email does not justify discarding a conflicting UUID/subId.
+    # Keep both business profiles for operator review, and never copy the
+    # placeholder's synthetic Telegram-looking username into the real account.
+    assert changed == 0
     with sqlite3.connect(db_path) as connection:
         users = connection.execute(
             "SELECT tg_id,username,uuid,email,sub_id,notes FROM users ORDER BY tg_id"
         ).fetchall()
-    assert users == [(tg_id, None, "real-uuid", email, "real-sub", comment)]
+    assert users == [(-9180284364, "id_1180284364", "legacy-uuid", email, "legacy-sub", comment),
+                     (tg_id, None, "real-uuid", email, "real-sub", comment)]
 
     package = sys.modules.get("services")
     sys.modules.pop("services.xui_api", None)

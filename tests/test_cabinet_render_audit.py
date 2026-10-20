@@ -50,6 +50,7 @@ def cabinet_functions(sub_url='https://example.test/sub'):
             telegram_identity_label=lambda tg_id, username, display_name, comment='':
                 get_display_name({'tg_id': tg_id, 'username': username, 'display_name': display_name, 'notes': comment}),
             subscription_label=lambda user, now_ms: 'Без подписки',
+            has_subscription=lambda _user: False,
             subscription_status_tone=lambda label: (
                 'bad' if 'отключён' in str(label).casefold()
                 else 'warn' if any(marker in str(label).casefold() for marker in (

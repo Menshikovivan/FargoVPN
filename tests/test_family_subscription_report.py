@@ -29,12 +29,21 @@ def _report_function(connection, logger=None):
         if isinstance(item, ast.FunctionDef) and item.name == "subscription_report_text"
     )
     node.decorator_list = []
+    def fixture_price(profile_id, db_path=None):
+        # This renderer test owns its storage boundary; never use runtime PG.
+        if not isinstance(connection, sqlite3.Connection):
+            return 150
+        custom = connection.execute("SELECT custom_payment_price FROM users WHERE tg_id=?", (profile_id,)).fetchone()
+        if custom and custom[0] is not None:
+            return int(custom[0])
+        count = connection.execute("SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?", (profile_id, profile_id)).fetchone()[0]
+        return 150 * (1 + int(count))
     namespace = {
         "database_adapter": SimpleNamespace(connect=lambda _path, timeout: connection),
         "config": SimpleNamespace(DB_PATH="unused", PAYMENT_PRICE=150),
         "time": SimpleNamespace(time=lambda: NOW_SECONDS),
         "html": html,
-        "billing": billing,
+        "billing": SimpleNamespace(telegram_identity_label=billing.telegram_identity_label, expected_payment_amount=fixture_price),
         "logger": logger or SimpleNamespace(warning=Mock(), debug=Mock()),
         "normalize_username": normalize_username,
         "latest_trusted_telegram_usernames": latest_trusted_telegram_usernames,
@@ -377,6 +386,8 @@ def test_subscription_report_recovers_same_id_telegram_handles_and_links_by_user
     assert "Брат Мишы Авхадеева" in report
     assert '<a href="https://t.me/kiryan_avd"' in report and "<b>@kiryan_avd</b>" in report
     assert '<a href="https://t.me/AnnaSam111"' in report and "<b>@AnnaSam111</b>" in report
-    assert "tg://user?id=" not in report
+    assert 'href="tg://user?id=1180284364"' in report
+    assert 'href="tg://user?id=422172767"' not in report
+    assert 'href="tg://user?id=693845923"' not in report
     assert 'href="https://t.me/Брат' not in report
     connection.close()

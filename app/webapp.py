@@ -40,7 +40,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
 import config
-from services import billing
+from services import billing, subscriptions, privacy
 import auth_security
 import cabinet_service
 import webauthn_service
@@ -347,7 +347,10 @@ async def response_security_headers(request: Request, call_next):
         fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
         origin = request.headers.get("origin", "").strip()
         host = request.headers.get("host", "").strip().lower()
-        origin_host = urlsplit(origin).netloc.lower() if origin else ""
+        try:
+            origin_host = urlsplit(origin).netloc.lower() if origin else ""
+        except ValueError:
+            return PlainTextResponse("Некорректный Origin", status_code=403)
         if fetch_site == "cross-site" or (origin_host and host and origin_host != host):
             if request.url.path.startswith(("/api/", "/panel/api/")) or "application/json" in request.headers.get("accept", ""):
                 return JSONResponse({"detail": "Межсайтовый запрос отклонён"}, status_code=403)
@@ -1081,14 +1084,27 @@ def _panel_user_label(tg_id: int, username: Any, display_name: Any = "", comment
     )
 
 
-def _telegram_profile_link(
-    tg_id: Any, label: Any, css_class: str = "telegram-profile-link", username: Any = None
-) -> str:
-    """Link a user only by a validated Telegram username, never by numeric ID.
+def _panel_user_link(tg_id: Any, label: Any, css_class: str = "telegram-profile-link", username: Any = None) -> str:
+    """Use the stable numeric identity for primary names inside the panel."""
+    safe_label = html.escape(str(label or "Пользователь"))
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        return safe_label
+    if numeric_id == 0 or abs(numeric_id) > 9_007_199_254_740_991:
+        return safe_label
+    return f'<a class="{html.escape(css_class, quote=True)}" href="/users/id/{numeric_id}">{safe_label}</a>'
 
-    Telegram Bot API numeric-ID deep links do not reliably open a conversation
-    unless the target is already known to the client. An operator comment or
-    display name is not a username and must never be placed into a t.me URL.
+
+def _telegram_profile_link(
+    tg_id: Any, label: Any, css_class: str = "telegram-profile-link", username: Any = None,
+    *, verified_id: bool = False,
+) -> str:
+    """Render a secondary Telegram link from a validated handle.
+
+    A verified incoming Telegram identity may use the positive numeric-ID
+    fallback; primary panel names use _panel_user_link instead. Operator notes
+    and display names are never treated as Telegram usernames.
     """
     try:
         numeric_id = int(tg_id or 0)
@@ -1096,8 +1112,13 @@ def _telegram_profile_link(
         numeric_id = 0
     safe_label = html.escape(str(label or "Пользователь"))
     handle = normalize_username(username, numeric_id)
-    if numeric_id <= 0 or not handle:
+    if numeric_id <= 0 or numeric_id > 9_007_199_254_740_991:
         return safe_label
+    if not handle:
+        if not verified_id:
+            return safe_label
+        return (f'<a class="{html.escape(css_class, quote=True)}" '
+                f'href="tg://user?id={numeric_id}" aria-label="Открыть профиль Telegram">{safe_label}</a>')
     safe_handle = html.escape(handle, quote=True)
     return (
         f'<a class="{html.escape(css_class, quote=True)}" '
@@ -1384,11 +1405,10 @@ def _cabinet_personal_url(tg_id: int, sub_id: str = "") -> str:
 
 
 def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
-    expiry = int(user.get("expiry_time") or 0)
+    expiry = int((user.get("family_owner_expiry_time") if user.get("family_subscription") else user.get("expiry_time")) or 0)
     now_ms = int(time.time() * 1000)
-    disabled = not bool(user.get("enable", True))
     status_label = user_subscription_label(user, now_ms)
-    has_vpn_subscription = any(str(user.get(key) or "").strip() for key in ("uuid", "email", "sub_id"))
+    has_vpn_subscription = billing.has_subscription(user)
     if not has_vpn_subscription:
         expiry_text, remaining = status_label, "—"
     elif expiry <= 0:
@@ -1400,12 +1420,7 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     used = up + down
     quota = "Без лимита" if total <= 0 else f"{bytes_to_gb(max(0, total-used))} GB осталось"
     online = bool(user.get("online"))
-    if status_label == "Не зарегистрирован": status, status_cls = status_label, "warn"
-    elif status_label == "Без подписки": status, status_cls = status_label, "warn"
-    elif disabled: status, status_cls = "Отключена", "bad"
-    elif expiry > 0 and expiry <= now_ms: status, status_cls = "Истекла", "warn"
-    elif expiry <= 0 and billing.has_subscription(user): status, status_cls = "Бессрочная", "good"
-    else: status, status_cls = "Активна", "good"
+    status, status_cls = status_label, billing.subscription_status_tone(status_label)
     user_tg_id = int(user.get("tg_id") or 0)
     # Resolve from the canonical record only. The `username` function argument
     # is kept for call compatibility but may already be a formatted comment and
@@ -1979,6 +1994,19 @@ def login_post(request: Request, username: str = Form(), password: str = Form())
 
 @app.get("/logout")
 def logout(request: Request):
+    require_auth(request)
+    token = html.escape(session_csrf_token(request), quote=True)
+    body = (f'<div class="card"><h1>Выход из панели</h1>'
+            f'<form method="post" action="{html.escape(public_path("/logout"), quote=True)}">'
+            f'<input type="hidden" name="csrf_token" value="{token}">'
+            '<button type="submit">Выйти</button></form></div>')
+    return HTMLResponse(page(request, "Выход", body))
+
+
+@app.post("/logout")
+async def logout_post(request: Request):
+    form = await request.form()
+    require_auth(request, str(form.get("csrf_token") or ""))
     request.session.clear()
     return RedirectResponse(public_path("/login"), 303)
 
@@ -2894,13 +2922,14 @@ def users_page(
     try:
         with database_adapter.connect(config.DB_PATH, timeout=10) as _conn:
             _conn.row_factory = sqlite3.Row
-            _ref_rows = _conn.execute("SELECT u.tg_id,u.referred_by_tg_id,COALESCE(r.username,'') AS referred_by_username,COALESCE(u.telegram_available,1) AS telegram_available,u.telegram_unavailable_reason,u.registered_at,u.registration_status,u.custom_payment_price FROM users u LEFT JOIN users r ON r.tg_id=u.referred_by_tg_id WHERE u.tg_id>0").fetchall()
+            _ref_rows = _conn.execute("SELECT u.tg_id,u.referred_by_tg_id,COALESCE(r.username,'') AS referred_by_username,COALESCE(r.notes,'') AS referred_by_notes,COALESCE(u.telegram_available,1) AS telegram_available,u.telegram_unavailable_reason,u.registered_at,u.registration_status,u.custom_payment_price FROM users u LEFT JOIN users r ON r.tg_id=u.referred_by_tg_id WHERE u.tg_id>0").fetchall()
         _ref_map = {int(r['tg_id']): dict(r) for r in _ref_rows}
         for _user in users:
             _extra = _ref_map.get(int(_user.get('tg_id') or 0), {})
             _user['registered_at'] = _extra.get('registered_at') or _user.get('registered_at') or ''
             _user['referred_by_tg_id'] = int(_extra.get('referred_by_tg_id') or 0)
             _user['referred_by_username'] = str(_extra.get('referred_by_username') or '')
+            _user['referred_by_notes'] = str(_extra.get('referred_by_notes') or '')
             _user['telegram_available'] = bool(_extra.get('telegram_available', 1))
             _user['telegram_unavailable_reason'] = str(_extra.get('telegram_unavailable_reason') or '')[:240]
             _user['registration_status'] = str(_extra.get('registration_status') or 'active')
@@ -3005,8 +3034,8 @@ def users_page(
         referred_by_username = str(item.get("referred_by_username") or "").strip()
         referral_note = ""
         if referred_by_tg_id > 0:
-            ref_label = f"@{referred_by_username}" if referred_by_username else f"TG {referred_by_tg_id}"
-            referral_note = f" · пригласил: {html.escape(ref_label)}"
+            ref_label = _panel_user_label(referred_by_tg_id, referred_by_username, comment=item.get("referred_by_notes"))
+            referral_note = " · пригласил: " + _panel_user_link(referred_by_tg_id, ref_label)
         search_blob = " ".join([str(display_name), str(item.get("email") or ""), str(item.get("username") or ""), "@" + str(item.get("username") or "").lstrip("@"), str(tg_id), referred_by_username, str(referred_by_tg_id)]).casefold()
         quota_value = item.get("quota_remaining")
         try:
@@ -3032,7 +3061,7 @@ def users_page(
             telegram_badge += f'<span class="muted" title="{html.escape(telegram_reason, quote=True)}">{html.escape(telegram_reason[:90])}</span>'
         cards.append(
             f'''<article class="user-row" data-user-tg-id="{tg_id}" data-user-registered="{html.escape(registered_day, quote=True)}" data-user-search="{html.escape(search_blob, quote=True)}" data-user-status="{row_status}" data-user-online="{1 if item.get('online') else 0}" data-user-remaining="{remaining_sort}" data-user-last-online="{int(item.get('last_online_ts') or 0)}" data-user-traffic="{int(item.get('traffic_used') or 0)}" data-user-quota="{html.escape(quota_sort, quote=True)}" data-user-name="{html.escape(display_name.casefold(), quote=True)}">
-<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{_telegram_profile_link(tg_id, display_name, username=item.get("username"))}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
+<div class="user-main"><div class="avatar avatar-{(tg_id % 5) + 1}">{html.escape((display_name.strip('@ ')[:2] or '?').upper())}</div><div class="user-main-copy"><div class="user-name-line"><strong>{_panel_user_link(tg_id, display_name, username=item.get("username"))}</strong></div><div class="meta">TG: {tg_id if tg_id > 0 else "не привязан"} · {html.escape(str(item.get("email") or "—"))}{referral_note}</div></div></div>
 <div class="user-status">{user_subscription_badge(payment_status)}{telegram_badge}<span class="muted">{html.escape(fmt_last_online(item.get("last_online_ts"), item.get("online", False)))}</span></div>
 <div class="user-stat"><small>Подписка</small><b>{html.escape(payment_status)}</b><span>{remaining_label(item["expiry_time"], now_ms) if billing.has_subscription(item) else "—"}</span></div>
 <div class="user-stat"><small>Трафик</small><b>{fmt_bytes(item["traffic_used"])}</b><span>↑ {fmt_bytes(item["up"])} · ↓ {fmt_bytes(item["down"])}</span></div>
@@ -3359,12 +3388,14 @@ def user_detail_page(request: Request, tg_id: int):
     try:
         with database() as connection:
             referral_owner_row = connection.execute(
-                "SELECT username FROM users WHERE tg_id=?",
+                "SELECT username,notes FROM users WHERE tg_id=?",
                 (int(row.get("referred_by_tg_id") or 0),),
             ).fetchone() if int(row.get("referred_by_tg_id") or 0) > 0 else None
         row["referred_by_username"] = str(referral_owner_row[0] or "") if referral_owner_row else ""
+        row["referred_by_notes"] = str(referral_owner_row[1] or "") if referral_owner_row else ""
     except Exception:
         row["referred_by_username"] = ""
+        row["referred_by_notes"] = ""
     try:
         referral_stat = referral_rewards.referral_stats(int(tg_id), db_path=config.DB_PATH)
     except Exception as error:
@@ -3384,12 +3415,12 @@ def user_detail_page(request: Request, tg_id: int):
             (int(tg_id), int(tg_id)),
         ).fetchall()
     linked_html = ''.join(
-        f'<li>{_telegram_profile_link(int(x[0]), billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")), "telegram-inline-link", username=x[1])} · TG {int(x[0])}</li>'
+        f'<li>{_panel_user_link(int(x[0]), billing.telegram_identity_label(int(x[0]), str(x[1] or ""), str(x[2] or ""), str(x[3] or "")), "telegram-inline-link", username=x[1])} · TG {int(x[0])}</li>'
         for x in linked_rows
     ) or '<li>Дополнительных аккаунтов нет</li>'
-    price_value = str(row.get("custom_payment_price") or "")
+    price_value = "" if row.get("custom_payment_price") is None else str(row["custom_payment_price"])
     family_link_html = f'<div class="setting"><label>Семейные Telegram аккаунты</label><p>Каждый аккаунт должен самостоятельно открыть одноразовую ссылку и пройти проверку PIN. Аккаунт с собственной VPN подпиской привязать нельзя.</p><ul>{linked_html}</ul><form method="post" action="/users/id/{int(tg_id)}/family-link"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><button class="secondary" type="submit">Создать ссылку привязки на 30 минут</button></form></div>'
-    billing_html = f'<div class="card" style="margin-top:14px"><h2>Оплата и семейный тариф</h2><p>Статус: <b>{html.escape(profile_status)}</b> · Telegram аккаунтов: <b>{profile_links}</b> · сумма за период: <b>{profile_price} ₽</b></p><p>Индивидуальная сумма заменяет автоматический тариф. Пустое поле снова включает расчёт по числу аккаунтов.</p><form method="post" action="/users/id/{int(tg_id)}/payment-price"><div class="setting"><label for="custom-payment-price">Индивидуальная сумма, ₽</label><input id="custom-payment-price" name="amount" type="number" min="1" max="100000000" step="1" value="{html.escape(price_value, quote=True)}" placeholder="Автоматически"></div><button>Сохранить сумму</button></form></div>' + family_link_html
+    billing_html = f'<div class="card" style="margin-top:14px"><h2>Оплата и семейный тариф</h2><p>Статус: <b>{html.escape(profile_status)}</b> · Telegram аккаунтов: <b>{profile_links}</b> · сумма за период: <b>{profile_price} ₽</b></p><p>Индивидуальная сумма заменяет автоматический тариф. Пустое поле снова включает расчёт по числу аккаунтов.</p><form method="post" action="/users/id/{int(tg_id)}/payment-price"><div class="setting"><label for="custom-payment-price">Индивидуальная сумма, ₽</label><input id="custom-payment-price" name="amount" type="number" min="{0 if row.get("custom_payment_price") == 0 else 1}" max="100000000" step="1" value="{html.escape(price_value, quote=True)}" placeholder="Автоматически"></div><button>Сохранить сумму</button></form></div>' + family_link_html
     # Opening the conversation is the read action. Clear the compact counter
     # before rendering even if an imported/older database contains a stale
     # cursor. A message committed after this transaction is counted normally.
@@ -3423,11 +3454,10 @@ def user_detail_page(request: Request, tg_id: int):
             if is_generated_identity_comment(live_comment, tg_id, row.get("email")):
                 live_comment = ""
             if live_comment:
-                xui_comment = live_comment
-                if live_comment != str(row.get("notes") or ""):
+                if live_comment != str(row.get("remote_comment") or ""):
                     with database() as connection:
-                        connection.execute("UPDATE users SET notes=? WHERE tg_id=?", (live_comment, int(tg_id)))
-                    row["notes"] = live_comment
+                        connection.execute("UPDATE users SET remote_comment=? WHERE tg_id=?", (live_comment, int(tg_id)))
+                    row["remote_comment"] = live_comment
         except Exception as error:
             LOGGER.warning("Не удалось получить комментарий клиента 3x-ui TG ID %s: %s", tg_id, error)
     xui_extra = fetch_client_extra_sync(str(row.get("email") or "")) if str(row.get("email") or "").strip() else {"traffic": {}, "ips": [], "error": ""}
@@ -3470,7 +3500,7 @@ def user_detail_page(request: Request, tg_id: int):
     display_label = _panel_user_label(
         tg_id, row.get("username"), row.get("display_name"), xui_comment or row.get("notes")
     )
-    display_label_html = _telegram_profile_link(tg_id, display_label, username=row.get("username"))
+    display_label_html = _panel_user_link(tg_id, display_label, username=row.get("username"))
     body = f'''<header><div><h1>{display_label_html}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
 {billing_html}
 <div class="chat-layout"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
@@ -3478,7 +3508,7 @@ def user_detail_page(request: Request, tg_id: int):
 <div id="chat-window" class="chat-window">{event_html or '<div class="empty-state">История пока пуста. Новые сообщения и действия появятся здесь.</div>'}</div>
 <form id="chat-form" class="chat-compose" method="post" action="/users/{tg_id}/message" enctype="multipart/form-data"><div class="chat-compose-main"><textarea name="message" maxlength="4096" {'disabled' if disabled else ''} placeholder="Сообщение или подпись к фото/видео"></textarea><label class="chat-attachment"><span>＋ Фото или видео</span><input name="media" type="file" accept="image/*,video/*" {'disabled' if disabled else ''}><small>До {media_limit} МБ; для медиа подпись — до 1024 символов.</small></label></div><button {'disabled' if disabled else ''}>Отправить</button></form></div>
 <div class="card"><h2>Идентификация</h2><div class="setting"><label>Проверка Telegram по нику</label><div class="actions"><button type="button" class="secondary" id="telegram-lookup-button">🔎 Найти Telegram ID по @username</button>{('<button type="button" class="secondary" id="telegram-link-button">🔗 Запросить привязку через Telegram</button>' if tg_id <= 0 else '')}</div><div id="telegram-lookup-result" class="muted" style="margin-top:10px;white-space:pre-wrap"></div><div id="telegram-link-result" class="notice" style="display:none;margin-top:10px;word-break:break-all"></div></div><form method="post" action="/users/id/{tg_id}/identity"><div class="setting"><label>Telegram ID</label><input name="new_tg_id" type="number" min="1" value="{tg_id if tg_id > 0 else ''}" required></div><div class="setting"><label>Telegram @username</label><input name="username" value="{html.escape(str(row.get('username') or ''))}" maxlength="100"></div><label class="check-row"><input type="checkbox" name="overwrite_positive" value="1"> Подтверждаю замену существующего положительного ID</label><button>Сохранить и синхронизировать 3x-ui</button></form>
-<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">{xui_extra_html}<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Комментарий пользователя</h2><span class="badge">Синхронизируется с 3x-ui</span></div><p class="muted">Введите имя или произвольный комментарий. Telegram ID, @username и привязка остаются отдельными и не изменяются.</p><form method="post" action="/users/id/{tg_id}/comment"><div class="setting"><label>Комментарий</label><input name="comment" value="{html.escape(xui_comment, quote=True)}" maxlength="255" placeholder="Например: Иван, клиент с Авито" autocomplete="off"></div><button>Сохранить комментарий</button></form></div><div class="setting"><label>Email 3x-ui</label><div class="code">{html.escape(str(row.get('email') or '—'))}</div></div><div class="setting"><label>UUID</label><div class="code">{html.escape(str(row.get('uuid') or '—'))}</div></div><div class="setting"><label>Источник привязки</label><div>{html.escape(identity_source)}</div></div><div class="setting"><label>Ключ регистрации</label><div class="code">{html.escape(str(row.get('referred_by_code') or '—'))}</div></div><div class="setting"><label>Зарегистрирован по приглашению</label><div>{html.escape((('@' + str(row.get('referred_by_username'))) if row.get('referred_by_username') else ('TG ID ' + str(row.get('referred_by_tg_id'))) if row.get('referred_by_tg_id') else 'Нет данных'))}</div></div><div class="setting"><label>Собственный ключ приглашения</label><div class="code">{html.escape(str(row.get('referral_code') or '—'))}</div></div><div class="setting"><label>Дата регистрации</label><div>{html.escape(str(row.get('registered_at') or '—'))}</div></div><div class="setting"><label>Последнее обновление</label><div>{html.escape(str(row.get('identity_updated_at') or '—'))}</div></div>{referral_html}<div class="card" style="margin-top:14px"><div class="section-title"><h2>Назначить существующий клиент 3x-ui</h2><span class="badge warn">Администратор</span></div><p class="muted">Выберите локального пользователя FargoVPN и существующий клиент 3x-ui. Новый client не создаётся: UUID, subId, срок и текущая подписка выбранного client сохраняются. Даже если client уже занят другим Telegram ID, его можно передать выбранному пользователю.</p><div class="two"><div class="setting"><label>Пользователь FargoVPN</label><select id="bind-target-user">{bind_user_options or f'<option value="{tg_id}">{html.escape(str(row.get("username") or "Без имени"))} · TG {tg_id}</option>'}</select></div><div class="setting"><label>Поиск клиента 3x-ui</label><input id="bind-xui-search" type="search" placeholder="Email, UUID, имя или TG ID"></div></div><div class="actions"><button type="button" class="secondary" id="bind-xui-search-button">Найти клиентов</button></div><div id="bind-xui-result" class="xui-bind-results muted" style="margin-top:10px">Нажмите «Найти клиентов», чтобы получить актуальный список из 3x-ui.</div><form id="bind-xui-form" method="post" action="{html.escape(xui_bind_url, quote=True)}" style="display:none;margin-top:12px"><input type="hidden" name="email" id="bind-xui-email"><input type="hidden" name="new_tg_id" id="bind-xui-target"><input type="hidden" name="username" id="bind-xui-username" value="{html.escape(str(row.get('username') or ''), quote=True)}"><input type="hidden" name="confirm" value="1"><div class="notice" id="bind-xui-confirm-text"></div><button type="submit">Подтвердить назначение подписки</button></form></div></div></div>'''
+<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">{xui_extra_html}<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Комментарий пользователя</h2><span class="badge">Синхронизируется с 3x-ui</span></div><p class="muted">Введите имя или произвольный комментарий. Telegram ID, @username и привязка остаются отдельными и не изменяются.</p><form method="post" action="/users/id/{tg_id}/comment"><div class="setting"><label>Комментарий</label><input name="comment" value="{html.escape(xui_comment, quote=True)}" maxlength="255" placeholder="Например: Иван, клиент с Авито" autocomplete="off"></div><button>Сохранить комментарий</button></form></div><div class="setting"><label>Email 3x-ui</label><div class="code">{html.escape(str(row.get('email') or '—'))}</div></div><div class="setting"><label>UUID</label><div class="code">{html.escape(str(row.get('uuid') or '—'))}</div></div><div class="setting"><label>Источник привязки</label><div>{html.escape(identity_source)}</div></div><div class="setting"><label>Ключ регистрации</label><div class="code">{html.escape(str(row.get('referred_by_code') or '—'))}</div></div><div class="setting"><label>Зарегистрирован по приглашению</label><div>{_panel_user_link(row.get("referred_by_tg_id"), _panel_user_label(int(row.get("referred_by_tg_id") or 0), row.get("referred_by_username"), comment=row.get("referred_by_notes"))) if row.get("referred_by_tg_id") else "Нет данных"}</div></div><div class="setting"><label>Собственный ключ приглашения</label><div class="code">{html.escape(str(row.get('referral_code') or '—'))}</div></div><div class="setting"><label>Дата регистрации</label><div>{html.escape(str(row.get('registered_at') or '—'))}</div></div><div class="setting"><label>Последнее обновление</label><div>{html.escape(str(row.get('identity_updated_at') or '—'))}</div></div>{referral_html}<div class="card" style="margin-top:14px"><div class="section-title"><h2>Назначить существующий клиент 3x-ui</h2><span class="badge warn">Администратор</span></div><p class="muted">Выберите локального пользователя FargoVPN и существующий клиент 3x-ui. Новый client не создаётся: UUID, subId, срок и текущая подписка выбранного client сохраняются. Если у обоих пользователей уже есть самостоятельные профили, назначение останавливается для проверки администратора; автоматического объединения нет.</p><div class="two"><div class="setting"><label>Пользователь FargoVPN</label><select id="bind-target-user">{bind_user_options or f'<option value="{tg_id}">{html.escape(str(row.get("username") or "Без имени"))} · TG {tg_id}</option>'}</select></div><div class="setting"><label>Поиск клиента 3x-ui</label><input id="bind-xui-search" type="search" placeholder="Email, UUID, имя или TG ID"></div></div><div class="actions"><button type="button" class="secondary" id="bind-xui-search-button">Найти клиентов</button></div><div id="bind-xui-result" class="xui-bind-results muted" style="margin-top:10px">Нажмите «Найти клиентов», чтобы получить актуальный список из 3x-ui.</div><form id="bind-xui-form" method="post" action="{html.escape(xui_bind_url, quote=True)}" style="display:none;margin-top:12px"><input type="hidden" name="email" id="bind-xui-email"><input type="hidden" name="new_tg_id" id="bind-xui-target"><input type="hidden" name="username" id="bind-xui-username" value="{html.escape(str(row.get('username') or ''), quote=True)}"><input type="hidden" name="confirm" value="1"><div class="notice" id="bind-xui-confirm-text"></div><button type="submit">Подтвердить назначение подписки</button></form></div></div></div>'''
     script = f'''<script>
 (function(){{
 const b=document.getElementById('telegram-lookup-button'),r=document.getElementById('telegram-lookup-result');
@@ -3547,6 +3577,7 @@ if(bindSearchButton)bindSearchButton.addEventListener('click',async()=>{{
   try{{const response=await fetch(bindEndpoint+(q?'?q='+encodeURIComponent(q):''),{{cache:'no-store',credentials:'same-origin',headers:{{Accept:'application/json'}}}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.detail||'Ошибка 3x-ui');renderBindItems(data.items||[]);if(data.stale&&data.snapshot_error)bindResult.insertAdjacentHTML('beforeend','<div class="muted" style="width:100%">Снимок помечен как устаревший: '+String(data.snapshot_error).replace(/[<>&]/g,'')+'</div>');}}catch(error){{bindResult.textContent=error.message||'Не удалось получить список клиентов';}}finally{{bindSearchButton.disabled=false;}}
 }});
 }})();</script>'''
+    body += f'<section class="card" style="margin-top:14px"><h2>Удаление персональных данных</h2><p>Отдельное действие удаляет текущие локальные данные и отзывает доступ VPN. Обычное удаление сохраняет историю.</p><a class="button danger" href="/users/id/{int(tg_id)}/privacy">Просмотреть условия и подтвердить ID</a></section>'
     return page(request, "Пользователь", body, "users", script)
 
 
@@ -3556,11 +3587,15 @@ def user_payment_price_update(request: Request, tg_id: int, amount: str = Form("
     try:
         clean = str(amount or "").strip()
         parsed = None if not clean else int(clean)
-        if parsed is not None and not 1 <= parsed <= 100_000_000:
+        if parsed is not None and not 0 <= parsed <= 100_000_000:
             raise ValueError
     except (TypeError, ValueError):
         raise HTTPException(400, "Введите сумму от 1 до 100 000 000 рублей или оставьте поле пустым")
     with database() as connection:
+        if parsed == 0:
+            existing = connection.execute("SELECT custom_payment_price FROM users WHERE tg_id=? FOR UPDATE", (int(tg_id),)).fetchone()
+            if existing is None or existing[0] is None or existing[0] != 0:
+                raise HTTPException(400, "Введите сумму от 1 до 100 000 000 рублей или оставьте поле пустым")
         connection.execute("UPDATE users SET custom_payment_price=? WHERE tg_id=?", (parsed, int(tg_id)))
     audit(str(request.session.get("user", "web")), "user_payment_price_update", f"{tg_id}: {parsed if parsed is not None else 'automatic'}")
     return RedirectResponse(public_path(f"/users/id/{tg_id}"), 303)
@@ -4205,7 +4240,8 @@ def messages_page(
             tid, item.get("username"), item.get("display_name"), item.get("notes")
         )
         telegram_link = _telegram_profile_link(
-            tid, "Telegram ↗", "message-user-telegram", username=item.get("username")
+            tid, "Telegram ↗", "message-user-telegram", username=item.get("username"),
+            verified_id=int(item.get("incoming_events") or 0) > 0,
         )
         user_rows.append(
             '<div class="message-user-row %s%s" data-tg-id="%s">'
@@ -4242,7 +4278,7 @@ def messages_page(
         user_label_text = _panel_user_label(
             tid, event.get("display_username"), event.get("display_name"), event.get("notes")
         )
-        user_label = _telegram_profile_link(tid, user_label_text, "telegram-inline-link", username=event.get("display_username"))
+        user_label = _panel_user_link(tid, user_label_text, "telegram-inline-link", username=event.get("display_username"))
         at = html.escape(fmt_event_timestamp(event.get("created_at")))
         error_note = html.escape(str(event.get("delivery_error") or ""))
         status_class = "failed" if status == "failed" else ""
@@ -4277,6 +4313,7 @@ def messages_page(
         _telegram_profile_link(
             selected, "Открыть Telegram ↗", "button secondary small",
             username=(selected_user.get("username") if selected_user else None),
+            verified_id=any(int(item.get("tg_id") or 0) == selected and int(item.get("incoming_events") or 0) > 0 for item in participants),
         )
         if selected > 0 else ""
     )
@@ -4304,6 +4341,7 @@ const composeSend=document.getElementById('messages-compose-send');
 const composeStatus=document.getElementById('messages-compose-status');
 const composeRetry=document.getElementById('messages-compose-retry');
 const messagesPath=__MESSAGES_PATH__;
+const userCardPath=__USER_CARD_PATH__;
 let lastFailedPayload=null;
 const selected=Number({selected})||0;
 const activeDirection='{direction}';
@@ -4316,8 +4354,8 @@ const CHAT_OVERLAP=Math.max(1,Math.min(100,Number(chat?.dataset.overlapWindow)||
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
 function updateUnread(snapshot){{const total=Math.max(0,Number(snapshot?.total)||0);document.querySelectorAll('[data-unread-total]').forEach(node=>{{node.textContent=total?String(total):'';node.hidden=!total;}});const map=unreadMap(snapshot?.items);window.__fargovpnUnreadMap=map;if(!list)return;list.querySelectorAll('.message-user-row').forEach(row=>{{const tid=Number(row.dataset.tgId)||0;const n=map.get(tid)||0;let badge=row.querySelector('.message-unread-badge');if(n){{if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(n);row.classList.add('has-unread');}}else{{badge?.remove();row.classList.remove('has-unread');}}}});}}
-function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{{1,100}}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id'&&!/^id_?[0-9]+$/i.test(username);const comment=String(item.notes||item.comment||'').replace(/[\x00-\x1f\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('div');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.innerHTML='<a class="message-user-open" href="'+messagesPath+'?tg_id='+encodeURIComponent(tid)+'"><span class="message-user-main"><strong></strong><span>#'+tid+'</span></span></a><a class="message-user-telegram" title="Открыть этого пользователя в Telegram">Telegram ↗</a><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const telegramLink=row.querySelector('.message-user-telegram');if(telegramLink){{if(realUsername){{telegramLink.href='https://t.me/'+encodeURIComponent(username);telegramLink.target='_blank';telegramLink.rel='noopener noreferrer';telegramLink.removeAttribute('aria-disabled');}}else{{telegramLink.removeAttribute('href');telegramLink.setAttribute('aria-disabled','true');telegramLink.title='У пользователя нет подтверждённого Telegram username';}}}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
-function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id||selected)||0;const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));const whoUsername=String(item.display_username||'').trim().replace(/^@/,'');const validWhoUsername=/^[A-Za-z0-9_]{{1,100}}$/.test(whoUsername)&&!/^[0-9]+$/.test(whoUsername)&&!['none','null','undefined','id'].includes(whoUsername.toLowerCase())&&!/^id_?[0-9]+$/i.test(whoUsername);if(whoId>0&&validWhoUsername){{const who=document.createElement('a');who.className='telegram-inline-link';who.href='https://t.me/'+encodeURIComponent(whoUsername);who.target='_blank';who.rel='noopener noreferrer';who.textContent=whoLabel;who.title='Открыть переписку с пользователем в Telegram';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
+function upsertDialog(item){{if(!list||!item||!Number.isSafeInteger(Number(item.tg_id))||!(Number(item.tg_id)>0))return;const tid=Number(item.tg_id);let row=list.querySelector('.message-user-row[data-tg-id="'+tid+'"]');const active=tid===selected;const unread=(window.__fargovpnUnreadMap?.get(tid))||0;const username=String(item.username||'').trim().replace(/^@/,'');const realUsername=/^[A-Za-z0-9_]{{1,100}}$/.test(username)&&!/^[0-9]+$/.test(username)&&username.toLowerCase()!=='none'&&username.toLowerCase()!=='null'&&username.toLowerCase()!=='undefined'&&username.toLowerCase()!=='id'&&!/^id_?[0-9]+$/i.test(username);const comment=String(item.notes||item.comment||'').replace(/[\\x00-\\x1f\\x7f]/g,' ').trim();const label=String(item.display_label||'').trim()||(realUsername?'@'+username:(comment||('ID '+tid)));if(!row){{row=document.createElement('div');row.className='message-user-row'+(active?' active':'');row.dataset.tgId=String(tid);row.innerHTML='<a class="message-user-open" href="'+messagesPath+'?tg_id='+encodeURIComponent(tid)+'"><span class="message-user-main"><strong></strong><span>#'+tid+'</span></span></a><a class="message-user-telegram" title="Открыть этого пользователя в Telegram">Telegram ↗</a><small></small>';const empty=list.querySelector('.empty-state');if(empty)empty.remove();const emptyText=list.querySelector(':scope > .muted');if(emptyText)emptyText.remove();list.prepend(row);}}const telegramLink=row.querySelector('.message-user-telegram');if(telegramLink){{if(realUsername){{telegramLink.href='https://t.me/'+encodeURIComponent(username);telegramLink.target='_blank';telegramLink.rel='noopener noreferrer';telegramLink.removeAttribute('aria-disabled');}}else if(Number(item.incoming_events)>0){{telegramLink.href='tg://user?id='+encodeURIComponent(tid);telegramLink.removeAttribute('target');telegramLink.removeAttribute('rel');telegramLink.removeAttribute('aria-disabled');telegramLink.title='Открыть профиль Telegram';}}else{{telegramLink.removeAttribute('href');telegramLink.removeAttribute('target');telegramLink.removeAttribute('rel');telegramLink.setAttribute('aria-disabled','true');telegramLink.title='Нет подтверждённой Telegram личности';}}}}const strong=row.querySelector('strong');if(strong)strong.textContent=label;const small=row.querySelector('small');if(small)small.textContent=String(item.incoming_events||0)+' входящих · '+String(item.outgoing_events||0)+' исходящих';row.title=String(item.last_event_at||'');if(unread){{let badge=row.querySelector('.message-unread-badge');if(!badge){{badge=document.createElement('span');badge.className='message-unread-badge';row.insertBefore(badge,row.querySelector('small'));}}badge.textContent=String(unread);row.classList.add('has-unread');}}const countNode=document.querySelector('[data-message-dialog-count]');if(countNode)countNode.textContent=String(list.querySelectorAll('.message-user-row').length);applySearch();}}
+function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id??selected);const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));if(Number.isSafeInteger(whoId)&&whoId!==0){{const who=document.createElement('a');who.className='telegram-inline-link';who.href=userCardPath+encodeURIComponent(whoId);who.textContent=whoLabel;who.title='Открыть карточку пользователя';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;const chatTop=chat.getBoundingClientRect().top+chat.clientTop;const anchor=!atBottom?Array.from(chat.children).find(node=>node.getBoundingClientRect().bottom>chatTop):null;const anchorTop=anchor?anchor.getBoundingClientRect().top:0;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;chat.querySelector('.message-empty-state')?.remove();const before=Array.from(chat.children).find(current=>Number(current.dataset.eventId||0)>Number(item.id));chat.insertBefore(node,before||null);if(atBottom)chat.scrollTop=chat.scrollHeight;else if(anchor&&anchor.isConnected)chat.scrollTop+=anchor.getBoundingClientRect().top-anchorTop;}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
 async function requestJson(url,timeoutMs=POLL_TIMEOUT_MS){{const controller=new AbortController();const timeoutId=window.setTimeout(()=>controller.abort(),timeoutMs);try{{const response=await fetch(url,{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json','X-Requested-With':'XMLHttpRequest'}},signal:controller.signal}});if(!response.ok)throw new Error('HTTP '+response.status);return await response.json();}}finally{{window.clearTimeout(timeoutId);}}}}
@@ -4333,7 +4371,7 @@ if(composeRetry)composeRetry.addEventListener('click',async()=>{{if(lastFailedPa
 document.addEventListener('visibilitychange',()=>{{if(!document.hidden){{clearTimeout(dialogTimer);clearTimeout(chatTimer);pollDialogFeed();pollSelectedChat();}}}});
 window.addEventListener('pagehide',()=>{{stopped=true;clearTimeout(dialogTimer);clearTimeout(chatTimer);}},{{once:true}});
 window.__fargovpnUnreadMap=new Map();applySearch();setTimeout(pollDialogFeed,1200);setTimeout(pollSelectedChat,650);
-}})();</script>'''.replace('__MESSAGES_PATH__', messages_path_js).replace('__MESSAGES_FEED_PATH__', messages_feed_path_js).replace('__MESSAGES_CHAT_FEED_PATH__', messages_chat_feed_path_js).replace('__MESSAGES_USER_EVENTS_PATH__', messages_user_events_path_js)
+}})();</script>'''.replace('__MESSAGES_PATH__', messages_path_js).replace('__USER_CARD_PATH__', json.dumps(public_path('/users/id/'))).replace('__MESSAGES_FEED_PATH__', messages_feed_path_js).replace('__MESSAGES_CHAT_FEED_PATH__', messages_chat_feed_path_js).replace('__MESSAGES_USER_EVENTS_PATH__', messages_user_events_path_js)
     return page(request, "Сообщения", body, "messages", scripts)
 
 
@@ -4530,37 +4568,107 @@ def toggle_user(request: Request, tg_id: int):
     return RedirectResponse(public_path("/users"), 303)
 
 
+def _privacy_family_guard(connection, tg_id: int) -> None:
+    # Caller holds subscription identity lock, including session family lock 495.
+    family = connection.execute("SELECT COUNT(*) FROM telegram_profile_links WHERE (profile_tg_id=? AND telegram_id<>?) OR (telegram_id=? AND profile_tg_id<>?)", (tg_id, tg_id, tg_id, tg_id)).fetchone()
+    if family and int(family[0]):
+        raise HTTPException(409, "Сначала явно отвяжите семейные аккаунты; их данные не удаляются автоматически")
+
+
+def _privacy_remote_matches(row: dict, snapshot: dict) -> list:
+    if not isinstance(snapshot, dict) or snapshot.get("error") or snapshot.get("stale") or not isinstance(snapshot.get("clients"), list):
+        raise RuntimeError("Не получен свежий подтверждённый список клиентов 3x-ui")
+    matches = []
+    for client in snapshot["clients"]:
+        if not isinstance(client, dict):
+            raise RuntimeError("Некорректный список клиентов 3x-ui")
+        if any(str(row.get(key) or "").strip() and str(row.get(key)).strip() == str(client.get(key) or "").strip() for key in ("uuid", "email", "sub_id")) or str(client.get("tg_id") or "") == str(row["tg_id"]):
+            matches.append(client)
+    return matches
+
+
+def _erase_profile_confirmed(tg_id: int, confirmed_tg_id: int, actor: str) -> dict:
+    if int(tg_id) == 0 or int(tg_id) != int(confirmed_tg_id) or not actor.strip():
+        raise HTTPException(400, "Введите точный числовой ID пользователя")
+    with subscriptions._subscription_identity_lock_sync(tg_id, config.DB_PATH):
+        with database() as connection:
+            _privacy_family_guard(connection, tg_id)
+            row = get_user(tg_id)
+            if not row:
+                raise HTTPException(404, "Пользователь не найден")
+            row = dict(row)
+            # Never revoke another local profile through duplicated credentials.
+            shared = connection.execute("SELECT COUNT(*) FROM users WHERE tg_id<>? AND ((COALESCE(email,'')<>'' AND email=?) OR (COALESCE(uuid,'')<>'' AND uuid=?) OR (COALESCE(sub_id,'')<>'' AND sub_id=?))", (tg_id, str(row.get("email") or ""), str(row.get("uuid") or ""), str(row.get("sub_id") or ""))).fetchone()
+            if shared and int(shared[0]):
+                raise HTTPException(409, "Идентификаторы VPN используются другим профилем; требуется ручная сверка")
+            try:
+                matches = _privacy_remote_matches(row, fetch_snapshot_sync(force=True))
+                for email in sorted({str(item.get("email") or "").strip() for item in matches}):
+                    if not email:
+                        raise RuntimeError("У VPN клиента отсутствует email; требуется ручная сверка")
+                    delete_client_sync(email, keep_traffic=False)
+                if _privacy_remote_matches(row, fetch_snapshot_sync(force=True)):
+                    raise RuntimeError("Клиент всё ещё присутствует в 3x-ui")
+            except Exception as error:
+                raise HTTPException(502, "Не удалось подтвердить отзыв VPN. Локальные данные сохранены; проверьте 3x-ui и повторите") from error
+            try:
+                return privacy.erase_user_data(tg_id, confirmed_tg_id=confirmed_tg_id, actor=actor,
+                                               vpn_revoked=True, identity_snapshot=row, allow_current_credentials=True)
+            except Exception as error:
+                raise HTTPException(502, "VPN доступ уже отозван. Очистка локальных данных не завершена; повторите действие. Старые архивы и внешние копии сохраняются") from error
+
+
+@app.get("/users/id/{tg_id}/privacy", response_class=HTMLResponse)
+def privacy_erase_review(request: Request, tg_id: int):
+    require_auth(request)
+    if not get_user(tg_id):
+        raise HTTPException(404)
+    token = html.escape(session_csrf_token(request), quote=True)
+    body = f'<header><h1>Удаление персональных данных</h1></header><section class="card"><p>Будет отозван VPN доступ и удалены текущая запись пользователя, платежи, реферальные записи, события, токены кабинета и кэш сообщений. Сначала отдельно отвяжите всех участников семьи.</p><p>Старые архивы, сообщения в Telegram, системные журналы и внешние копии сохраняются. Свободный текст аудита очищается по известным идентификаторам. Внешний отзыв VPN и локальная база не являются одной атомарной операцией: при ошибке требуется повторная сверка.</p><form method="post" action="/users/id/{int(tg_id)}/privacy"><input type="hidden" name="csrf_token" value="{token}"><label for="privacy-confirm-id">Для необратимой очистки введите ID {int(tg_id)}</label><input id="privacy-confirm-id" type="number" name="confirmed_tg_id" required><button class="danger">Отозвать VPN и удалить текущие данные</button></form><a href="/users/id/{int(tg_id)}">Отмена</a></section>'
+    return page(request, "Удаление персональных данных", body, "users")
+
+
+@app.post("/users/id/{tg_id}/privacy")
+def privacy_erase_confirm(request: Request, tg_id: int, confirmed_tg_id: int = Form(...), csrf_token: str = Form("")):
+    require_auth(request, csrf_token)
+    result = _erase_profile_confirmed(tg_id, confirmed_tg_id, str(request.session.get("user") or ""))
+    set_flash(request, "Текущие локальные данные удалены. " + str(result.get("limits") or ""), "good")
+    return RedirectResponse(public_path("/users"), 303)
+
+
 @app.post("/users/{tg_id}/delete")
 def delete_user(request: Request, tg_id: int):
     require_auth(request)
-    row = get_user(tg_id)
-    if not row:
-        raise HTTPException(404)
-    try:
-        delete_client_sync(str(row["email"]), keep_traffic=False)
-    except Exception as error:
-        raise HTTPException(502, f"3x-ui отклонила удаление: {error}") from error
-    local_warning = ""
-    try:
-        with database() as connection:
-            connection.execute("DELETE FROM users WHERE tg_id=?", (tg_id,))
-    except Exception as error:
-        local_warning = f" 3x-ui уже удалён, но локальная запись не удалена автоматически: {error}"
-        LOGGER.exception("3x-ui клиент tg_id=%s удалён, но локальная users запись осталась", tg_id)
-    audit(str(request.session.get("user", "web")), "delete_user", str(tg_id))
-    user_events.safe_record_event(
-        tg_id,
-        username=str(row.get("username") or ""),
-        direction="system",
-        event_type="user_deleted",
-        text=("Пользователь удалён из 3x-ui и локальной базы" if not local_warning else "Пользователь удалён из 3x-ui; локальная запись требует сверки"),
-        actor=str(request.session.get("user", "web")),
-        metadata={"email": str(row.get("email") or ""), "local_warning": local_warning},
-        db_path=config.DB_PATH,
-    )
-    set_flash(request, "Пользователь удалён" + local_warning, "warn" if local_warning else "good")
-    return RedirectResponse(public_path("/users"), 303)
-
+    with subscriptions._subscription_identity_lock_sync(tg_id, config.DB_PATH):
+        with database() as family_connection:
+            _privacy_family_guard(family_connection, tg_id)
+            row = get_user(tg_id)
+            if not row:
+                raise HTTPException(404)
+            try:
+                delete_client_sync(str(row["email"]), keep_traffic=False)
+            except Exception as error:
+                raise HTTPException(502, f"3x-ui отклонила удаление: {error}") from error
+            local_warning = ""
+            try:
+                with database() as connection:
+                    connection.execute("DELETE FROM users WHERE tg_id=?", (tg_id,))
+            except Exception as error:
+                local_warning = f" 3x-ui уже удалён, но локальная запись не удалена автоматически: {error}"
+                LOGGER.exception("3x-ui клиент tg_id=%s удалён, но локальная users запись осталась", tg_id)
+            audit(str(request.session.get("user", "web")), "delete_user", str(tg_id))
+            user_events.safe_record_event(
+                tg_id,
+                username=str(row.get("username") or ""),
+                direction="system",
+                event_type="user_deleted",
+                text=("Пользователь удалён из 3x-ui и локальной базы" if not local_warning else "Пользователь удалён из 3x-ui; локальная запись требует сверки"),
+                actor=str(request.session.get("user", "web")),
+                metadata={"email": str(row.get("email") or ""), "local_warning": local_warning},
+                db_path=config.DB_PATH,
+            )
+            set_flash(request, "Пользователь удалён" + local_warning, "warn" if local_warning else "good")
+            return RedirectResponse(public_path("/users"), 303)
 
 @app.get("/users/{tg_id}/message", response_class=HTMLResponse)
 def message_user_page(request: Request, tg_id: int):
@@ -4819,7 +4927,7 @@ def payments(request: Request):
             int(row["tg_id"] or 0), str(row["current_username"] or ""),
             str(row["current_display_name"] or ""), str(row["user_notes"] or "")
         )
-        payment_user_link = _telegram_profile_link(
+        payment_user_link = _panel_user_link(
             int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link",
             username=row["current_username"],
         )
@@ -4872,7 +4980,7 @@ def receipt(request: Request, payment_id: int):
         int(row["tg_id"] or 0), str(row["current_username"] or ""),
         str(row["current_display_name"] or ""), str(row["user_notes"] or "")
     )
-    payment_user_link = _telegram_profile_link(
+    payment_user_link = _panel_user_link(
         int(row["tg_id"] or 0), payment_user_label, "telegram-inline-link",
         username=row["current_username"],
     )
@@ -4907,7 +5015,7 @@ def approve_payment_logic(payment_id: int) -> tuple[bool, str]:
                     referrer_id,
                     f"🎉 Новый реферал!\n\nПриглашённый пользователь впервые успешно оплатил подписку.\nВам начислено +{referral_rewards.REWARD_DAYS} бесплатных дней.",
                 )
-        return True, "Платёж уже был подтверждён; повторное продление не выполнено"
+        return True, "Платёж уже был подтверждён; повторное продление не выполнено" + (". Требуется ручная сверка реферального бонуса; повторно не начислять" if referral.get("status") == referral_rewards.RECONCILE else "")
     subscription = result.subscription
     if not subscription:
         return False, "Не получены данные активированной подписки"
@@ -4918,7 +5026,7 @@ def approve_payment_logic(payment_id: int) -> tuple[bool, str]:
     )
     sent, detail = telegram_send(subscription.tg_id, notification, message_kind="service", event_type="payment_notification")
     referral = result.referral or {}
-    referral_notice = ""
+    referral_notice = (" Требуется ручная сверка реферального бонуса; повторно не начислять." if referral.get("status") == referral_rewards.RECONCILE else "")
     if referral.get("status") == referral_rewards.GRANTED and not referral.get("already_processed"):
         referrer_id = int(referral.get("referrer_tg_id") or 0)
         if referrer_id > 0:
@@ -5064,10 +5172,10 @@ def backups(request: Request):
     disabled = " disabled" if restore_active else ""
     body = f'''<header><div><h1>Резервные копии и восстановление</h1><div class="subtitle">Полный архив FargoVPN + базы FargoVPN/3x-ui + настройки + Xray + systemd. Внешний Nginx/L4 не входит.</div></div><form method="post" action="/backups/create"><input type="hidden" name="csrf_token" value="{csrf}"><button>＋ Создать и отправить сейчас</button></form></header>
 {active_notice}
-<div class="card" style="margin-bottom:15px"><div class="section-title"><h2>Восстановление</h2><span class="badge {restore_tone}">{html.escape(restore_status)}</span></div><p>Перед восстановлением автоматически создаётся страховочный полный бэкап. В случае ошибки выполняется откат изменённых данных и безопасных настроек. Установленные программы, systemd, ключи и настройки запуска сервисов сохраняются.</p><form method="post" action="/backups/restore" onsubmit="return confirmRestore(this)"><input type="hidden" name="csrf_token" value="{csrf}"><label>Архив<br><select name="archive" required{disabled}>{archive_options}</select></label><div style="margin-top:12px"><label><input type="radio" name="mode" value="users-only" checked{disabled}> Только пользователи и подписки — users, payments, referral_rewards. Остальные журналы, безопасность, Push и служебное состояние не заменяются.</label><br><label><input type="radio" name="mode" value="full"{disabled}> Все данные — FargoVPN PostgreSQL, данные 3x-ui и безопасные настройки сервиса. Программы, systemd, ключи и настройки запуска сервисов сохраняются.</label></div><div style="margin-top:12px"><button class="danger" type="submit"{disabled}>Восстановить выбранный архив</button></div></form></div>
+<div class="card" style="margin-bottom:15px"><div class="section-title"><h2>Восстановление</h2><span class="badge {restore_tone}">{html.escape(restore_status)}</span></div><p>Перед восстановлением автоматически создаётся страховочный полный бэкап. В случае ошибки выполняется откат изменённых данных и безопасных настроек. Установленные программы, systemd, ключи и настройки запуска сервисов сохраняются.</p><form method="post" action="/backups/restore" onsubmit="return confirmRestore(this)"><input type="hidden" name="csrf_token" value="{csrf}"><label>Архив<br><select name="archive" required{disabled}>{archive_options}</select></label><div style="margin-top:12px"><label><input type="radio" name="mode" value="users-only" checked{disabled}> Пользователи, подписки и семейные связи — users, payments, referral_rewards, telegram_profile_links. Журналы и Push не импортируются; действующие ссылки кабинета и приглашения отзываются; сессии и passkeys не импортируются.</label><br><label><input type="radio" name="mode" value="full"{disabled}> Все данные — FargoVPN PostgreSQL, данные 3x-ui и безопасные настройки сервиса. Программы, systemd, ключи и настройки запуска сервисов сохраняются.</label></div><div style="margin-top:12px"><button class="danger" type="submit"{disabled}>Восстановить выбранный архив</button></div></form></div>
 <div class="notice">Плановый таймер и ручная кнопка используют одну службу vpn-service-backup. В очереди повторной доставки Telegram: <strong>{pending_count}</strong>.</div>
 <div class="card table-wrap"><table><thead><tr><th>Архив</th><th>Размер</th><th>Дата</th><th>Действия</th></tr></thead><tbody>{rows or '<tr><td colspan="4">Бэкапов пока нет.</td></tr>'}</tbody></table></div><div class="card table-wrap" style="margin-top:15px"><div class="section-title"><h2>Последние доставки</h2></div><table><thead><tr><th>Дата</th><th>Файл</th><th>Telegram</th><th>Подробности</th></tr></thead><tbody>{run_rows or '<tr><td colspan="4">Запусков пока нет.</td></tr>'}</tbody></table></div>'''
-    body += r'''<script>function confirmRestore(form){const mode=form.querySelector('input[name="mode"]:checked')?.value||'full';const archive=form.querySelector('select[name="archive"]')?.value||'';if(!archive)return false;const text=mode==='full'?'ПОЛНОЕ ВОССТАНОВЛЕНИЕ\n\nБудут восстановлены данные FargoVPN и 3x-ui и безопасные настройки сервиса в текущую схему. Установленные программы, systemd, .env, ключи, настройки запуска Xray/3x-ui и внешний Nginx/L4 сохраняются. Несовместимая схема будет отклонена.':'ВОССТАНОВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ\n\nБудут заменены только users, payments и referral_rewards. Аудит, безопасность, Push и служебные таблицы сохраняются.';return window.confirm(text+'\n\nАрхив: '+archive+'\n\nПеред началом будет создан страховочный полный бэкап текущего состояния. Продолжить?');}setTimeout(()=>window.location.reload(),15000);</script>'''
+    body += r'''<script>function confirmRestore(form){const mode=form.querySelector('input[name="mode"]:checked')?.value||'full';const archive=form.querySelector('select[name="archive"]')?.value||'';if(!archive)return false;const text=mode==='full'?'ПОЛНОЕ ВОССТАНОВЛЕНИЕ\n\nБудут восстановлены данные FargoVPN и 3x-ui и безопасные настройки сервиса в текущую схему. Установленные программы, systemd, .env, ключи, настройки запуска Xray/3x-ui и внешний Nginx/L4 сохраняются. Несовместимая схема будет отклонена.':'ВОССТАНОВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ\n\nБудут заменены users, payments, referral_rewards и telegram_profile_links. Аудит и Push не импортируются. Действующие ссылки кабинета и приглашения отзываются; архивные сессии, passkeys и приглашения не импортируются.';return window.confirm(text+'\n\nАрхив: '+archive+'\n\nПеред началом будет создан страховочный полный бэкап текущего состояния. Продолжить?');}setTimeout(()=>window.location.reload(),15000);</script>'''
     return page(request, "Бэкапы", body, "backups")
 
 
@@ -5207,7 +5315,7 @@ def _read_service_log_result(service: str, lines: int, level: str = "", query: s
     elif kind == "push":
         try:
             rows = push_service.panel_logs(config.DB_PATH, safe_lines, "")
-            text = "\n".join(f"{item.get('created_at','')} [PUSH] {item.get('event','')} {item.get('details','')}" for item in rows)
+            text = "\n".join(f"{item.get('created_at','')} [PUSH] {item.get('event','')} {item.get('message','')}" for item in rows)
             status = "empty" if not text else "ok"
             detail = "Push-журнал пуст." if not text else f"Получено записей: {len(rows)}."
         except Exception as exc:
@@ -5222,10 +5330,10 @@ def _read_service_log_result(service: str, lines: int, level: str = "", query: s
                 capture_output=True, text=True, timeout=8, check=False,
             )
             text = ((result.stdout or "") + (result.stderr or ""))[-40000:]
-            if result.returncode != 0 and not text.strip():
+            if result.returncode != 0:
                 status = "error"
                 detail = f"journalctl завершился с кодом {result.returncode}."
-                text = detail
+                text = text or detail
             elif not text.strip():
                 status = "empty"
                 detail = f"Журнал systemd { _service_unit(service) } пуст."
@@ -5252,7 +5360,9 @@ def _read_service_log_result(service: str, lines: int, level: str = "", query: s
         status = "empty"
         detail = "После применения фильтров подходящих строк нет."
         text = "Журнал пуст после применения фильтров.\n" + detail
-    text = str(text)
+    from log_security import redact
+    text = redact(str(text))
+    detail = redact(str(detail))
     return {"status": status, "detail": detail, "source": source, "kind": kind, "text": text, "truncated": bool(locals().get("truncated", False))}
 
 
@@ -5297,8 +5407,8 @@ def audit_page(request: Request, actor: str = "", action: str = "", q: str = "",
         )
     options = ''.join(f'<option value="{html.escape(str(item), quote=True)}" {"selected" if action == str(item) else ""}>{html.escape(audit_action_label(item))}</option>' for item in actions)
     body = f'''<header><div><h1>Журнал аудита</h1><div class="subtitle">Кто, когда и что изменил или отправил. Время показано по часовому поясу панели: {html.escape(panel_timezone_name())}. Новые записи сверху.</div></div><a class="button secondary" href="/audit">Сбросить фильтры</a></header>
-<form class="audit-filters" method="get"><input name="actor" value="{html.escape(actor, quote=True)}" placeholder="Администратор / actor"><select name="action"><option value="">Все действия</option>{options}</select><input name="q" value="{html.escape(q, quote=True)}" placeholder="Поиск по деталям"><input name="limit" type="number" value="{safe_limit}" min="25" max="1000"><button>Фильтровать</button></form>
-<div class="card table-wrap"><table><thead><tr><th>Дата</th><th>Кто</th><th>Действие</th><th>Детали</th></tr></thead><tbody>{''.join(rows_html) or '<tr><td colspan="4">Записей не найдено.</td></tr>'}</tbody></table></div>'''
+<form class="audit-filters" method="get"><input aria-label="Администратор" name="actor" value="{html.escape(actor, quote=True)}" placeholder="Администратор / actor"><select name="action" aria-label="Действие"><option value="">Все действия</option>{options}</select><input aria-label="Поиск по деталям" name="q" value="{html.escape(q, quote=True)}" placeholder="Поиск по деталям"><input name="limit" type="number" aria-label="Количество записей" value="{safe_limit}" min="25" max="1000"><button>Фильтровать</button></form>
+<div class="card table-wrap audit-table-wrap"><table><thead><tr><th>Дата</th><th>Кто</th><th>Действие</th><th>Детали</th></tr></thead><tbody>{''.join(rows_html) or '<tr><td colspan="4">Записей не найдено.</td></tr>'}</tbody></table></div>'''
     return page(request, "Аудит", body, "audit")
 
 
@@ -5379,6 +5489,13 @@ def backup_live_api(request: Request):
     return data
 
 
+def _client_error_coordinate(value: Any) -> int:
+    text = str(value or "0")
+    if len(text) > 8 or not text.isascii() or not text.isdecimal():
+        return 0
+    return min(int(text), 10_000_000)
+
+
 @app.post("/api/panel/client-errors", response_class=JSONResponse)
 async def client_errors_api(request: Request):
     require_auth(request)
@@ -5391,8 +5508,8 @@ async def client_errors_api(request: Request):
     kind = str(payload.get("kind") or "unknown")[:64]
     message = str(payload.get("message") or "")[:3000]
     source = str(payload.get("source") or "")[:500]
-    line = int(payload.get("line") or 0) if str(payload.get("line") or "0").isdigit() else 0
-    column = int(payload.get("column") or 0) if str(payload.get("column") or "0").isdigit() else 0
+    line = _client_error_coordinate(payload.get("line"))
+    column = _client_error_coordinate(payload.get("column"))
     LOGGER.error("browser-js-error kind=%s message=%s source=%s line=%s column=%s", kind, message, source, line, column)
     return {"ok": True, "data": {"recorded": True}, "recorded": True}
 
@@ -6155,8 +6272,8 @@ def _save_settings(request: Request, form):
         "GITHUB_RELEASE_TAG_PREFIX": github_tag_prefix,
         "GITHUB_RELEASE_NAME_TEMPLATE": github_name_template,
         "GITHUB_RELEASE_ASSET_NAME": github_asset_template,
-        "GITHUB_RELEASE_MAKE_LATEST": checked("github_release_make_latest"),
-        "GITHUB_RELEASE_DRAFT": checked("github_release_draft"),
+        "GITHUB_RELEASE_MAKE_LATEST": checked("github_release_make_latest") if github_configurable else bool(getattr(config, "GITHUB_RELEASE_MAKE_LATEST", True)),
+        "GITHUB_RELEASE_DRAFT": checked("github_release_draft") if github_configurable else bool(getattr(config, "GITHUB_RELEASE_DRAFT", False)),
         "GITHUB_RELEASE_PRERELEASE": checked("github_release_prerelease") if github_configurable else bool(getattr(config, "GITHUB_RELEASE_PRERELEASE", False)),
         "UPDATE_CHECK_INTERVAL": _form_int(form, "update_check_interval", 60, 15, 86_400, "Интервал обновлений") if github_configurable else int(getattr(config, "UPDATE_CHECK_INTERVAL", 60)),
         "UPDATE_VERIFY_TLS": True,
@@ -6358,15 +6475,13 @@ def updates_log_api(request: Request):
 def update_publisher_for_request(request: Request) -> bool:
     """Return whether this authenticated panel may manage GitHub publication."""
     username = str(request.session.get("user") or "").strip()
-    if update_manager.is_publisher_username(username):
-        return True
-    return update_manager.github_configuration_ready()
+    return update_manager.is_publisher_username(username)
 
 
 def can_configure_github(request: Request) -> bool:
-    """Allow first-time GitHub setup before a token exists; keep it locked afterwards."""
+    """Restrict GitHub settings to the protected publisher identity."""
     username = str(request.session.get("user") or "").strip()
-    return update_manager.is_publisher_username(username) or not update_manager.github_configuration_ready()
+    return update_manager.is_publisher_username(username)
 
 
 def can_publish_update(request: Request) -> bool:
@@ -7151,3 +7266,5 @@ def diagnostic_read_only_api(request: Request, q: str = "", status: str = "all")
     except Exception as exc:
         LOGGER.warning("Read-only diagnostic API unavailable: %s", type(exc).__name__)
         raise HTTPException(503, "Диагностическое чтение PostgreSQL недоступно: " + type(exc).__name__) from exc
+
+

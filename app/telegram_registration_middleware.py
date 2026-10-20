@@ -44,7 +44,7 @@ def update_actor(update: Any) -> tuple[Any | None, Any | None, Any | None]:
     """Return (user, chat, source_event) for a Telegram Update-like object."""
     for part in _parts(update):
         user = getattr(part, "from_user", None) or getattr(part, "user", None)
-        chat = getattr(part, "chat", None)
+        chat = getattr(part, "chat", None) or getattr(getattr(part, "message", None), "chat", None)
         if user is not None:
             return user, chat, part
     return None, None, None
@@ -154,6 +154,14 @@ class InvitationAccessMiddleware(BaseMiddleware):
             return await handler(event, data)
         if tg_id <= 0:
             return await handler(event, data)
+
+        # Callback messages carry the chat on their nested message. Never
+        # publish cabinet or subscription details in a group, even for admins.
+        if chat is not None and str(getattr(chat, "type", "") or "") != "private":
+            await _answer_callback(source)
+            if isinstance(source, Message) and str(getattr(source, "text", "") or "").startswith("/"):
+                await source.answer("🔒 Откройте личный чат с ботом для доступа к кабинету и подписке.")
+            return None
 
         admins = {int(value) for value in getattr(config, "ADMIN_IDS", []) if str(value).lstrip("-").isdigit()}
         if tg_id in admins:

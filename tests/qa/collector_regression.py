@@ -1,5 +1,5 @@
 import importlib.util,json,os,pathlib,tempfile
-root=pathlib.Path(__file__).resolve().parents[2];spec=importlib.util.spec_from_file_location('diag',root/'diagnose.py');d=importlib.util.module_from_spec(spec);spec.loader.exec_module(d)
+root=pathlib.Path(__file__).resolve().parents[2];spec=importlib.util.spec_from_file_location('diag',root/'app'/'diagnose.py');d=importlib.util.module_from_spec(spec);spec.loader.exec_module(d)
 # Verify API collector branch without network or production writes.
 class Reply:
  status=200

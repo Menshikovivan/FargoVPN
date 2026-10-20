@@ -574,3 +574,10 @@ form[action$="/payment-price"]>.setting{margin:0}
 .chat-head .actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 @media(max-width:900px){.audit-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.audit-filters button{grid-column:1/-1}.audit-details{max-width:none}.table-wrap table{min-width:760px}}
 @media(max-width:560px){.audit-filters{grid-template-columns:minmax(0,1fr)}.audit-filters button{grid-column:auto;width:100%}.message-user-telegram{font-size:9px}.messages-layout{min-width:0}.chat-head .actions{justify-content:flex-start}}
+
+/* Keep audit column headings readable inside their horizontal scroller. */
+.audit-table-wrap table{min-width:780px!important;table-layout:fixed}
+.audit-table-wrap th{white-space:nowrap;overflow-wrap:normal;word-break:normal}
+.resource-box.network .resource-box-head{flex-wrap:wrap;gap:6px 10px}
+.resource-box.network .resource-box-head>span:first-child{flex:0 0 100%;overflow-wrap:normal;word-break:normal}
+.resource-box.network .resource-box-head>b{display:flex;flex-wrap:wrap;gap:3px 6px;min-width:0;font-size:16px}.resource-box.network .resource-box-head>b>span{white-space:nowrap;overflow-wrap:normal;word-break:normal}

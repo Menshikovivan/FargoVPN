@@ -57,6 +57,7 @@ class PaymentApprovalResult:
     subscription: SubscriptionResult | None = None
     already_processed: bool = False
     referral: dict[str, Any] | None = None
+    purchased_days: int | None = None
 
 
 def clean_username(username: str | None, tg_id: int) -> str:
@@ -192,15 +193,16 @@ def _upsert_user(
         # Telegram middleware/contact refresh owns updates from Telegram itself.
         # A new row may be seeded from the supplied Telegram username.
         stored_username = (current_username or incoming_username) if tg_id > 0 else (incoming_username or current_username or clean_username(username, tg_id))
-        # Remove only legacy, unbound aliases for this exact panel client.
-        connection.execute(
-            "DELETE FROM users WHERE tg_id<=0 AND tg_id<>? AND (LOWER(email)=LOWER(?) OR (?<>'' AND LOWER(uuid)=LOWER(?)))",
+        # Legacy aliases may contain operator notes, prices and family history.
+        # Merge only after the destination exists, using the conflict-aware path.
+        aliases = connection.execute(
+            "SELECT tg_id FROM users WHERE tg_id<=0 AND tg_id<>? AND (LOWER(email)=LOWER(?) OR (?<>'' AND LOWER(uuid)=LOWER(?)))",
             (int(tg_id), email, uuid_value, uuid_value),
-        )
+        ).fetchall()
         connection.execute(
             """
             INSERT INTO users(
-                tg_id,username,uuid,email,expiry_time,enable,sub_id,notes,last_online,
+                tg_id,username,uuid,email,expiry_time,enable,sub_id,remote_comment,last_online,
                 last_sync_at,last_reminder_days
             ) VALUES(?,?,?,?,?,?,?,?,?,?,-1)
             ON CONFLICT(tg_id) DO UPDATE SET
@@ -210,13 +212,18 @@ def _upsert_user(
                 expiry_time=excluded.expiry_time,
                 enable=excluded.enable,
                 sub_id=excluded.sub_id,
-                notes=COALESCE(NULLIF(excluded.notes,''),users.notes),
+                notes=users.notes,
+                remote_comment=excluded.remote_comment,
                 last_online=excluded.last_online,
                 last_sync_at=excluded.last_sync_at,
                 last_reminder_days=-1
             """,
             (int(tg_id), stored_username, uuid_value, email, expiry, enable, sub_id, panel_comment, now_text, now_text),
         )
+        if aliases:
+            from identity_migration import _merge_duplicate_user
+            for alias in aliases:
+                _merge_duplicate_user(connection, int(tg_id), int(alias[0]), stored_username or "")
     result = get_user_by_tg_id(tg_id, db_path)
     if not result:
         raise RuntimeError("Не удалось сохранить пользователя в локальной базе")
@@ -250,7 +257,7 @@ def recover_user_identity_sync(
         candidate = find_client_by_telegram_id_sync(tg_id, force=force)
 
     if not candidate:
-        if local and display_name != str(local.get("username") or ""):
+        if local and username is not None and display_name != str(local.get("username") or ""):
             with _connect(db_path) as connection:
                 connection.execute("UPDATE users SET username=? WHERE tg_id=?", (display_name, tg_id))
             local["username"] = display_name
@@ -313,9 +320,12 @@ def _subscription_identity_lock_sync(tg_id: int, db_path: str | Path | None = No
         return
     with _connect(db_path) as connection:
         locked = False
+        family_locked = False
         try:
             # Session-level lock: it survives the commit performed by the
             # connection wrapper and is released explicitly before close.
+            connection.execute("SELECT pg_advisory_lock(495, hashtext(?))", (str(key),))
+            family_locked = True
             connection.execute(
                 "SELECT pg_advisory_lock(hashtextextended(?, 0))",
                 (str(key),),
@@ -323,14 +333,13 @@ def _subscription_identity_lock_sync(tg_id: int, db_path: str | Path | None = No
             locked = True
             yield
         finally:
-            if locked:
-                try:
-                    connection.execute(
-                        "SELECT pg_advisory_unlock(hashtextextended(?, 0))",
-                        (str(key),),
-                    )
-                except Exception:
-                    logger.exception("Не удалось снять advisory lock для tg_id=%s", key)
+            for acquired, statement in ((locked, "SELECT pg_advisory_unlock(hashtextextended(?, 0))"),
+                                        (family_locked, "SELECT pg_advisory_unlock(495, hashtext(?))")):
+                if acquired:
+                    try:
+                        connection.execute(statement, (str(key),))
+                    except Exception:
+                        logger.exception("Не удалось снять advisory lock для tg_id=%s", key)
 
 
 def ensure_subscription_sync(
@@ -379,6 +388,8 @@ def _ensure_subscription_sync_unlocked(
 
     if candidate:
         email = str(candidate.get("email") or "")
+        if int(candidate.get("expiry_time") or 0) <= 0:
+            raise ValueError("Бессрочную подписку можно перевести на конечный срок только явным действием администратора")
         updated = extend_client_sync(email, days, tg_id=tg_id)
         user = _upsert_user(tg_id, display_name, updated, db_path, allow_seed_username=trust_username)
         return SubscriptionResult(
@@ -456,6 +467,8 @@ def _ensure_subscription_sync_unlocked(
             ensure_client_inbounds_sync(email, inbound_ids_sync())
         except Exception as inbound_error:
             raise RuntimeError(f"Не удалось восстановить привязку клиента ко всем inbound 3x-ui: {inbound_error}") from inbound_error
+        if int(recovered_client.get("expiry_time") or 0) <= 0:
+            raise ValueError("Существующая бессрочная подписка не переводится на конечный срок обычным продлением")
         panel_client = extend_client_sync(email, days, tg_id=tg_id)
         created = False
         recovered = True
@@ -612,6 +625,40 @@ def approve_payment_sync(
     payment_id = int(payment_id)
     claim_id = f"{str(processed_by)[:120]}:{secrets.token_hex(12)}"
     with _connect(db_path) as connection:
+        pending = connection.execute("SELECT * FROM payments WHERE id=?", (payment_id,)).fetchone()
+        if pending and str(dict(pending).get("status") or "pending") == "pending":
+            saved_quote = dict(pending)
+            quoted_owner = int(saved_quote["tg_id"])
+            connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(quoted_owner),))
+            # Registered shells may join a family after submitting a receipt.
+            # Their previous purchase never silently changes beneficiary.
+            mapping = connection.execute("SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (quoted_owner,)).fetchone()
+            current_owner = int(mapping[0]) if mapping else quoted_owner
+            owner_row = connection.execute("SELECT custom_payment_price FROM users WHERE tg_id=? FOR UPDATE", (quoted_owner,)).fetchone()
+            count = connection.execute("SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?", (quoted_owner, quoted_owner)).fetchone()
+            current_amount = (max(0, int(owner_row[0])) if owner_row and owner_row[0] is not None else
+                              max(0, int(round(float(getattr(config, "PAYMENT_PRICE", 0) or 0)))) * (1 + int(count[0] or 0)))
+            quoted_amount = int(saved_quote.get("expected_amount") if saved_quote.get("expected_amount") is not None else saved_quote.get("amount") or 0)
+            if current_owner != quoted_owner or not owner_row or current_amount != quoted_amount:
+                message = ("С момента заявки изменился владелец или стоимость семейного профиля. "
+                           "Доступ не выдавался; требуется ручная сверка. Верните прежний состав/цену "
+                           "или оформите новую корректную оплату; платёж не перенесён другому профилю.")
+                connection.execute("UPDATE payments SET last_error=? WHERE id=? AND (status='pending' OR status IS NULL)", (message, payment_id))
+                return PaymentApprovalResult(False, message)
+            from types import SimpleNamespace
+            from services.receipt_ocr import find_duplicate_receipt, lock_receipt_fingerprints
+            saved = dict(pending)
+            if saved.get("ocr_status") == "duplicate":
+                return PaymentApprovalResult(False, "Этот чек уже использован; требуется другой чек или ручная сверка")
+            identity = SimpleNamespace(file_sha256=str(saved.get("receipt_sha256") or ""),
+                                       text_sha256=str(saved.get("receipt_text_sha256") or ""),
+                                       perceptual_hash=str(saved.get("receipt_phash") or ""),
+                                       amount=saved.get("receipt_amount"), receipt_date_text=str(saved.get("receipt_date") or ""))
+            if identity.file_sha256 or identity.text_sha256 or identity.perceptual_hash:
+                lock_receipt_fingerprints(connection, identity)
+                duplicate = find_duplicate_receipt(db_path, payment_id, identity, connection)
+                if duplicate:
+                    return PaymentApprovalResult(False, f"Чек уже использован в платеже #{duplicate}; повторная активация запрещена")
         row = connection.execute(
             """
             UPDATE payments
@@ -656,13 +703,14 @@ def approve_payment_sync(
             "Платёж уже был подтверждён",
             already_processed=True,
             referral=referral_result,
+            purchased_days=int(payment.get("purchased_days") or days),
         )
 
     try:
         result = ensure_subscription_sync(
             int(payment["tg_id"]),
             str(payment.get("username") or ""),
-            days=days,
+            days=int(payment.get("purchased_days") or days),
             db_path=db_path,
         )
     except Exception as error:
@@ -710,7 +758,7 @@ def approve_payment_sync(
         )
     elif referral_result.get("status") == "failed":
         logger.warning("Реферальный бонус оставлен в pending для повторной обработки: %s", referral_result.get("message"))
-    return PaymentApprovalResult(True, f"Подписка {action}", subscription=result, referral=referral_result)
+    return PaymentApprovalResult(True, f"Подписка {action}", subscription=result, referral=referral_result, purchased_days=int(payment.get("purchased_days") or days))
 
 
 def decline_payment_sync(
@@ -794,6 +842,8 @@ def bind_database_user_tg_id_sync(
     with _connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if old_tg_id != new_tg_id:
+            from identity_migration import _rekey_referral_rows
+            _rekey_referral_rows(connection, old_tg_id, new_tg_id)
             connection.execute("UPDATE users SET tg_id=?,username=? WHERE tg_id=?", (new_tg_id, display_name, old_tg_id))
             connection.execute("UPDATE payments SET tg_id=? WHERE tg_id=?", (new_tg_id, old_tg_id))
         else:

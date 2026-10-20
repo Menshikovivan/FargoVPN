@@ -71,7 +71,7 @@ from services.telegram_events import (
 )
 from services.receipt_ocr import ReceiptAnalysis, analyze_payment_receipt
 from services.payment_submission import submit_receipt_sync
-from services import billing
+from services import billing, subscriptions
 from services.subscription_status import has_subscription, has_active_subscription
 from telegram_registration_middleware import InvitationAccessMiddleware, PendingInviteCodeFilter, send_registration_prompt
 import registration_access
@@ -917,7 +917,7 @@ async def get_cabinet_markup_async(
         user = await asyncio.to_thread(db_get_user, int(user_id))
     elif user is None:
         user = await asyncio.to_thread(db_get_user, int(user_id))
-    return get_cabinet_markup(int(user_id), user)
+    return await asyncio.to_thread(get_cabinet_markup, int(user_id), user)
 
 
 
@@ -993,7 +993,7 @@ async def get_user_menu_async(
         user = await asyncio.to_thread(db_get_user, profile_id)
     elif user is None:
         user = await asyncio.to_thread(db_get_user, int(user_id))
-    return get_user_menu(int(user_id), user)
+    return await asyncio.to_thread(get_user_menu, int(user_id), user)
 
 def get_messages_panel_url() -> str:
     """Return the direct public FargoVPN web-service URL for admin links."""
@@ -1220,7 +1220,7 @@ async def send_user_stats(
     builder.button(text="🍎 iPhone / iPad", callback_data="connect:ios")
     builder.button(text="🤖 Android", callback_data="connect:android")
     builder.button(text="🔄 Продлить", callback_data="menu:buy")
-    personal_cabinet_url = get_personal_cabinet_url(user_id, u)
+    personal_cabinet_url = await asyncio.to_thread(get_personal_cabinet_url, user_id, u)
     if personal_cabinet_url:
         builder.button(text="👤 Кабинет на сайте", url=personal_cabinet_url)
     builder.button(text="🏠 Главное меню", callback_data="menu:home")
@@ -1251,9 +1251,10 @@ async def start_purchase(
     payer_id = int(payer_tg_id if payer_tg_id is not None else message.from_user.id)
     profile_id = await asyncio.to_thread(billing.payment_profile_id, payer_id, config.DB_PATH)
     amount = await asyncio.to_thread(billing.expected_payment_amount, profile_id, config.DB_PATH)
-    await state.update_data(purchase_token=secrets.token_hex(24), expected_amount=amount, billing_tg_id=profile_id)
+    purchased_days = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
+    await state.update_data(purchase_token=secrets.token_hex(24), expected_amount=amount, billing_tg_id=profile_id, purchased_days=purchased_days)
     await state.set_state(FSMStates.wait_for_receipt)
-    await message.answer(payment_text_for_user(amount), parse_mode="HTML")
+    await message.answer(payment_text_for_user(amount, purchased_days), parse_mode="HTML")
 
 
 def purchase_quote_changed(
@@ -1269,10 +1270,11 @@ def purchase_quote_changed(
     )
 
 
-def payment_text_for_user(amount: int) -> str:
+def payment_text_for_user(amount: int, days: int | None = None) -> str:
+    quoted_days = max(1, int(SUBSCRIPTION_DAYS if days is None else days))
     return (
         f"<b>💳 Оплата подписки {html.escape(str(config.SERVICE_NAME))}</b>\n\n"
-        f"• Цена: <code>{int(amount)}</code> ₽ / {SUBSCRIPTION_DAYS} дней\n"
+        f"• Цена: <code>{int(amount)}</code> ₽ / {quoted_days} дней\n"
         f"• Номер: <code>{html.escape(str(config.PAYMENT_PHONE))}</code>\n"
         f"• Банк: <b>{html.escape(str(config.PAYMENT_BANK))}</b>\n"
         f"• Получатель: <b>{html.escape(str(config.PAYMENT_RECEIVER))}</b>\n\n"
@@ -1657,7 +1659,8 @@ async def connection_platform_callbacks(call: CallbackQuery, state: FSMContext):
         return
     platform = str(call.data or "").split(":", 1)[-1]
     platform_label = {"ios": "🍎 iPhone / iPad", "android": "🤖 Android"}.get(platform, "📱 Устройство")
-    user = await resolve_user(int(call.from_user.id), getattr(call.from_user, "username", None))
+    profile_id = await asyncio.to_thread(billing.payment_profile_id, int(call.from_user.id), config.DB_PATH)
+    user = await resolve_user(profile_id, None)
     if not user or not str(user.get("sub_id") or "").strip():
         await call.message.answer(
             "❌ Активная подписка не найдена. Сначала оформите или продлите VPN.",
@@ -1669,7 +1672,7 @@ async def connection_platform_callbacks(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         f"<b>{platform_label}</b>\n\nВыберите приложение — оно откроется и получит вашу подписку автоматически:",
         parse_mode="HTML",
-        reply_markup=_connection_app_markup(int(call.from_user.id), platform=platform),
+        reply_markup=await asyncio.to_thread(_connection_app_markup, int(call.from_user.id), platform=platform),
     )
 
 
@@ -1738,7 +1741,7 @@ async def faq_callbacks(call: CallbackQuery, state: FSMContext):
         await call.message.answer(
             text + "\n\n👇 Можно открыть приложение прямо сейчас:",
             parse_mode="HTML",
-            reply_markup=_connection_app_markup(int(call.from_user.id) if call.from_user else 0),
+            reply_markup=await asyncio.to_thread(_connection_app_markup, int(call.from_user.id) if call.from_user else 0),
         )
     elif action == "happ":
         await call.message.answer(
@@ -1748,7 +1751,7 @@ async def faq_callbacks(call: CallbackQuery, state: FSMContext):
             "3. Выберите сервер и подключитесь.\n\n"
             "Если приложение не установлено, установите HApp и повторите.",
             parse_mode="HTML",
-            reply_markup=_connection_app_markup(int(call.from_user.id) if call.from_user else 0),
+            reply_markup=await asyncio.to_thread(_connection_app_markup, int(call.from_user.id) if call.from_user else 0),
         )
     elif action == "troubleshoot":
         await call.message.answer(
@@ -1826,7 +1829,7 @@ async def send_subscription_activated(user_id: int, subscription) -> str:
             await bot.send_message(
                 chat_id=user_id,
                 text=(
-                    f"🎉 Ваша подписка {config.SERVICE_NAME} успешно {action} до "
+                    f"🎉 Ваша подписка {html.escape(str(config.SERVICE_NAME))} успешно {action} до "
                     f"<code>{expiry_date}</code>!\nСсылка подписки доступна в разделе «📋 Моя подписка»."
                 ),
                 parse_mode="HTML",
@@ -1838,6 +1841,16 @@ async def send_subscription_activated(user_id: int, subscription) -> str:
 
 async def send_referral_reward_notification(referral: dict | None) -> None:
     if not isinstance(referral, dict):
+        return
+    if referral.get("status") == referral_rewards.RECONCILE:
+        for admin_id in getattr(config, "ADMIN_IDS", []):
+            try:
+                with message_journal.service_message():
+                    await bot.send_message(chat_id=admin_id, text=("⚠️ Оплата подтверждена. Требуется ручная сверка реферального бонуса: "
+                        f"пригласивший ID {int(referral.get('referrer_tg_id') or 0)}, приглашённый ID {int(referral.get('referred_tg_id') or 0)}. "
+                        "Не начисляйте бонус повторно до проверки 3x-ui."))
+            except Exception as error:
+                logger.warning("Не доставлено уведомление о ручной сверке реферального бонуса администратору %s: %s", admin_id, error)
         return
     if referral.get("status") != referral_rewards.GRANTED or referral.get("already_processed"):
         return
@@ -1920,6 +1933,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
             purchase_token=purchase_token,
             expected_amount=current_amount,
             billing_tg_id=current_profile_id,
+            purchased_days=max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30)),
         )
         await msg.answer(
             "⚠️ Состав профиля или сумма подписки изменилась после показа реквизитов. "
@@ -1947,9 +1961,11 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     if expected_amount <= 0:
         expected_amount = await asyncio.to_thread(billing.expected_payment_amount, int(msg.from_user.id), config.DB_PATH)
     billing_tg_id = int((await state.get_data()).get("billing_tg_id") or await asyncio.to_thread(billing.payment_profile_id, int(msg.from_user.id), config.DB_PATH))
+    purchased_days = max(1, int((await state.get_data()).get("purchased_days") or getattr(config, "SUBSCRIPTION_DAYS", 30)))
     payment_id, created = await asyncio.to_thread(
         submit_receipt_sync, billing_tg_id, msg.from_user.username or "",
         file_id, expected_amount, purchase_token, config.DB_PATH,
+        purchased_days=purchased_days,
     )
     if not created:
         await msg.answer("ℹ️ Заявка на оплату уже принята. Дождитесь результата проверки; повторный чек не создаёт новую оплату.")
@@ -2012,7 +2028,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         action = "активирована" if subscription.created else "продлена"
         user_reply = (
             f"✅ Чек распознан и подтверждён автоматически. Подписка {action} до "
-            f"<code>{expiry_date}</code>. Выдано {SUBSCRIPTION_DAYS} дней по выбранному тарифу."
+            f"<code>{expiry_date}</code>. Выдано {purchased_days} дней по выбранному тарифу."
         )
     else:
         user_reply = "⏳ Ваш чек принят и отправлен на проверку администратору."
@@ -2031,7 +2047,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
 
     builder = None
     if automatically_approved:
-        user_info += f"\n\n✅ <b>Подтверждено автоматически, выдано {SUBSCRIPTION_DAYS} дней.</b>"
+        user_info += f"\n\n✅ <b>Подтверждено автоматически, выдано {purchased_days} дней.</b>"
     else:
         if approval and not approval.success:
             user_info += "\n\n⚠ Совпадения найдены, но активация не выполнена: " + html.escape(approval.message)
@@ -2127,7 +2143,9 @@ async def process_support_msg(msg: Message, state: FSMContext):
     await state.clear()
 
 
-async def send_crm_list(message: Message) -> None:
+async def send_crm_list(message: Message, page_no: int = 1) -> None:
+    page_no = max(1, int(page_no))
+    page_size = 50
     def _load_crm_users():
         with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
             return connection.execute(
@@ -2137,12 +2155,14 @@ async def send_crm_list(message: Message) -> None:
                           registration_status,COALESCE(notes,'') AS notes
                      FROM users u
                     ORDER BY LOWER(COALESCE(NULLIF(u.username,''),NULLIF(u.notes,''),NULLIF(u.display_name,''),'')),u.tg_id
-                    LIMIT 100"""
+                    LIMIT ? OFFSET ?""", (page_size + 1, (page_no - 1) * page_size)
             ).fetchall()
     rows = await asyncio.to_thread(_load_crm_users)
     if not rows:
         await message.answer("📉 База пользователей пуста.", reply_markup=get_admin_menu())
         return
+    has_next = len(rows) > page_size
+    rows = rows[:page_size]
     family_profiles = await asyncio.to_thread(billing.family_profile_map, config.DB_PATH)
     builder = InlineKeyboardBuilder()
     for tg_id, username, display_name, enabled, expiry, uuid_value, email, sub_id, registration, notes in rows:
@@ -2163,10 +2183,14 @@ async def send_crm_list(message: Message) -> None:
         icon = billing.subscription_status_emoji(state)
         label = billing.telegram_identity_label(int(tg_id), account["username"], account["display_name"], str(notes or ""))
         builder.button(text=f"{icon} {label} · {state}"[:48], callback_data=f"crmv_{tg_id}")
+    if page_no > 1:
+        builder.button(text="← Предыдущая страница", callback_data=f"crm_page:{page_no - 1}")
+    if has_next:
+        builder.button(text="Следующая страница →", callback_data=f"crm_page:{page_no + 1}")
     builder.button(text="⬅ Админ-меню", callback_data="menu:admin")
     builder.adjust(2)
     await message.answer(
-        f"<b>👥 Пользователи</b>\n\nПоказано {len(rows)} записей. Выберите карточку:",
+        f"<b>👥 Пользователи</b>\n\nСтраница {page_no}; показано {len(rows)} записей. Выберите карточку:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
@@ -2190,8 +2214,12 @@ def admin_summary_text() -> str:
     with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
         total, active, expiring = connection.execute(
             """SELECT COUNT(*),
-            SUM(CASE WHEN enable=1 AND (expiry_time<=0 OR expiry_time>?) THEN 1 ELSE 0 END),
-            SUM(CASE WHEN enable=1 AND expiry_time>? AND expiry_time<=? THEN 1 ELSE 0 END)
+            SUM(CASE WHEN enable=1 AND COALESCE(registration_status,'active')='active'
+                AND (COALESCE(uuid,'')<>'' OR COALESCE(email,'')<>'' OR COALESCE(sub_id,'')<>'')
+                AND (expiry_time<=0 OR expiry_time>?) THEN 1 ELSE 0 END),
+            SUM(CASE WHEN enable=1 AND COALESCE(registration_status,'active')='active'
+                AND (COALESCE(uuid,'')<>'' OR COALESCE(email,'')<>'' OR COALESCE(sub_id,'')<>'')
+                AND expiry_time>? AND expiry_time<=? THEN 1 ELSE 0 END)
             FROM users""",
             (now_ms, now_ms, week_ms),
         ).fetchone()
@@ -2342,9 +2370,7 @@ def subscription_report_text(page_no: int = 1) -> str:
         reminder_value = row[16] if family_member else row[4]
         reminder_text = "не отправлялось" if int(reminder_value or -1) == -1 else f"за {int(reminder_value)} дн."
         family_type = "Семейная" if is_family else "Обычная"
-        custom_price = row[20] if family_member else row[19]
-        if custom_price is None:
-            custom_price = getattr(config, "PAYMENT_PRICE", None)
+        custom_price = billing.expected_payment_amount(profile_tg_id if family_member else tg_id, config.DB_PATH)
         try:
             price_text = f" · {int(custom_price)} ₽" if custom_price is not None else ""
         except (TypeError, ValueError, OverflowError):
@@ -2355,6 +2381,8 @@ def subscription_report_text(page_no: int = 1) -> str:
                 f'<a href="https://t.me/{safe_handle}" target="_blank" '
                 f'rel="noopener noreferrer"><b>{label}</b></a>'
             )
+        elif tg_id > 0 and tg_id in trusted_username_by_id:
+            label_markup = f'<a href="tg://user?id={tg_id}"><b>{label}</b></a>'
         else:
             label_markup = f"<b>{label}</b>"
         lines.extend([
@@ -2471,6 +2499,9 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
     subscription_page = None
     page_match = re.fullmatch(r"subscriptions:page:(current|[1-9][0-9]{0,4})", action)
     if page_match:
+        if page_match.group(1) == "current":
+            await safe_callback_answer(call)
+            return
         subscription_page = 1 if page_match.group(1) == "current" else int(page_match.group(1))
         action = "subscriptions:page"
     if action in {"subscriptions", "subscriptions:page"}:
@@ -2593,7 +2624,7 @@ async def handle_pay_approve_callback(call: CallbackQuery):
             username=subscription.username,
             direction="system",
             event_type="payment_approved",
-            text=f"Платёж #{payment_id} подтверждён; доступ продлён на {SUBSCRIPTION_DAYS} дн.",
+            text=f"Платёж #{payment_id} подтверждён; доступ продлён на {result.purchased_days or SUBSCRIPTION_DAYS} дн.",
             actor=f"admin:{call.from_user.id}",
             metadata={"payment_id": payment_id, "expiry_time": subscription.expiry_time},
             db_path=config.DB_PATH,
@@ -2719,6 +2750,22 @@ async def crm_main(msg: Message):
         return
     await send_crm_list(msg)
 
+@dp.callback_query(F.data.startswith("crm_page:"))
+async def crm_page_callback(call: CallbackQuery):
+    if call.from_user.id not in config.ADMIN_IDS:
+        await safe_callback_answer(call, "Недостаточно прав", show_alert=True)
+        return
+    try:
+        page_no = int(str(call.data).split(":", 1)[1])
+        if not 1 <= page_no <= 1_000_000:
+            raise ValueError
+    except (TypeError, ValueError, IndexError):
+        await safe_callback_answer(call, "Некорректная страница", show_alert=True)
+        return
+    await safe_callback_answer(call)
+    await send_crm_list(call.message, page_no)
+
+
 @dp.callback_query(F.data.startswith("crmv_"))
 async def crmview_card(call: CallbackQuery):
     if call.from_user.id not in config.ADMIN_IDS:
@@ -2791,6 +2838,24 @@ async def crm_mod_proc(call: CallbackQuery):
     else:
         await call.message.answer("❌ Ошибка изменения срока на панели 3X-UI.", reply_markup=get_admin_menu())
 
+def _delete_crm_user_sync(tg_id: int, actor: str) -> bool:
+    with subscriptions._subscription_identity_lock_sync(tg_id, config.DB_PATH):
+        with database_adapter.connect(config.DB_PATH) as connection:
+            # Subscription identity lock already owns session family lock 495.
+            family = connection.execute("SELECT COUNT(*) FROM telegram_profile_links WHERE (profile_tg_id=? AND telegram_id<>?) OR (telegram_id=? AND profile_tg_id<>?)", (tg_id, tg_id, tg_id, tg_id)).fetchone()
+            if family and int(family[0]):
+                raise ValueError("Сначала явно отвяжите семейные аккаунты; их данные не удаляются автоматически")
+            user = db_get_user(tg_id)
+            if not user:
+                return False
+            email = str(user.get("email") or "").strip()
+            if email:
+                delete_client_sync(email, keep_traffic=False)
+            connection.execute("DELETE FROM users WHERE tg_id=?", (tg_id,))
+        user_events.safe_record_event(tg_id, username=str(user.get("username") or ""), direction="system", event_type="user_deleted", text="Пользователь удалён администратором через Telegram-бота; история сохранена", actor=actor, metadata={"email":email}, db_path=config.DB_PATH)
+        return True
+
+
 @dp.callback_query(F.data.startswith("crmdel_"))
 async def crm_delete_proc(call: CallbackQuery):
     if call.from_user.id not in config.ADMIN_IDS:
@@ -2798,35 +2863,15 @@ async def crm_delete_proc(call: CallbackQuery):
         return
     await safe_callback_answer(call, "Удаление...")
     tg_id = int(call.data.split("_")[-1])
-    u = await asyncio.to_thread(db_get_user, tg_id)
-    if not u: return
-    panel_success = await delete_client_from_panel(u["email"])
-    if not panel_success:
-        await call.message.answer(
-            "❌ 3x-ui не подтвердила удаление. Локальная запись сохранена.",
-            reply_markup=get_admin_menu(),
-        )
+    try:
+        deleted = await asyncio.to_thread(_delete_crm_user_sync, tg_id, f"admin:{call.from_user.id}")
+    except Exception as error:
+        await call.message.answer("❌ Удаление не завершено: " + html.escape(str(error)) + ". Проверьте состояние профиля и повторите.", reply_markup=get_admin_menu(), parse_mode="HTML")
         return
-    await asyncio.to_thread(
-        user_events.safe_record_event,
-        tg_id,
-        username=str(u.get("username") or ""),
-        direction="system",
-        event_type="user_deleted",
-        text="Пользователь удалён администратором через Telegram-бота",
-        actor=f"admin:{call.from_user.id}",
-        metadata={"email": str(u.get("email") or "")},
-        db_path=config.DB_PATH,
-    )
-    def _delete_local_user() -> None:
-        conn = database_adapter.connect(config.DB_PATH)
-        try:
-            conn.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,))
-            conn.commit()
-        finally:
-            conn.close()
-    await asyncio.to_thread(_delete_local_user)
-    await call.message.answer(f"🗑 Пользователь успешно удален из базы бота и панели 3X-UI!", reply_markup=get_admin_menu())
+    if not deleted:
+        await call.message.answer("Пользователь не найден.", reply_markup=get_admin_menu())
+        return
+    await call.message.answer("🗑 Пользователь удалён из базы бота и 3x-ui. История сохранена.", reply_markup=get_admin_menu())
     await call.message.delete()
 
 @dp.message(Command("backup"))
@@ -3172,3 +3217,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+

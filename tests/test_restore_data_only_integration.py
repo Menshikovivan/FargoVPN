@@ -45,8 +45,11 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
             conn.execute('CREATE TABLE users(id BIGSERIAL PRIMARY KEY, name TEXT, nullable TEXT)')
             conn.execute('CREATE TABLE payments(id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id), note TEXT)')
             conn.execute('CREATE TABLE referral_rewards(id BIGSERIAL PRIMARY KEY, value TEXT)')
+            conn.execute('CREATE TABLE telegram_profile_links(telegram_id BIGINT PRIMARY KEY, profile_tg_id BIGINT REFERENCES users(id))')
+            for table in manager.USERS_ONLY_REVOKE_TABLES:
+                conn.execute(sql.SQL('CREATE TABLE {} (id BIGINT PRIMARY KEY)').format(sql.Identifier(table)))
             conn.execute("INSERT INTO referral_rewards(id,value) VALUES (7,'reward')")
-            conn.execute('INSERT INTO users(id,name,nullable) VALUES (%s,%s,%s)', (41, 'Юникод\\.\nline\tTAB \\N', None))
+            conn.execute('INSERT INTO users(id,name,nullable) VALUES (%s,%s,%s)', (41, 'Р®РЅРёРєРѕРґ\\.\nline\tTAB \\N', None))
             conn.execute('INSERT INTO payments(id,user_id,note) VALUES (4,41,%s)', ('payment text',))
         dump = tmp_path / 'archive.sql'
         cli_dsn, env = manager.dsn_password_and_cli(source_dsn)
@@ -58,7 +61,7 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
         manager.restore_dump(dump, restored, schema_dsn=source_dsn)
         assert not sentinel.exists()
         with psycopg.connect(restored) as conn:
-            assert conn.execute('SELECT id,name,nullable FROM users').fetchall() == [(41, 'Юникод\\.\nline\tTAB \\N', None)]
+            assert conn.execute('SELECT id,name,nullable FROM users').fetchall() == [(41, 'Р®РЅРёРєРѕРґ\\.\nline\tTAB \\N', None)]
             assert conn.execute('SELECT user_id,note FROM payments').fetchall() == [(41, 'payment text')]
             assert conn.execute("INSERT INTO users(name) VALUES ('next') RETURNING id").fetchone()[0] == 42
             with pytest.raises(psycopg.errors.ForeignKeyViolation):
@@ -74,17 +77,24 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
             manager.restore_dump(wrong_fk, failed, schema_dsn=source_dsn)
         with psycopg.connect(source_dsn) as conn:
             assert conn.execute('SELECT count(*) FROM users').fetchone()[0] == 1
-        # users-only must reject FK-linked current installations before changes.
-        with pytest.raises(RuntimeError, match='внешними ключами'):
+        # The supported users/payments/family closure restores with its FKs intact.
+        first_result = manager._selected_restore_with_snapshot(source_dsn, restored, {})
+        with psycopg.connect(source_dsn) as conn:
+            assert conn.execute('SELECT user_id,note FROM payments').fetchall() == [(41, 'payment text')]
+            assert conn.execute("SELECT COUNT(*) FROM pg_constraint WHERE conname='payments_user_id_fkey'").fetchone()[0] == 1
+            conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(first_result['snapshot_schema'])))
+            conn.execute('CREATE TABLE external_user_reference(user_id BIGINT REFERENCES users(id))')
+        # An unsupported table referencing users must still refuse before changes.
+        with pytest.raises(RuntimeError, match='неподдерживаемая внешняя зависимость'):
             manager._selected_restore_with_snapshot(source_dsn, restored, {})
         with psycopg.connect(source_dsn) as conn:
-            conn.execute('ALTER TABLE payments DROP CONSTRAINT payments_user_id_fkey')
+            conn.execute('DROP TABLE external_user_reference')
             conn.execute('CREATE TABLE audit_log(message TEXT)')
             conn.execute("INSERT INTO audit_log VALUES ('live journal must survive')")
             conn.execute("UPDATE users SET name='live old data'")
         result = manager._selected_restore_with_snapshot(source_dsn, restored, {'users': 1, 'payments': 1, 'referral_rewards': 1})
         with psycopg.connect(source_dsn) as conn:
-            assert conn.execute('SELECT name FROM users').fetchone()[0] == 'Юникод\\.\nline\tTAB \\N'
+            assert conn.execute('SELECT name FROM users').fetchone()[0] == 'Р®РЅРёРєРѕРґ\\.\nline\tTAB \\N'
             assert conn.execute('SELECT message FROM audit_log').fetchall() == [('live journal must survive',)]
             conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(result['snapshot_schema'])))
         with pytest.raises(RuntimeError, match='ожидалось'):

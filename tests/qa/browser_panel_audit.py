@@ -40,7 +40,7 @@ def main() -> int:
             page.on("framenavigated", lambda frame, navs=navs, page=page: navs.append(frame.url) if frame == page.main_frame else None)
             try:
                 html = (RENDERED / f"{name}.html").read_text(encoding="utf-8")
-                html = re.sub(r'<script src="/static/panel\.js\?[^\"]+" defer></script>', "<script>\n" + panel_js + "\n</script>", html, count=1)
+                html = re.sub(r'<script src="/static/panel\.js\?[^\"]+" defer></script>', lambda _: "<script>\n" + panel_js + "\n</script>", html, count=1)
                 # Mocks must appear after panel.js and before page-specific scripts.
                 first_close = html.find("</script>")
                 html = html[:first_close + len("</script>")] + MOCK_SCRIPT + html[first_close + len("</script>"):]

@@ -163,11 +163,10 @@ def profile_accounts(tg_id: int, db_path: str | None = None) -> list[dict[str, A
                       COALESCE(NULLIF(TRIM(u.username),''),'') AS username,
                       COALESCE(NULLIF(TRIM(u.display_name),''),'') AS display_name,
                       COALESCE(NULLIF(TRIM(u.notes),''),'') AS notes
-                 FROM telegram_profile_links l
-                 JOIN users u ON u.tg_id=l.telegram_id
-                WHERE l.profile_tg_id=?
-                ORDER BY CASE WHEN l.telegram_id=? THEN 0 ELSE 1 END,l.telegram_id""",
-            (owner, owner),
+                 FROM users u
+                WHERE u.tg_id=? OR u.tg_id IN (SELECT telegram_id FROM telegram_profile_links WHERE profile_tg_id=?)
+                ORDER BY CASE WHEN u.tg_id=? THEN 0 ELSE 1 END,u.tg_id""",
+            (owner, owner, owner),
         ).fetchall()
     return [
         {
@@ -208,7 +207,11 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
             raise ValueError("Нельзя привязать основной аккаунт к самому себе")
         # Serialize membership changes for one profile so concurrent invites
         # cannot exceed the four-account cap.
-        connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(owner),))
+        for identity in sorted({owner, int(telegram_id)}):
+            connection.execute("SELECT pg_advisory_xact_lock(495, hashtext(?))", (str(identity),))
+        owner_link = connection.execute("SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (owner,)).fetchone()
+        if owner_link and int(owner_link[0]) != owner:
+            raise ValueError("Основной аккаунт уже связан с другим профилем; создайте новую ссылку")
         users = connection.execute(
             "SELECT tg_id,COALESCE(registration_status,'active'),COALESCE(uuid,''),COALESCE(email,''),COALESCE(sub_id,''),COALESCE(expiry_time,0) FROM users WHERE tg_id IN (?,?) ORDER BY tg_id FOR UPDATE",
             (owner, int(telegram_id)),
@@ -221,8 +224,8 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
         existing = connection.execute(
             "SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (int(telegram_id),)
         ).fetchone()
-        if existing:
-            if int(existing[0]) != owner:
+        if existing and int(existing[0]) != int(telegram_id):
+            if int(existing[0]) not in {owner, int(telegram_id)}:
                 raise ValueError("Этот аккаунт уже связан с другим профилем")
             # A new, valid invite from the same owner is safe to acknowledge
             # for an already-linked member, even when the family is full.
@@ -232,16 +235,25 @@ def approve_profile_link_sync(token: str, telegram_id: int, db_path: str | None 
                 (int(time.time()), digest),
             )
             return owner
+        in_flight = connection.execute("SELECT id FROM payments WHERE tg_id IN (?,?) AND status='processing' LIMIT 1", (owner, int(telegram_id))).fetchone()
+        if in_flight:
+            raise ValueError("Платёж профиля сейчас обрабатывается или требует сверки; повторите привязку после завершения обработки")
         count = connection.execute(
-            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=?", (owner,)
+            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?", (owner, owner)
         ).fetchone()
-        if int(count[0] or 0) >= 4:
+        if 1 + int(count[0] or 0) >= 4:
             raise ValueError("В одном профиле может быть не более 4 Telegram аккаунтов")
         alias = by_id[int(telegram_id)]
+        own_members = connection.execute(
+            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?",
+            (int(telegram_id), int(telegram_id)),
+        ).fetchone()
+        if int(own_members[0] or 0):
+            raise ValueError("У приглашённого аккаунта уже есть своя семья; автоматическое объединение запрещено")
         if _has_own_vpn_identity(alias):
             raise ValueError("У дополнительного аккаунта уже есть данные VPN-подписки; сначала разберите профиль в панели")
         connection.execute(
-            "INSERT INTO telegram_profile_links(telegram_id,profile_tg_id,linked_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(telegram_id) DO NOTHING",
+            "INSERT INTO telegram_profile_links(telegram_id,profile_tg_id,linked_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(telegram_id) DO UPDATE SET profile_tg_id=excluded.profile_tg_id,linked_at=CURRENT_TIMESTAMP WHERE telegram_profile_links.profile_tg_id=telegram_profile_links.telegram_id",
             (int(telegram_id), owner),
         )
         current = connection.execute(
@@ -272,11 +284,11 @@ def create_profile_link_request_sync(owner_tg_id: int, db_path: str | None = Non
             "SELECT COALESCE(registration_status,'active') FROM users WHERE tg_id=?", (owner,)
         ).fetchone()
         count = connection.execute(
-            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=?", (owner,)
+            "SELECT COUNT(*) FROM telegram_profile_links WHERE profile_tg_id=? AND telegram_id<>?", (owner, owner)
         ).fetchone()
         if not user or str(user[0]).lower() != 'active':
             raise ValueError("Основной аккаунт должен пройти проверку PIN-кода")
-        if int(count[0] or 0) >= 4:
+        if 1 + int(count[0] or 0) >= 4:
             raise ValueError("Достигнут лимит: максимум 4 аккаунта вместе с основным")
         token = secrets.token_urlsafe(32)
         now = int(time.time())
@@ -303,4 +315,7 @@ def unlink_profile_member_sync(owner_tg_id: int, telegram_id: int, db_path: str 
         ).fetchone()
         if not row or int(row[0]) != owner:
             raise ValueError("Аккаунт не привязан к этому профилю")
+        in_flight = connection.execute("SELECT id FROM payments WHERE tg_id IN (?,?) AND status='processing' LIMIT 1", (owner, int(telegram_id))).fetchone()
+        if in_flight:
+            raise ValueError("Платёж профиля сейчас обрабатывается или требует сверки; повторите отвязку после завершения обработки")
         connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=?", (int(telegram_id),))

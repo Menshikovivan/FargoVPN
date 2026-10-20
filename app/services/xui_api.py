@@ -1341,6 +1341,7 @@ def _ensure_user_columns(connection: sqlite3.Connection) -> None:
         "identity_source": "TEXT",
         "identity_updated_at": "TEXT",
         "notes": "TEXT",
+        "remote_comment": "TEXT",
     }
     for name, ddl in additions.items():
         if name not in columns:
@@ -1439,6 +1440,9 @@ def _rekey_related_rows(connection: sqlite3.Connection, old_tg_id: int, new_tg_i
                 (new_tg_id, old_tg_id),
             )
 
+    from identity_migration import _rekey_family_metadata
+    _rekey_family_metadata(connection, old_tg_id, new_tg_id)
+
     # user_events.rekey_message_state handles the primary-key state table and
     # its own collision-safe merge logic.
     user_events.rekey_message_state(connection, old_tg_id, new_tg_id)
@@ -1512,7 +1516,7 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                 current_tg_id = int(row["tg_id"])
                 if current_tg_id <= 0 and inferred_tg_id > 0:
                     existing = connection.execute(
-                        "SELECT tg_id,username,uuid,email,expiry_time,last_reminder_days FROM users WHERE tg_id=?",
+                        "SELECT * FROM users WHERE tg_id=?",
                         (inferred_tg_id,),
                     ).fetchone()
                     if existing:
@@ -1543,8 +1547,16 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                                         (inferred_tg_id,),
                                     )
                                 existing_dict["username"] = None
+                            from identity_migration import _merge_duplicate_user, IdentityImportError
+                            try:
+                                _merge_duplicate_user(connection, inferred_tg_id, current_tg_id, existing_username or "")
+                            except IdentityImportError:
+                                # A disputed business profile must remain unchanged; do
+                                # not apply the remote snapshot to either side.
+                                protected_local_ids.update({current_tg_id, inferred_tg_id})
+                                logger.error("Конфликт данных при восстановлении identity; требуется ручная сверка")
+                                continue
                             _rekey_related_rows(connection, current_tg_id, inferred_tg_id)
-                            connection.execute("DELETE FROM users WHERE tg_id=?", (current_tg_id,))
                             row = existing_dict
                             tg_id = inferred_tg_id
                             changed += 1
@@ -1644,13 +1656,13 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                 or _int(old.get("total")) != new_total
                 or str(old.get("sub_id") or "") != new_sub_id
                 or old_last_online_ts != merged_last_online_ts
-                or (bool(panel_comment) and str(old.get("notes") or "") != panel_comment)
+                or str(old.get("remote_comment") or "") != panel_comment
             )
             if data_changed:
                 connection.execute(
                     """
                     INSERT INTO users(
-                        tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,notes,
+                        tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,remote_comment,
                         last_online,last_online_ts,last_sync_at,last_reminder_days
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,-1)
                     ON CONFLICT(tg_id) DO UPDATE SET
@@ -1664,7 +1676,8 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                         expiry_time=excluded.expiry_time,
                         enable=excluded.enable,up=excluded.up,down=excluded.down,total=excluded.total,
                         sub_id=excluded.sub_id,
-                        notes=COALESCE(NULLIF(excluded.notes,''),users.notes),
+                        notes=users.notes,
+                        remote_comment=excluded.remote_comment,
                         last_online=COALESCE(excluded.last_online,users.last_online),
                         last_online_ts=GREATEST(COALESCE(excluded.last_online_ts,0),COALESCE(users.last_online_ts,0)),
                         last_sync_at=excluded.last_sync_at
@@ -1939,8 +1952,8 @@ def extend_client_sync(
 ) -> dict[str, Any]:
     """Extend from the later of now/current expiry and re-enable the client.
 
-    Unlike ``bulkAdjust``, this also converts legacy unlimited/zero expiry into a
-    real paid period and can repair the client's Telegram ID in the same update.
+    An existing unlimited client requires an explicit administrator expiry change;
+    ordinary paid renewals must never shorten unlimited access.
     """
     days = int(days)
     if days <= 0:
@@ -1948,6 +1961,8 @@ def extend_client_sync(
     record = get_client_record_sync(email)
     client = record["client"]
     current = normalize_timestamp_ms(client.get("expiryTime", record["normalized"].get("expiry_time", 0)))
+    if current <= 0:
+        raise ValueError("Бессрочная подписка: конечный срок задаётся только явным действием администратора")
     now_ms = int(time.time() * 1000)
     expiry = max(now_ms, current if current > 0 else now_ms) + days * 86_400_000
     changes: dict[str, Any] = {"expiryTime": expiry, "enable": True}

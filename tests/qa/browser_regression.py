@@ -35,7 +35,9 @@ class Handler(BaseHTTPRequestHandler):
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start();base='http://localhost:'+str(server.server_port)
 results=[];console=[];errors=[];requests=[]
 with sync_playwright() as p:
- b=p.chromium.launch(headless=True);page=b.new_page();page.set_default_timeout(2000);page.on('pageerror',lambda e:errors.append(str(e)));page.on('console',lambda m:console.append(m.text) if m.type=='error' else None)
+ launch_options={'headless':True}
+ if os.environ.get('FARGOVPN_CHROMIUM'):launch_options['executable_path']=os.environ['FARGOVPN_CHROMIUM']
+ b=p.chromium.launch(**launch_options);page=b.new_page();page.set_default_timeout(2000);page.set_default_navigation_timeout(15000);page.on('pageerror',lambda e:errors.append(str(e)));page.on('console',lambda m:console.append(m.text) if m.type=='error' else None)
  # All requests, including SW requests, use the real fixture HTTP server.
  def test(name,fn):
   started=time.perf_counter()

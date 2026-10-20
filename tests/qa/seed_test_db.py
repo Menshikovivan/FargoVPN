@@ -3,7 +3,7 @@
 
 Usage:
   FARGOVPN_DATABASE_URL=postgresql+psycopg://qa:qa@127.0.0.1:5432/fargovpn_qa \
-    PYTHONPATH=app python3 tests/qa/seed_test_db.py --users 300 --messages 1500 --logs 1200
+    PYTHONPATH=app python3 tests/qa/seed_test_db.py --allow-disposable-loopback --users 300 --messages 1500 --logs 1200
 """
 from __future__ import annotations
 import argparse
@@ -20,6 +20,8 @@ sys.path.insert(0, str(APP))
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-disposable-loopback", action="store_true",
+                        help="confirm that the named local QA database may be cleared")
     parser.add_argument("--users", type=int, default=300)
     parser.add_argument("--messages", type=int, default=1500)
     parser.add_argument("--logs", type=int, default=1200)
@@ -29,6 +31,22 @@ def main() -> int:
         raise SystemExit("Refusing to run without an explicit FARGOVPN_DATABASE_URL/DATABASE_URL for the QA database")
     if "postgresql" not in dsn.lower():
         raise SystemExit("QA seeder requires PostgreSQL; provide a dedicated postgresql+psycopg DSN")
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(dsn.replace('postgresql+psycopg://', 'postgresql://', 1))
+        port = parts.port
+    except ValueError:
+        raise SystemExit('Refusing a malformed disposable database URL') from None
+    database = parts.path.lstrip('/')
+    if (parts.scheme != 'postgresql' or parts.query or parts.fragment
+            or (port is not None and not 1 <= port <= 65535)
+            or not args.allow_disposable_loopback or parts.hostname not in {'localhost', '127.0.0.1', '::1'}
+            or not (database.endswith('_qa') or database.startswith('audit542_'))):
+        raise SystemExit('Refusing to clear a database without explicit disposable-loopback confirmation and a QA database name')
+    if not database.replace('_', '').isalnum() or not database.isascii():
+        raise SystemExit('Refusing an ambiguous disposable database name')
+    if min(args.users, args.messages, args.logs) < 0 or max(args.users, args.messages, args.logs) > 100_000:
+        raise SystemExit('QA row counts must be between 0 and 100000')
 
     import config
     import init_db

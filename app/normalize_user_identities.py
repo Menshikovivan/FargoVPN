@@ -138,7 +138,7 @@ def run(*, dry_run: bool = False, backup_dir: str | None = None) -> dict[str, An
                     # An empty observed value also prevents reviving a removed handle.
                     username = observed_username or None
                     counts["telegram_usernames_recovered"] += 1
-                elif source.startswith(("3x-ui", "3xui", "xui", "panel")):
+                elif tg_id not in trusted_usernames and source.startswith(("3x-ui", "3xui", "xui", "panel")):
                     # A syntactically valid panel client name is not proof of a
                     # Telegram handle. If no matching inbound Telegram snapshot
                     # exists, clear it instead of linking to a potentially unrelated
