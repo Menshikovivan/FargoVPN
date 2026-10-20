@@ -30,6 +30,7 @@ def _messages_script() -> str:
         script.replace("__MESSAGES_PATH__", '"/messages"')
         .replace("__MESSAGES_FEED_PATH__", '"/api/panel/messages/feed"')
         .replace("__MESSAGES_CHAT_FEED_PATH__", '"/api/panel/messages/chat-feed"')
+        .replace("__MESSAGES_USER_EVENTS_PATH__", '"/api/users/123/events"')
         .replace("{selected}", "123")
         .replace("{direction}", "all")
         .replace("{message_kind}", "all")
@@ -49,6 +50,10 @@ def test_selected_chat_has_an_independent_authenticated_incremental_endpoint():
     assert '"next_after_id": next_after_id' in endpoint
     assert "limit=500" in endpoint
     assert '"events": serialized' in endpoint
+    assert 'response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"' in endpoint
+    assert 'response.headers["Pragma"] = "no-cache"' in endpoint
+    global_feed = source[source.index('@app.get("/api/panel/messages/feed")'):source.index('@app.get("/api/panel/messages/chat-feed")')]
+    assert 'response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"' in global_feed
 
 
 def test_page_uses_separate_selected_chat_cursor_and_isolates_poll_errors():
@@ -58,7 +63,11 @@ def test_page_uses_separate_selected_chat_cursor_and_isolates_poll_errors():
     assert "let selectedAfterId=Number({selected_chat_last_id})||0;" in page
     assert "chatUrl.searchParams.set('after_id',String(selectedAfterId));" in page
     assert "[FargoVPN] messages dialog feed" in page
-    assert "[FargoVPN] messages chat feed" in page
+    assert "[FargoVPN] messages selected chat feed" in page
+    assert "[FargoVPN] messages chat-feed; пробую совместимый events API" in page
+    assert "let stopped=false,dialogTimer=0,chatTimer=0" in page
+    assert "async function requestJson(url,timeoutMs=POLL_TIMEOUT_MS)" in page
+    assert "signal:controller.signal" in page
 
 
 def test_sender_row_uses_full_row_click_target_but_keeps_telegram_link_above_it():
@@ -71,7 +80,7 @@ def test_sender_row_uses_full_row_click_target_but_keeps_telegram_link_above_it(
 
 
 @pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")
-def test_incoming_message_is_inserted_without_reload_even_if_global_feed_fails():
+def test_incoming_message_is_inserted_without_reload_even_if_global_feed_hangs():
     script = _messages_script()
     panel_css = (APP / "static/panel.css").read_text(encoding="utf-8")
     chat_css = panel_css[panel_css.index(".messages-toolbar{margin-bottom:10px}"):panel_css.index("/* Monitoring, updates, jobs, settings */")]
@@ -89,7 +98,7 @@ def test_incoming_message_is_inserted_without_reload_even_if_global_feed_fails()
       window.__chatFeedCalls=0;
       window.fetch=async (url,opts={})=>{
         const u=new URL(String(url),document.baseURI);
-        if(u.pathname.endsWith('/api/panel/messages/feed')) return {ok:false,status:503,json:async()=>({detail:'dialog feed offline'})};
+        if(u.pathname.endsWith('/api/panel/messages/feed')) return new Promise(()=>{}); // simulate a stalled proxy/upstream request
         if(u.pathname.endsWith('/api/panel/messages/chat-feed')) {
           window.__chatFeedCalls++;
           const after=Number(u.searchParams.get('after_id')||0);
@@ -147,4 +156,51 @@ def test_clicking_sender_count_area_opens_internal_chat():
         assert box is not None
         page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         assert page.evaluate("window.__internalChatClicked === true")
+        browser.close()
+
+@pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")
+def test_sending_reply_does_not_skip_unpolled_incoming_event():
+    """A send echo may have a greater ID than an incoming event that has not been polled yet."""
+    script = _messages_script()
+    html = """<!doctype html><meta charset='utf-8'><base href='http://qa.local/'>
+    <div data-message-list></div><input data-message-search>
+    <div data-message-chat data-selected-tg-id='123'></div>
+    <form id='messages-compose-form' action='/users/123/message' method='post'>
+      <textarea id='messages-compose-text'></textarea><input type='file' name='media'>
+      <div id='messages-compose-status' hidden></div><button id='messages-compose-send'>Отправить</button>
+      <button id='messages-compose-retry' hidden>Повторить</button>
+    </form><div data-message-dialog-count>0</div>
+    <script>
+      const nativeTimeout=window.setTimeout.bind(window);
+      window.setTimeout=(fn,ms,...args)=>nativeTimeout(fn,Number(ms)===650?10000:Math.min(Number(ms)||0,40),...args);
+      window.__chatAfter=[];window.__sent=false;
+      window.fetch=(url,opts={})=>{
+        const u=new URL(String(url),document.baseURI);
+        if(opts.method==='POST'){
+          window.__sent=true;
+          return Promise.resolve({ok:true,status:200,json:async()=>({ok:true,event:{id:902,tg_id:123,direction:'out',message_kind:'message',delivery_status:'delivered',display_username:'tester',created_at:'2026-10-20 14:10:00',text:'Ответ отправлен'}})});
+        }
+        if(u.pathname.endsWith('/api/panel/messages/feed'))return new Promise(()=>{});
+        if(u.pathname.endsWith('/api/panel/messages/chat-feed')){
+          window.__chatAfter.push(Number(u.searchParams.get('after_id')||0));
+          const first=window.__chatAfter.length===1;
+          const event={id:901,tg_id:123,direction:'in',message_kind:'message',delivery_status:'received',display_username:'tester',created_at:'2026-10-20 14:09:00',text:'Входящее до ответа'};
+          return Promise.resolve({ok:true,status:200,json:async()=>({ok:true,next_after_id:first?901:Number(u.searchParams.get('after_id')||0),events:first?[event]:[]})});
+        }
+        return Promise.reject(new Error('Unexpected fetch URL '+u.href));
+      };
+    </script>""" + "<script>" + script + "</script>"
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        page = browser.new_page()
+        errors=[]
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content(html, wait_until="domcontentloaded")
+        page.locator('#messages-compose-text').fill('Ответ')
+        page.locator('#messages-compose-send').click()
+        page.wait_for_function("document.body.innerText.includes('Входящее до ответа')", timeout=5000)
+        assert page.locator('[data-message-chat] [data-event-id="901"]').count() == 1
+        assert page.locator('[data-message-chat] [data-event-id="902"]').count() == 1
+        assert page.evaluate("window.__chatAfter[0] === 900")
+        assert not errors
         browser.close()

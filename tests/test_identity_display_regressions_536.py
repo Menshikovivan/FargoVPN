@@ -1,4 +1,4 @@
-"""Regression tests for trusted Telegram identity and username-only links in 5.1.39."""
+"""Regression tests for trusted Telegram identity and username-only links in 5.1.40."""
 from __future__ import annotations
 
 import ast
@@ -76,10 +76,10 @@ def test_audit_layout_does_not_force_details_column_to_one_pixel():
 
 
 def test_version_strings_are_coherent_for_release():
-    assert (APP / "VERSION").read_text(encoding="utf-8").strip() == "5.1.39"
-    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == "5.1.39"
+    assert (APP / "VERSION").read_text(encoding="utf-8").strip() == "5.1.40"
+    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == "5.1.40"
     js = (APP / "static/panel.js").read_text(encoding="utf-8")
-    assert "const PANEL_BUILD_VERSION = '5.1.39';" in js
+    assert "const PANEL_BUILD_VERSION = '5.1.40';" in js
 
 
 def test_family_member_and_payment_labels_are_clickable_telegram_profiles():

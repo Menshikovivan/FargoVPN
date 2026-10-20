@@ -62,7 +62,7 @@ def test_messages_composer_enter_and_shift_enter_behavior():
 def test_messages_polling_preserves_scroll_and_does_not_reload_page():
     src = func("webapp.py", "messages_page")
     assert "after_id" in src
-    assert "setTimeout(poll,3000)" in src
+    assert "setTimeout(pollSelectedChat" in src and "setTimeout(pollDialogFeed" in src
     assert "data-message-live-feed=\"1\"" in src
     assert "const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64" in src
     assert "chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight))" in src
@@ -100,7 +100,9 @@ def test_messages_page_initial_history_renders_event_media():
     src = func("webapp.py", "messages_page")
     assert "_event_media_html(event_for_web(event, tid))" in src
     assert "if(data.event)" in src
-    assert "if(!inflight)poll()" in src
+    assert "clearTimeout(chatTimer);chatTimer=setTimeout(pollSelectedChat,50)" in src
+    assert "selectedAfterId=Math.max(selectedAfterId,Number(data.event.id)" not in src
+    assert "CHAT_POLL_MS=1800" in src
 
 
 def test_friendly_telegram_errors_cover_requested_cases():

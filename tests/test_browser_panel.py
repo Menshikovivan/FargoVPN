@@ -134,6 +134,7 @@ def _messages_script_511() -> str:
     return (script.replace("__MESSAGES_PATH__", '"/messages"')
             .replace("__MESSAGES_FEED_PATH__", '"/api/panel/messages/feed"')
             .replace("__MESSAGES_CHAT_FEED_PATH__", '"/api/panel/messages/chat-feed"')
+            .replace("__MESSAGES_USER_EVENTS_PATH__", '"/api/users/123/events"')
             .replace("{selected}", "123").replace("{direction}", "all")
             .replace("{message_kind}", "all").replace("{global_last_id}", "0")
             .replace("{selected_chat_last_id}", "900"))
@@ -214,6 +215,7 @@ def test_real_browser_messages_receives_incoming_without_navigation_512():
         page.on('framenavigated', lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)
         page.set_content(html, wait_until='domcontentloaded')
         page.wait_for_function("document.body.innerText.includes('Входящее без перезагрузки')", timeout=5000)
+        page.wait_for_function("document.querySelectorAll('.message-unread-badge').length === 1", timeout=3000)
         assert not navigations
         assert page.locator('.message-unread-badge').count() == 1
         assert not errors
