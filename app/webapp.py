@@ -3787,6 +3787,35 @@ def panel_messages_feed_api(
     }
 
 
+@app.get("/api/panel/messages/chat-feed")
+def panel_messages_chat_feed_api(
+    request: Request,
+    tg_id: int,
+    after_id: int = 0,
+):
+    """Independent cursor for the selected chat, not coupled to global journal traffic."""
+    require_auth(request)
+    selected_tg_id = int(tg_id or 0)
+    if selected_tg_id <= 0:
+        raise HTTPException(400, "Нужен положительный Telegram ID")
+    after_id = max(0, int(after_id or 0))
+    events = user_events.recent_events(
+        selected_tg_id, limit=500, after_id=after_id, db_path=config.DB_PATH
+    )
+    identity = _current_identity_fields(selected_tg_id)
+    serialized = [event_for_web({**event, **identity}, selected_tg_id) for event in events]
+    next_after_id = max(
+        [after_id, *(int(event.get("id") or 0) for event in events)]
+    )
+    return {
+        "ok": True,
+        "tg_id": selected_tg_id,
+        "events": serialized,
+        "next_after_id": next_after_id,
+        "has_more": len(events) >= 500,
+    }
+
+
 APP_LOG_DEFAULT = "/var/log/vpn_bot.log"
 
 def _app_log_path() -> Path:
@@ -4118,6 +4147,13 @@ def messages_page(
         if selected_user else (f"ID {selected}" if selected else "Все сообщения")
     )
     global_last_id = max((int(item.get("last_event_id") or 0) for item in participants), default=0)
+    # Seed the selected chat's own cursor from that dialog, not the global journal.
+    # This remains reliable even when unrelated/system events advance the global cursor.
+    selected_chat_last_id = (
+        int(selected_user.get("last_event_id") or 0)
+        if selected_user
+        else max((int(event.get("id") or 0) for event in events), default=0)
+    )
 
     if selected > 0:
         try:
@@ -4249,6 +4285,7 @@ def messages_page(
 <section class="card messages-history"><div class="chat-head"><div><strong>{html.escape(selected_name)}</strong><span class="muted">{len(events)} событий на странице</span></div><div class="actions">{selected_telegram_link}{card_link}</div></div><div class="chat-window" data-message-chat data-selected-tg-id="{selected}">{"".join(event_rows) or '<div class="muted">Для выбранной выборки сообщений нет.</div>'}</div>{compose}<div class="messages-pagination"><span class="muted">Страница {page_no} из {total_pages}</span>{" ".join(pagination)}</div></section></div>'''
     messages_path_js = json.dumps(public_path("/messages"))
     messages_feed_path_js = json.dumps(public_path("/api/panel/messages/feed"))
+    messages_chat_feed_path_js = json.dumps(public_path("/api/panel/messages/chat-feed"))
     scripts = f'''<script>(function(){{
 const list=document.querySelector('[data-message-list]');
 const search=document.querySelector('[data-message-search]');
@@ -4264,6 +4301,7 @@ const selected=Number({selected})||0;
 const activeDirection='{direction}';
 const activeKind='{message_kind}';
 let globalAfterId=Number({global_last_id})||0;
+let selectedAfterId=Number({selected_chat_last_id})||0;
 let inflight=false,stopped=false,timer=0,filterTimer=0;
 function applySearch(){{if(!list)return;const q=(search?.value||'').trim().toLocaleLowerCase();list.querySelectorAll('.message-user-row').forEach(row=>{{row.hidden=!!q&&!row.textContent.toLocaleLowerCase().includes(q);}});}}
 function unreadMap(items){{return new Map((Array.isArray(items)?items:[]).map(item=>[Number(item.tg_id)||0,Math.max(0,Number(item.count)||0)]));}}
@@ -4272,8 +4310,40 @@ function upsertDialog(item){{if(!list||!item||!(Number(item.tg_id)>0))return;con
 function eventNode(item){{if(!item||!item.id)return null;const id=Number(item.id);if(chat&&chat.querySelector('[data-event-id="'+id+'"]'))return null;const box=document.createElement('div');box.className='chat-message '+(item.direction||'system')+' '+(item.message_kind||'message')+(item.success===false?' failed':'');box.dataset.eventId=String(id);const muted=document.createElement('div');muted.className='muted';const direction={{in:'← Входящее',out:'→ Исходящее',system:'• Система'}}[item.direction]||item.direction||'• Система';const kind=item.message_kind==='service'?'служебное':'сообщение';const status={{delivered:'доставлено',failed:'ошибка доставки',received:'получено',unknown:'статус неизвестен'}}[item.delivery_status]||item.delivery_status||'статус неизвестен';muted.append(document.createTextNode(direction+' · '+kind+' · '));const whoId=Number(item.tg_id||selected)||0;const whoLabel=String(item.display_label||item.display_username||('ID '+whoId));const whoUsername=String(item.display_username||'').trim().replace(/^@/,'');const validWhoUsername=/^[A-Za-z0-9_]{1,100}$/.test(whoUsername)&&!/^[0-9]+$/.test(whoUsername)&&!['none','null','undefined','id'].includes(whoUsername.toLowerCase())&&!/^id_?[0-9]+$/i.test(whoUsername);if(whoId>0&&validWhoUsername){{const who=document.createElement('a');who.className='telegram-inline-link';who.href='https://t.me/'+encodeURIComponent(whoUsername);who.target='_blank';who.rel='noopener noreferrer';who.textContent=whoLabel;who.title='Открыть переписку с пользователем в Telegram';muted.appendChild(who);}}else muted.appendChild(document.createTextNode(whoLabel));muted.appendChild(document.createTextNode(' · '+String(item.created_at||'')+' · #'+id+' · '+status));const media=item.metadata&&item.metadata.media;if(media&&media.url&&media.kind==='photo'){{const link=document.createElement('a');link.className='chat-media-link';link.href=media.url;link.target='_blank';link.rel='noopener';const image=document.createElement('img');image.className='chat-media-image';image.src=media.url;image.alt=media.file_name||'Фотография';image.loading='lazy';link.appendChild(image);box.appendChild(link);}}else if(media&&media.url&&media.kind==='video'){{const video=document.createElement('video');video.className='chat-media-video';video.controls=true;video.preload='metadata';video.playsInline=true;video.src=media.url;box.appendChild(video);}}const text=document.createElement('div');text.className='chat-message-text';text.textContent=String(item.text||item.event_type||'Событие');box.append(muted,text);return box;}}
 function appendSelected(items){{if(!chat)return;const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64;for(const item of (items||[])){{if(Number(item.tg_id)!==selected)continue;if(activeDirection!=='all'&&String(item.direction||'system')!==activeDirection)continue;if(activeKind!=='all'&&String(item.message_kind||'message')!==activeKind)continue;const node=eventNode(item);if(!node)continue;const oldHeight=chat.scrollHeight;chat.appendChild(node);if(atBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight));}}}}
 function setStatus(message,kind='bad'){{if(!composeStatus)return;composeStatus.hidden=!message;composeStatus.textContent=message||'';composeStatus.className='notice '+(kind==='good'?'good':'bad');if(composeRetry)composeRetry.hidden=!lastFailedPayload;}}
-async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);}}else{{setTimeout(()=>{{if(!inflight)poll();}},100);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
-async function poll(){{if(stopped||document.hidden){{timer=setTimeout(poll,5000);return;}}if(inflight){{timer=setTimeout(poll,1500);return;}}inflight=true;try{{const url=new URL(__MESSAGES_FEED_PATH__,document.baseURI);url.searchParams.set('after_id',String(globalAfterId));if(selected)url.searchParams.set('tg_id',String(selected));const response=await fetch(url.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();globalAfterId=Math.max(globalAfterId,Number(data.next_after_id)||globalAfterId);updateUnread(data.unread||{{}});for(const item of (Array.isArray(data.dialogs)?data.dialogs:[]))upsertDialog(item);appendSelected(data.selected_events||[]);}}catch(error){{console.debug('[FargoVPN] messages live feed',error);}}finally{{inflight=false;timer=setTimeout(poll,3000);}}}}
+async function doSend(payload){{if(!compose)return;composeSend.disabled=true;if(composeRetry)composeRetry.hidden=true;setStatus('Отправка…','good');try{{let result;if(window.apiFetch){{result=await window.apiFetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}},timeout:30000}});}}else{{const response=await fetch(compose.action,{{method:'POST',body:payload,credentials:'same-origin',headers:{{Accept:'application/json'}}}});let data={{}};try{{data=await response.json();}}catch(_){{}}result={{response,data}};}}const response=result?.response;const data=result?.data||{{}};if(!response||!response.ok||data.ok===false)throw new Error(data.detail||data.error||('HTTP '+(response?.status||0)));if(data.event){{appendSelected([data.event]);globalAfterId=Math.max(globalAfterId,Number(data.event.id)||globalAfterId);selectedAfterId=Math.max(selectedAfterId,Number(data.event.id)||selectedAfterId);}}else{{setTimeout(()=>{{if(!inflight)poll();}},100);}}compose.reset();lastFailedPayload=null;setStatus('Сообщение отправлено','good');composeText?.focus();return true;}}catch(error){{lastFailedPayload=payload;setStatus(error?.message||'Не удалось отправить сообщение');composeText?.focus();return false;}}finally{{composeSend.disabled=false;}}}}
+async function poll(){{
+if(stopped||document.hidden){{timer=setTimeout(poll,5000);return;}}
+if(inflight){{timer=setTimeout(poll,500);return;}}
+inflight=true;
+try{{
+  // Dialog counters/list and selected-chat history use independent requests/cursors.
+  // A failure in one must not prevent the visible conversation from refreshing.
+  try{{
+    const url=new URL(__MESSAGES_FEED_PATH__,document.baseURI);
+    url.searchParams.set('after_id',String(globalAfterId));
+    const response=await fetch(url.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const data=await response.json();
+    globalAfterId=Math.max(globalAfterId,Number(data.next_after_id)||globalAfterId);
+    updateUnread(data.unread||{{}});
+    for(const item of (Array.isArray(data.dialogs)?data.dialogs:[]))upsertDialog(item);
+  }}catch(error){{console.debug('[FargoVPN] messages dialog feed',error);}}
+  if(selected){{
+    try{{
+      const chatUrl=new URL(__MESSAGES_CHAT_FEED_PATH__,document.baseURI);
+      chatUrl.searchParams.set('tg_id',String(selected));
+      chatUrl.searchParams.set('after_id',String(selectedAfterId));
+      const chatResponse=await fetch(chatUrl.toString(),{{credentials:'same-origin',cache:'no-store',headers:{{Accept:'application/json'}}}});
+      if(!chatResponse.ok)throw new Error('HTTP '+chatResponse.status);
+      const chatData=await chatResponse.json();
+      const chatEvents=Array.isArray(chatData.events)?chatData.events:[];
+      appendSelected(chatEvents);
+      const batchMax=chatEvents.reduce((value,item)=>Math.max(value,Number(item.id)||0),selectedAfterId);
+      selectedAfterId=Math.max(selectedAfterId,Number(chatData.next_after_id)||batchMax);
+    }}catch(error){{console.debug('[FargoVPN] messages chat feed',error);}}
+  }}
+}}finally{{inflight=false;timer=setTimeout(poll,3000);}}
+}}
 if(search)search.addEventListener('input',()=>{{clearTimeout(filterTimer);filterTimer=setTimeout(applySearch,80);}});
 if(composeText)composeText.addEventListener('keydown',(event)=>{{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){{event.preventDefault();compose?.requestSubmit();}}}});
 if(compose)compose.addEventListener('submit',async(event)=>{{event.preventDefault();if(composeSend?.disabled)return;const media=compose.querySelector('input[type=file]');if(!String(composeText?.value||'').trim()&&!(media?.files?.length)){{setStatus('Введите сообщение или выберите фото/видео');composeText?.focus();return;}}lastFailedPayload=new FormData(compose);await doSend(lastFailedPayload);}});
@@ -4281,7 +4351,7 @@ if(composeRetry)composeRetry.addEventListener('click',async()=>{{if(lastFailedPa
 document.addEventListener('visibilitychange',()=>{{if(!document.hidden){{clearTimeout(timer);poll();}}}});
 window.addEventListener('pagehide',()=>{{stopped=true;clearTimeout(timer);}},{{once:true}});
 window.__fargovpnUnreadMap=new Map();applySearch();setTimeout(poll,1200);
-}})();</script>'''.replace('__MESSAGES_PATH__', messages_path_js).replace('__MESSAGES_FEED_PATH__', messages_feed_path_js)
+}})();</script>'''.replace('__MESSAGES_PATH__', messages_path_js).replace('__MESSAGES_FEED_PATH__', messages_feed_path_js).replace('__MESSAGES_CHAT_FEED_PATH__', messages_chat_feed_path_js)
     return page(request, "Сообщения", body, "messages", scripts)
 
 

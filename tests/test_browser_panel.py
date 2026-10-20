@@ -131,7 +131,12 @@ def _messages_script_511() -> str:
     start = source.index("    scripts = f" + "'''<script>(function(){{", source.index('def messages_page('))
     end = source.index("</script>" + "'''", start)
     script = source[start:end].split("<script>", 1)[1].replace("{{", "{").replace("}}", "}")
-    return (script.replace("__MESSAGES_PATH__", '"/messages"').replace("__MESSAGES_FEED_PATH__", '"/api/panel/messages/feed"').replace("{selected}", "123").replace("{direction}", "all").replace("{message_kind}", "all").replace("{global_last_id}", "0"))
+    return (script.replace("__MESSAGES_PATH__", '"/messages"')
+            .replace("__MESSAGES_FEED_PATH__", '"/api/panel/messages/feed"')
+            .replace("__MESSAGES_CHAT_FEED_PATH__", '"/api/panel/messages/chat-feed"')
+            .replace("{selected}", "123").replace("{direction}", "all")
+            .replace("{message_kind}", "all").replace("{global_last_id}", "0")
+            .replace("{selected_chat_last_id}", "900"))
 
 
 @pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")
@@ -200,7 +205,7 @@ def test_real_browser_messages_receives_incoming_without_navigation_512():
     <div data-message-list></div><input data-message-search><div data-message-chat data-selected-tg-id="123"></div>
     <form id='messages-compose-form' action='/users/123/message'><textarea id='messages-compose-text'></textarea><input id='media' type='file'><div id='messages-compose-status' hidden></div><button id='messages-compose-send' type='submit'>Отправить</button><button id='messages-compose-retry' type='button' hidden>Повторить</button></form>
     <div data-message-dialog-count></div>
-    <script>window.__polls=0;window.fetch=(url,opts)=>{if(String(url).includes('/api/panel/messages/feed')){window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({next_after_id:9100,unread:{total:1,items:[{tg_id:123,count:1}]},dialogs:[{tg_id:123,username:'tester',incoming_events:2,outgoing_events:1,last_event_id:9100}],selected_events:window.__polls===1?[{id:9100,tg_id:123,direction:'in',message_kind:'message',delivery_status:'received',display_username:'tester',created_at:'2026-10-09 00:30:00',text:'Входящее без перезагрузки'}]:[]})});}return Promise.reject(new Error('unexpected fetch '+url));};</script>
+    <script>window.__polls=0;window.__chatPolls=0;window.fetch=(url,opts)=>{const u=new URL(String(url),document.baseURI);if(u.pathname.endsWith('/api/panel/messages/feed')){window.__polls++;return Promise.resolve({ok:true,status:200,json:async()=>({next_after_id:9100,unread:{total:1,items:[{tg_id:123,count:1}]},dialogs:[{tg_id:123,username:'tester',incoming_events:2,outgoing_events:1,last_event_id:9100}],selected_events:[]})});}if(u.pathname.endsWith('/api/panel/messages/chat-feed')){window.__chatPolls++;return Promise.resolve({ok:true,status:200,json:async()=>({ok:true,next_after_id:9101,events:window.__chatPolls===1?[{id:9101,tg_id:123,direction:'in',message_kind:'message',delivery_status:'received',display_username:'tester',created_at:'2026-10-09 00:30:00',text:'Входящее без перезагрузки'}]:[]})});}return Promise.reject(new Error('unexpected fetch '+url));};</script>
     <script>""" + _messages_script_511() + """</script></body>"""
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
