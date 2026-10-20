@@ -47,6 +47,7 @@ def test_selected_chat_has_an_independent_authenticated_incremental_endpoint():
     assert "require_auth(request)" in endpoint
     assert "user_events.recent_events(" in endpoint
     assert "after_id=after_id" in endpoint
+    assert "overlap=max(0, min(int(overlap or 0), 100))" in endpoint
     assert '"next_after_id": next_after_id' in endpoint
     assert "limit=500" in endpoint
     assert '"events": serialized' in endpoint
@@ -62,6 +63,9 @@ def test_page_uses_separate_selected_chat_cursor_and_isolates_poll_errors():
     assert 'messages_chat_feed_path_js = json.dumps(public_path("/api/panel/messages/chat-feed"))' in page
     assert "let selectedAfterId=Number({selected_chat_last_id})||0;" in page
     assert "chatUrl.searchParams.set('after_id',String(selectedAfterId));" in page
+    assert "chatUrl.searchParams.set('overlap',String(CHAT_OVERLAP));" in page
+    assert "chatUrl.searchParams.set('_poll_ts',String(Date.now()));" in page
+    assert "url.searchParams.set('_poll_ts',String(Date.now()));" in page
     assert "[FargoVPN] messages dialog feed" in page
     assert "[FargoVPN] messages selected chat feed" in page
     assert "[FargoVPN] messages chat-feed; пробую совместимый events API" in page
@@ -90,7 +94,7 @@ def test_incoming_message_is_inserted_without_reload_even_if_global_feed_hangs()
       <a class='message-user-open' href='/messages?tg_id=123'><span class='message-user-main'><strong>Тестовый пользователь</strong><span>#123</span></span></a>
       <a class='message-user-telegram' href='https://t.me/tester' target='_blank'>Telegram ↗</a>
       <small>1 входящее · 1 исходящее</small></div></div>
-    <input data-message-search><div data-message-chat data-selected-tg-id='123'><div class='chat-message in' data-event-id='900'>Старое сообщение</div></div>
+    <input data-message-search><div data-message-chat data-selected-tg-id='123'><div class='muted message-empty-state'>Для выбранной выборки сообщений нет.</div></div>
     <form id='messages-compose-form' action='/users/123/message' method='post'><textarea id='messages-compose-text'></textarea><input type='file' name='media'><div id='messages-compose-status' hidden></div><button id='messages-compose-send'>Отправить</button><button id='messages-compose-retry' hidden>Повторить</button></form><div data-message-dialog-count>1</div>
     <script>
       const nativeTimeout=window.setTimeout.bind(window);
@@ -127,6 +131,7 @@ def test_incoming_message_is_inserted_without_reload_even_if_global_feed_hangs()
             timeout=5000,
         )
         assert page.locator('[data-message-chat] [data-event-id="1001"]').count() == 1
+        assert page.locator('[data-message-chat] .message-empty-state').count() == 0
         assert page.locator('[data-message-chat]').inner_text().endswith("Новое входящее без обновления")
         assert not navigations
         assert page.evaluate("window.__chatFeedCalls") >= 2
@@ -202,5 +207,35 @@ def test_sending_reply_does_not_skip_unpolled_incoming_event():
         assert page.locator('[data-message-chat] [data-event-id="901"]').count() == 1
         assert page.locator('[data-message-chat] [data-event-id="902"]').count() == 1
         assert page.evaluate("window.__chatAfter[0] === 900")
+        assert not errors
+        browser.close()
+
+
+@pytest.mark.skipif(sync_playwright is None, reason="Playwright is not installed")
+def test_late_committing_lower_id_event_is_inserted_in_order_and_deduplicated():
+    script = _messages_script().replace("let selectedAfterId=Number(900)||0;", "let selectedAfterId=Number(902)||0;")
+    html = """<!doctype html><meta charset='utf-8'><base href='http://qa.local/'>
+    <div data-message-list><div class='message-user-row active' data-tg-id='123'><a class='message-user-open' href='/messages?tg_id=123'><strong>Пользователь</strong></a></div></div>
+    <input data-message-search><div data-message-chat data-selected-tg-id='123'><div class='chat-message in' data-event-id='900'>Раннее</div><div class='chat-message in' data-event-id='902'>Позднее по ID</div></div>
+    <form id='messages-compose-form' action='/users/123/message' method='post'><textarea id='messages-compose-text'></textarea><input type='file' name='media'><div id='messages-compose-status' hidden></div><button id='messages-compose-send'>Отправить</button><button id='messages-compose-retry' hidden>Повторить</button></form><div data-message-dialog-count>1</div>
+    <script>
+      const nativeTimeout=window.setTimeout.bind(window);window.setTimeout=(fn,ms,...args)=>nativeTimeout(fn,Math.min(Number(ms)||0,80),...args);
+      window.__chatFeedCalls=0;window.__pollUrls=[];
+      window.fetch=async (url,opts={})=>{const u=new URL(String(url),document.baseURI);window.__pollUrls.push(u.href);if(u.pathname.endsWith('/api/panel/messages/feed'))return new Promise(()=>{});if(u.pathname.endsWith('/api/panel/messages/chat-feed')){window.__chatFeedCalls++;const after=Number(u.searchParams.get('after_id')||0);const event={id:901,tg_id:123,direction:'in',message_kind:'message',delivery_status:'received',display_username:'tester',created_at:'2026-10-20 14:00:00',text:'Поздно зафиксированное событие'};return {ok:true,status:200,json:async()=>({ok:true,tg_id:123,events:[event],next_after_id:after})};}throw new Error('Unexpected URL '+u.href);};
+    </script>"""
+    # Every overlap response deliberately repeats ID 901; the DOM must de-duplicate it.
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        page = browser.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content(html, wait_until="domcontentloaded")
+        page.add_script_tag(content=script)
+        page.wait_for_function("document.querySelector('[data-message-chat] [data-event-id=\"901\"]') !== null", timeout=5000)
+        ids = page.locator('[data-message-chat] [data-event-id]').evaluate_all("nodes => nodes.map(node => Number(node.dataset.eventId))")
+        assert ids == [900, 901, 902]
+        page.wait_for_timeout(200)
+        assert page.locator('[data-message-chat] [data-event-id="901"]').count() == 1
+        assert page.evaluate("window.__pollUrls.some(url => new URL(url).pathname.endsWith('/api/panel/messages/chat-feed') && new URL(url).searchParams.has('_poll_ts'))")
         assert not errors
         browser.close()

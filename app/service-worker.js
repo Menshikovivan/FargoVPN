@@ -74,15 +74,47 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || !url.pathname.startsWith(BASE)) return;
   if (url.pathname === new URL('service-worker.js', self.location).pathname) return;
-  event.respondWith(
-    caches.match(request).then(cached => cached || fetch(request).then(response => {
-      const copy = response.clone();
-      if (response.ok && url.pathname.startsWith(BASE + 'static/')) {
-        caches.open(CACHE).then(cache => cache.put(request, copy)).catch(() => {});
+
+  // Dynamic API responses must never be served from CacheStorage. In particular,
+  // a cached empty chat-feed response repeats the same after_id cursor forever,
+  // hiding new Telegram messages until the page/dialog is reopened. Older
+  // workers used global caches.match(), which could also read legacy API entries.
+  const relativePath = url.pathname.slice(BASE.length);
+  const isApi = /(?:^|\/)api(?:\/|$)/.test(relativePath);
+  const accept = String(request.headers.get('Accept') || '').toLowerCase();
+  const wantsJson = accept.includes('application/json');
+  const isStaticAsset = relativePath.startsWith('static/');
+  const isManifest = relativePath === 'manifest.webmanifest';
+
+  if (isApi || wantsJson || request.cache === 'no-store' || (!isStaticAsset && !isManifest)) {
+    event.respondWith(fetch(request).catch(() => {
+      if (isApi || wantsJson) {
+        return new Response(JSON.stringify({ok: false, detail: 'Сеть недоступна. Проверьте соединение и повторите запрос.'}), {
+          status: 503,
+          headers: {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'},
+        });
       }
-      return response;
-    }).catch(() => cached || new Response('Сеть недоступна. Повторите запрос после восстановления соединения.', {status: 503, headers: {'Content-Type': 'text/plain; charset=utf-8'}})))
-  );
+      return new Response('Сеть недоступна. Повторите запрос после восстановления соединения.', {
+        status: 503,
+        headers: {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'},
+      });
+    }));
+    return;
+  }
+
+  // Cache only versioned static assets from this worker's own cache. Do not use
+  // the global caches.match(), because that searches every old cache namespace.
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    const response = await fetch(request);
+    if (response.ok && isStaticAsset) {
+      try { await cache.put(request, response.clone()); } catch (_) {}
+    }
+    return response;
+  })().catch(() => new Response('Сеть недоступна. Повторите запрос после восстановления соединения.', {
+    status: 503,
+    headers: {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'},
+  })));
 });
-
-

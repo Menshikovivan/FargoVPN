@@ -767,22 +767,35 @@ def recent_events(
     *,
     limit: int = 200,
     after_id: int = 0,
+    overlap: int = 0,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
+    """Read recent events, optionally re-reading a bounded tail behind the cursor.
+
+    PostgreSQL sequence IDs are allocated before commit, so transaction commit
+    order is not guaranteed to match ID order. A bounded overlap lets polling
+    rediscover a lower-ID event that committed after a client advanced its cursor.
+    Callers must de-duplicate by event ID.
+    """
     ensure_schema(db_path)
     limit = max(1, min(int(limit), 1000))
+    after_id = max(0, int(after_id or 0))
+    overlap = max(0, min(int(overlap or 0), 500))
     query = "SELECT * FROM user_events WHERE tg_id=?"
     params: list[Any] = [int(tg_id)]
-    if int(after_id) > 0:
-        query += " AND id>?"
-        params.append(int(after_id))
+    if after_id > 0 and overlap > 0:
+        query += " AND (id>? OR id IN (SELECT id FROM user_events WHERE tg_id=? ORDER BY id DESC LIMIT ?))"
+        params.extend([after_id, int(tg_id), overlap])
         query += " ORDER BY id ASC LIMIT ?"
+    elif after_id > 0:
+        query += " AND id>? ORDER BY id ASC LIMIT ?"
+        params.append(after_id)
     else:
         query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     with _connect(db_path) as connection:
         rows = [_event_from_row(row) for row in connection.execute(query, params).fetchall()]
-    if int(after_id) <= 0:
+    if after_id <= 0:
         rows.reverse()
     return rows
 
@@ -791,20 +804,28 @@ def recent_all_events(
     *,
     after_id: int = 0,
     limit: int = 500,
+    overlap: int = 25,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Return journal events newer than ``after_id`` in ascending order.
+    """Read the global journal feed with an optional recent-ID overlap.
 
-    This is the compact feed used by the admin Messages page.  The primary
-    cursor is the append-only ``user_events.id`` so polling never re-renders
-    the full history and can safely catch up after a temporary disconnect.
+    Sequence IDs are assigned before PostgreSQL transactions commit. The overlap
+    protects a live-feed client from missing an event whose transaction commits
+    after a newer ID has already been observed. The browser de-duplicates IDs.
     """
     ensure_schema(db_path)
     after_id = max(0, int(after_id or 0))
     limit = max(1, min(int(limit or 500), 1000))
+    overlap = max(0, min(int(overlap or 0), 500))
+    where = "events.id>?"
+    params: list[Any] = [after_id]
+    if after_id > 0 and overlap > 0:
+        where = "(events.id>? OR events.id IN (SELECT id FROM user_events ORDER BY id DESC LIMIT ?))"
+        params.append(overlap)
+    params.append(limit)
     with _connect(db_path) as connection:
         rows = connection.execute(
-            """SELECT events.*,
+            f"""SELECT events.*,
                       COALESCE((SELECT NULLIF(TRIM(canonical.username),'') FROM users AS canonical
                                 WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS display_username,
                       COALESCE((SELECT NULLIF(TRIM(canonical.display_name),'') FROM users AS canonical
@@ -812,8 +833,8 @@ def recent_all_events(
                       COALESCE((SELECT NULLIF(TRIM(canonical.notes),'') FROM users AS canonical
                                 WHERE canonical.tg_id=events.tg_id LIMIT 1),'') AS notes
                  FROM user_events AS events
-                WHERE events.id>? ORDER BY events.id ASC LIMIT ?""",
-            (after_id, limit),
+                WHERE {where} ORDER BY events.id ASC LIMIT ?""",
+            params,
         ).fetchall()
     result = []
     for row in rows:
@@ -823,7 +844,6 @@ def recent_all_events(
         item["display_name"] = str(row["display_name"] or "")
         item["notes"] = str(row["notes"] or "")
         result.append(item)
-    # A previous message may carry a renamed handle; current profile metadata wins.
     return result
 
 

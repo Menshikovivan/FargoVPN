@@ -27,7 +27,9 @@ def test_incremental_journal_query_uses_append_only_id_index():
     src = read("user_events.py")
     init = read("init_db.py")
     block = func("user_events.py", "recent_all_events")
-    assert "WHERE events.id>? ORDER BY events.id ASC LIMIT ?" in block
+    assert "events.id IN (SELECT id FROM user_events ORDER BY id DESC LIMIT ?)" in block
+    assert "overlap: int = 25" in block
+    assert "ORDER BY events.id ASC LIMIT ?" in block
     assert "after_id = max(0, int(after_id or 0))" in block
     assert "limit = max(1, min(int(limit or 500), 1000))" in block
     assert "idx_user_events_tg_id_id" in init
@@ -65,7 +67,8 @@ def test_messages_polling_preserves_scroll_and_does_not_reload_page():
     assert "setTimeout(pollSelectedChat" in src and "setTimeout(pollDialogFeed" in src
     assert "data-message-live-feed=\"1\"" in src
     assert "const atBottom=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<64" in src
-    assert "chat.scrollTop=Math.max(0,chat.scrollTop+(chat.scrollHeight-oldHeight))" in src
+    assert "chat.insertBefore(node,before||null)" in src
+    assert "chat.querySelector('.message-empty-state')?.remove()" in src
     assert "location.reload" not in src
     assert "window.location.reload" not in src
 
