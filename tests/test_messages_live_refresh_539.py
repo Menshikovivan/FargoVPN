@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import pytest
 
@@ -82,7 +83,7 @@ def test_sender_row_uses_full_row_click_target_but_keeps_telegram_link_above_it(
 def test_incoming_message_is_inserted_without_reload_even_if_global_feed_hangs():
     script = _messages_script()
     panel_css = (APP / "static/panel.css").read_text(encoding="utf-8")
-    chat_css = panel_css[panel_css.index(".messages-toolbar{margin-bottom:10px}"):panel_css.index("/* Monitoring, updates, jobs, settings */")]
+    chat_css = panel_css[panel_css.index(".messages-toolbar{"):panel_css.index("/* Monitoring, updates, jobs, settings */")]
     html = """<!doctype html><meta charset='utf-8'><base href='http://qa.local/'>
     <style>""" + chat_css + """</style>
     <div data-message-list><div class='message-user-row active' data-tg-id='123'>
@@ -111,7 +112,7 @@ def test_incoming_message_is_inserted_without_reload_even_if_global_feed_hangs()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
-            executable_path="/usr/bin/chromium",
+            executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"),
             args=["--no-sandbox"],
         )
         page = browser.new_page()
@@ -148,7 +149,7 @@ def test_clicking_sender_count_area_opens_internal_chat():
       <small>20 входящих · 10 исходящих</small>
     </div>"""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         page.set_content(html, wait_until="domcontentloaded")
         page.evaluate("document.querySelector('.message-user-open').addEventListener('click', e => { window.__internalChatClicked = true; e.preventDefault(); })")
@@ -191,7 +192,7 @@ def test_sending_reply_does_not_skip_unpolled_incoming_event():
       };
     </script>""" + "<script>" + script + "</script>"
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors=[]
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -220,7 +221,7 @@ def test_late_committing_lower_id_event_is_inserted_in_order_and_deduplicated():
     </script>"""
     # Every overlap response deliberately repeats ID 901; the DOM must de-duplicate it.
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox"])
+        browser = pw.chromium.launch(headless=True, executable_path=os.environ.get("FARGOVPN_CHROMIUM", "/usr/bin/chromium"), args=["--no-sandbox"])
         page = browser.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))

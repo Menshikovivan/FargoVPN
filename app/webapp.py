@@ -1713,6 +1713,7 @@ def navigation(active: str) -> str:
     return (
         '<aside id="panel-sidebar" aria-label="Основная навигация"><div class="brand"><div class="logo">V</div><div>'
         f'<strong>{html.escape(str(config.SERVICE_NAME))}</strong><small>Control Panel</small></div></div>'
+        '<button type="button" class="mobile-nav-close" id="panel-sidebar-close" style="display:none" aria-label="Закрыть меню" aria-controls="panel-sidebar">×</button>'
         f'<nav>{"".join(links)}</nav><div class="aside-foot"><a href="{html.escape(public_path("/logout"), quote=True)}">⇥ Выйти</a></div></aside>'
     )
 
@@ -1770,7 +1771,7 @@ def page(request: Request, title: str, body: str, active: str = "", scripts: str
         scripts = mobile_nav_fallback + scripts
     if active:
         body = re.sub(r'<header(?![^>]*\bclass=)([^>]*)>', r'<header class="page-header"\1>', body, count=1)
-    return f'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    return f'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{html.escape(title)} · {html.escape(str(config.SERVICE_NAME))}</title>
 <meta name="theme-color" content="#0b1220">
 {csrf_meta}
@@ -1838,7 +1839,7 @@ def manifest_webmanifest():
         "start_url": prefix,
         "scope": prefix,
         "display": "standalone",
-        "background_color": "#080d18",
+        "background_color": "#0b1220",
         "theme_color": "#0b1220",
         "lang": "ru",
         "id": prefix,
@@ -1863,7 +1864,7 @@ def cabinet_manifest():
         "start_url": cabinet_root,
         "scope": prefix,
         "display": "standalone",
-        "background_color": "#080d18",
+        "background_color": "#0b1220",
         "theme_color": "#0b1220",
         "lang": "ru",
         "id": prefix,

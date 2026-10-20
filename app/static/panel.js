@@ -230,6 +230,7 @@
     const body = document.body;
     const root = document.documentElement;
     const toggle = document.getElementById('mobile-nav-toggle');
+    const closeButton = document.getElementById('panel-sidebar-close');
     const backdrop = document.getElementById('mobile-nav-backdrop');
     const aside = document.querySelector('body.panel-page > aside');
     if (!aside) return;
@@ -262,6 +263,13 @@
         event.stopPropagation();
         if (!isMobile()) return;
         setOpen(!body.classList.contains('mobile-nav-open'));
+      }, {passive:false});
+    }
+    if (closeButton && closeButton.dataset.navBound !== '1') {
+      closeButton.dataset.navBound = '1';
+      closeButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        setOpen(false);
       }, {passive:false});
     }
     if (backdrop && backdrop.dataset.navBound !== '1') {
@@ -522,7 +530,7 @@
     window.addEventListener('pagehide', () => clearTimeout(timer), {once:true});
   }
 
-  const PANEL_BUILD_VERSION = '5.1.42';
+  const PANEL_BUILD_VERSION = '5.2.0';
 
   function enforceClientVersion() {
     const meta = document.querySelector('meta[name="fargovpn-app-version"]');
