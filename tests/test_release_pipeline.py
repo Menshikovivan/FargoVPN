@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import re
 import importlib.util
 import sys
 import tempfile
@@ -26,8 +27,11 @@ def load_update_module():
     return mod
 
 def test_versions():
-    assert [(ROOT / name).read_text(encoding="utf-8").strip() for name in ("VERSION", "static/VERSION")] == ["5.1.42"] * 2
-    assert "## 5.1.42" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")[:1000]
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    assert (ROOT / "static/VERSION").read_text(encoding="utf-8").strip() == version
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert changelog.splitlines()[0] == f"## {version}"
 
 def test_readme_ci_badge_targets_included_workflow():
     repo = ROOT.parent
@@ -283,8 +287,9 @@ def test_console_installer_timeout_is_self_contained_and_github_write_free():
 
 
 def test_installer_release_version_matches_package():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
-    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    assert (ROOT / "static" / "VERSION").read_text(encoding="utf-8").strip() == version
     installer=(ROOT / "install.sh").read_text(encoding="utf-8")
     assert "5.1.20 всегда используется полный профиль" in installer
 

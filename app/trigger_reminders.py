@@ -79,6 +79,56 @@ def _reminder_text(days: int, tg_id: int = 0) -> str:
     )
 
 
+def _reminder_report_line(tg_id: int, username: str, comment: str, days: int) -> str:
+    """Render one admin report entry with the shared Telegram identity policy."""
+    try:
+        numeric_id = int(tg_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_id = 0
+    safe_username = str(username or "").strip().lstrip("@")
+    if len(safe_username) > 32:
+        safe_username = ""
+    safe_comment = str(comment or "")
+    if len(safe_comment) > 120:
+        safe_comment = safe_comment[:120].rstrip() + "…"
+    label = billing.telegram_identity_label(numeric_id, safe_username, "", safe_comment)
+    safe_label = f"<b>{html.escape(str(label), quote=True)}</b>"
+    if numeric_id > 0:
+        safe_label = f'<a href="tg://user?id={numeric_id}">{safe_label}</a>'
+    return f"{safe_label}: {int(days)} дн."
+
+
+def _utf16_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _reminder_report_chunks(lines: list[str], max_units: int = 3500) -> list[str]:
+    """Pack whole HTML lines into Telegram-safe messages with a header per part."""
+    if not lines:
+        return []
+    header_template = f"📊 Отправлены напоминания (часть {len(lines)}/{len(lines)}):\n"
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        candidate = current + [line]
+        if _utf16_units(header_template + "\n".join(candidate)) > max_units:
+            if not current:
+                raise ValueError("Строка напоминания превышает лимит Telegram")
+            groups.append(current)
+            current = [line]
+            if _utf16_units(header_template + line) > max_units:
+                raise ValueError("Строка напоминания превышает лимит Telegram")
+        else:
+            current = candidate
+    if current:
+        groups.append(current)
+    total = len(groups)
+    return [
+        f"📊 Отправлены напоминания (часть {index}/{total}):\n" + "\n".join(group)
+        for index, group in enumerate(groups, start=1)
+    ]
+
+
 async def run() -> int:
     configured = sorted({int(day) for day in getattr(config, "REMINDER_DAYS", [7, 3, 1, 0]) if int(day) >= 0}, reverse=True)
     snapshot = await asyncio.to_thread(fetch_and_sync, True, config.DB_PATH)
@@ -94,12 +144,12 @@ async def run() -> int:
     connection = database_adapter.connect(config.DB_PATH, timeout=20)
     try:
         rows = connection.execute(
-            """SELECT tg_id,username,expiry_time,last_reminder_days
+            """SELECT tg_id,username,expiry_time,last_reminder_days,COALESCE(notes,'')
                FROM users
                WHERE tg_id>0 AND registration_status='active' AND enable=1 AND expiry_time> ?""",
             (now_ms,),
         ).fetchall()
-        for tg_id, username, expiry, last_sent in rows:
+        for tg_id, username, expiry, last_sent, notes in rows:
             days = reminder_day(int(expiry or 0), now_ms)
             if days is None or days not in configured or int(last_sent if last_sent is not None else -1) == days:
                 continue
@@ -120,23 +170,24 @@ async def run() -> int:
                     (days, int(tg_id)),
                 )
                 connection.commit()
-                sent.append(f"{username or tg_id}: {days}")
+                sent.append(_reminder_report_line(tg_id, username, notes, days))
             except Exception as error:
                 logger.warning("Не удалось отправить напоминание %s: %s", tg_id, error)
 
         if sent:
-            report = "📊 Отправлены напоминания:\n" + "\n".join(sent)
+            reports = _reminder_report_chunks(sent)
             for admin in getattr(config, "ADMIN_IDS", []):
-                try:
-                    result = await bot.send_message(int(admin), report)
-                    message_journal.record_outgoing_sync(
-                        int(admin), event_type="reminder_report", text=report, actor="telegram_bot:reminders",
-                        success=result is not None, message_kind="service",
-                        delivery_status="delivered" if result is not None else "failed",
-                        telegram_message_id=int(getattr(result, "message_id", 0) or 0) or None,
-                    )
-                except Exception as error:
-                    logger.warning("Не удалось отправить отчёт администратору %s: %s", admin, error)
+                for report in reports:
+                    try:
+                        result = await bot.send_message(int(admin), report, parse_mode="HTML")
+                        message_journal.record_outgoing_sync(
+                            int(admin), event_type="reminder_report", text=report, actor="telegram_bot:reminders",
+                            success=result is not None, message_kind="service",
+                            delivery_status="delivered" if result is not None else "failed",
+                            telegram_message_id=int(getattr(result, "message_id", 0) or 0) or None,
+                        )
+                    except Exception as error:
+                        logger.warning("Не удалось отправить отчёт администратору %s: %s", admin, error)
         return len(sent)
     finally:
         connection.close()

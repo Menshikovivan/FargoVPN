@@ -327,11 +327,11 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
     first = namespace["subscription_report_text"](1)
     last = namespace["subscription_report_text"](63)
     assert "Страница 1/63" in first
-    owner_card = first.split("━━━━━━━━━━━━━━━━━━", 1)[0]
+    owner_card = first.split("\n\n", 1)[1].split("\n\n", 1)[0]
     assert f" · {family_size * 200} ₽" in owner_card
-    assert first.count('<a href="https://t.me/') == 8
+    assert first.count('<a href="tg://user?id=') == 8
     assert "Страница 63/63" in last
-    assert last.count('<a href="https://t.me/') == 4
+    assert last.count('<a href="tg://user?id=') == 4
     split_node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "split_subscription_report")
     split_node.decorator_list = []
     split_ns = {"re": re}

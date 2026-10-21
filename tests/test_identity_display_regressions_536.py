@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import html
+import re
 from pathlib import Path
 
 from user_identity import get_display_name, is_generated_identity_comment, latest_trusted_telegram_usernames, normalize_username
@@ -76,10 +77,11 @@ def test_audit_layout_does_not_force_details_column_to_one_pixel():
 
 
 def test_version_strings_are_coherent_for_release():
-    assert (APP / "VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
-    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == "5.1.42"
+    version = (APP / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    assert (APP / "static/VERSION").read_text(encoding="utf-8").strip() == version
     js = (APP / "static/panel.js").read_text(encoding="utf-8")
-    assert "const PANEL_BUILD_VERSION = '5.1.42';" in js
+    assert f"const PANEL_BUILD_VERSION = '{version}';" in js
 
 
 def test_primary_panel_names_link_to_internal_numeric_cards():

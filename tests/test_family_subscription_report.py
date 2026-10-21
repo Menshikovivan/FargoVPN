@@ -86,39 +86,39 @@ def test_family_report_tracks_owner_expiry_extension_expiration_and_unlink():
     report = _report_function(connection)
 
     first = report()
-    assert 'Иван Петров' in first and 'href="https://t.me/Иван' not in first
-    assert 'href="https://t.me/owner"' in first and '<b>@owner</b>' in first
-    assert '<b>ID 300</b>' in first and 'href="https://t.me/300"' not in first
+    assert 'Иван Петров' in first and 'href="tg://user?id=200"' in first
+    assert 'href="tg://user?id=100"' in first and '<b>@owner</b>' in first
+    assert '<b>ID 300</b>' in first and 'href="tg://user?id=300"' in first
     assert "👨‍👩‍👧 Тип: Семейная" in first
     assert "👨‍👩‍👧 Тип: Обычная" in first
-    assert 'href="https://t.me/lifetime"' in first and '<b>@lifetime</b>' in first and "Активна · бессрочно" in first
+    assert 'href="tg://user?id=400"' in first and '<b>@lifetime</b>' in first and "Активна · бессрочно" in first
     assert "истёк 01.01.1970" not in first
     assert "Статус: ⚪ Без подписки" in first
     assert "Страница 1/1" in first
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS - 1,))
     expired = report()
-    assert 'Иван Петров' in expired and 'href="tg://user?id=' not in expired
+    assert 'Иван Петров' in expired and 'href="tg://user?id=200"' in expired
     assert "Статус: 🔴 Истекла" in expired
     assert "❌" not in expired
 
     connection.execute("UPDATE users SET expiry_time=0 WHERE tg_id=100")
     family_lifetime = report()
-    assert 'Иван Петров' in family_lifetime and 'href="tg://user?id=' not in family_lifetime
+    assert 'Иван Петров' in family_lifetime and 'href="tg://user?id=200"' in family_lifetime
     assert "Статус: 🟢 Активна · бессрочно" in family_lifetime
     assert "👨‍👩‍👧 Тип: Семейная" in family_lifetime
     assert "истёк 01.01.1970" not in family_lifetime
 
     connection.execute("UPDATE users SET expiry_time=? WHERE tg_id=100", (NOW_MS + 20 * 86_400_000,))
-    assert 'Иван Петров' in report() and 'href="tg://user?id=' not in report()
+    assert 'Иван Петров' in report() and 'href="tg://user?id=200"' in report()
 
     connection.execute("DELETE FROM telegram_profile_links WHERE telegram_id=200")
     unlinked = report()
-    assert 'Иван Петров' in unlinked and 'href="tg://user?id=' not in unlinked
+    assert 'Иван Петров' in unlinked and 'href="tg://user?id=200"' in unlinked
     assert "Статус: ⚪ Без подписки" in unlinked
 
     connection.execute("INSERT INTO user_events VALUES(1,200,'family_member')")
-    assert 'Иван Петров' in report() and 'href="tg://user?id=' not in report()
+    assert 'Иван Петров' in report() and 'href="tg://user?id=200"' in report()
     connection.close()
 
 
@@ -150,7 +150,7 @@ def test_subscription_report_skips_null_rows_and_handles_compat_row_slices():
     logger = SimpleNamespace(warning=Mock(), debug=Mock())
     report = _report_function(Connection(), logger)()
 
-    assert 'href="https://t.me/alice"' in report and '<b>@alice</b>' in report
+    assert 'href="tg://user?id=123"' in report and '<b>@alice</b>' in report
     logger.warning.assert_called_once()
 
 
@@ -384,10 +384,10 @@ def test_subscription_report_recovers_same_id_telegram_handles_and_links_by_user
     )
     report = _report_function(connection)()
     assert "Брат Мишы Авхадеева" in report
-    assert '<a href="https://t.me/kiryan_avd"' in report and "<b>@kiryan_avd</b>" in report
-    assert '<a href="https://t.me/AnnaSam111"' in report and "<b>@AnnaSam111</b>" in report
+    assert '<a href="tg://user?id=422172767"' in report and "<b>@kiryan_avd</b>" in report
+    assert '<a href="tg://user?id=693845923"' in report and "<b>@AnnaSam111</b>" in report
     assert 'href="tg://user?id=1180284364"' in report
-    assert 'href="tg://user?id=422172767"' not in report
-    assert 'href="tg://user?id=693845923"' not in report
-    assert 'href="https://t.me/Брат' not in report
+    assert 'href="tg://user?id=422172767"' in report
+    assert 'href="tg://user?id=693845923"' in report
+    assert 'href="https://t.me/' not in report
     connection.close()

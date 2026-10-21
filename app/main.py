@@ -2314,13 +2314,42 @@ def subscription_report_text(page_no: int = 1) -> str:
         if not users:
             raise RuntimeError("Запрос списка подписок вернул только пустые строки")
 
+    now_ms = int(time.time() * 1000)
+
+    def report_group(row):
+        tg_id = int(row[2] or 0)
+        profile_tg_id = int(row[10] or 0)
+        family_member = profile_tg_id > 0 and profile_tg_id != tg_id
+        expiry = int(row[14] or 0) if family_member else int(row[3] or 0)
+        enabled = bool(row[15]) if family_member and row[15] is not None else bool(row[5])
+        ids = (11, 12, 13) if family_member else (6, 7, 8)
+        has_subscription = any(str(row[index] or "").strip() for index in ids)
+        if not has_subscription:
+            return (4, expiry, tg_id)  # unpaid / no subscription
+        if not enabled:
+            return (3, expiry, tg_id)  # explicitly disabled
+        if expiry <= 0:
+            return (1, 0, tg_id)  # lifetime, shown with active subscriptions
+        if expiry <= now_ms:
+            return (2, expiry, tg_id)  # expired
+        expiry_date = local_date_from_timestamp(expiry / 1000)
+        days_left = max(0, (expiry_date - now_local().date()).days)
+        return (0 if days_left <= 7 else 1, expiry, tg_id)
+
+    users.sort(key=report_group)
     page_size = SUBSCRIPTION_REPORT_PAGE_SIZE
     total_pages = max(1, (len(users) + page_size - 1) // page_size)
     page_no = max(1, min(int(page_no or 1), total_pages))
     selected = users[(page_no - 1) * page_size:page_no * page_size]
-    now_ms = int(time.time() * 1000)
-    tariff_days = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
-    lines = [f"📋 <b>Подписки и уведомления</b> · Страница {page_no}/{total_pages} · записей: {len(users)}", ""]
+    counts = [0, 0, 0, 0, 0]
+    for user in users:
+        counts[report_group(user)[0]] += 1
+    lines = [
+        f"📋 <b>Подписки</b> · Страница {page_no}/{total_pages} · всего: {len(users)}",
+        f"🟡 Скоро: {counts[0]} · 🟢 Активные/бессрочные: {counts[1]} · 🔴 Истекшие: {counts[2]}",
+        f"⚫ Отключены: {counts[3]} · ⚪ Без подписки: {counts[4]}",
+        "",
+    ]
     for row in selected:
         username, display_name, tg_id = row[:3]
         tg_id = int(tg_id or 0)
@@ -2368,32 +2397,21 @@ def subscription_report_text(page_no: int = 1) -> str:
             else:
                 status_text, status_icon = "Активна", "🟢"
         reminder_value = row[16] if family_member else row[4]
-        reminder_text = "не отправлялось" if int(reminder_value or -1) == -1 else f"за {int(reminder_value)} дн."
+        reminder_text = "не отправлялось" if reminder_value is None or int(reminder_value) == -1 else f"за {int(reminder_value)} дн."
         family_type = "Семейная" if is_family else "Обычная"
         custom_price = billing.expected_payment_amount(profile_tg_id if family_member else tg_id, config.DB_PATH)
         try:
-            price_text = f" · {int(custom_price)} ₽" if custom_price is not None else ""
+            price_text = f" · {int(custom_price)} ₽ к продлению" if custom_price is not None else ""
         except (TypeError, ValueError, OverflowError):
             price_text = ""
-        if tg_id > 0 and report_username:
-            safe_handle = html.escape(report_username, quote=True)
-            label_markup = (
-                f'<a href="https://t.me/{safe_handle}" target="_blank" '
-                f'rel="noopener noreferrer"><b>{label}</b></a>'
-            )
-        elif tg_id > 0 and tg_id in trusted_username_by_id:
+        if tg_id > 0:
             label_markup = f'<a href="tg://user?id={tg_id}"><b>{label}</b></a>'
         else:
             label_markup = f"<b>{label}</b>"
         lines.extend([
             f"👤 {label_markup} · TG <code>{tg_id}</code>",
-            f"🏷 Тариф: период {tariff_days} дн.{price_text}",
-            f"📊 Статус: {status_icon} {html.escape(status_text)}",
-            f"📅 Окончание: {html.escape(expiry_text)}",
-            f"⏳ Осталось: {html.escape(remaining_text)}",
-            f"👨‍👩‍👧 Тип: {family_type}",
-            f"🔔 Уведомление: {html.escape(reminder_text)}",
-            "━━━━━━━━━━━━━━━━━━",
+            f"📊 Статус: {status_icon} {html.escape(status_text)} · 📅 Окончание: {html.escape(expiry_text)} · ⏳ Осталось: {html.escape(remaining_text)}",
+            f"👨‍👩‍👧 Тип: {family_type}{price_text} · 🔔 Уведомление: {html.escape(reminder_text)}",
             "",
         ])
     return "\n".join(lines).rstrip()

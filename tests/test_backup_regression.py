@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 
 
@@ -36,10 +37,11 @@ def test_backup_delivery_has_no_duplicate_scheduler_launcher():
 
 
 def test_release_files_are_current():
-    assert read("VERSION").strip() == "5.1.42"
+    version = read("VERSION").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
     repo_readme = Path(ROOT.parent / "README.md").read_text(encoding="utf-8")
-    assert repo_readme.startswith("# FargoVPN 5.1.42")
-    assert "**Текущая версия: 5.1.42**" in repo_readme
+    assert repo_readme.startswith(f"# FargoVPN {version}\n")
+    assert f"**Текущая версия: {version}**" in repo_readme
     assert not list(ROOT.glob("RELEASE_NOTES_*.md"))
     assert not (ROOT / "INSTALLED_CHANGELOG.md").exists()
     assert not (ROOT / "INSTALLED_CHANGELOG_VERSION").exists()
