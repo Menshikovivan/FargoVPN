@@ -1,0 +1,199 @@
+/* FargoVPN Console mobile and installed-PWA layout overrides.
+   Loaded after panel.css; keep behavior in panel.js and legacy selectors intact. */
+:root {
+  --console-mobile-gutter: 16px;
+  --console-mobile-topbar: 54px;
+}
+html { min-height: 100%; }
+body.panel-page { min-height: 100dvh; }
+
+@media (max-width: 900px) {
+  html, body.panel-page {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: clip;
+    overscroll-behavior-x: none;
+  }
+  body.panel-page > aside#panel-sidebar {
+    position: fixed !important;
+    inset: 0 auto 0 0 !important;
+    z-index: 100 !important;
+    display: flex !important;
+    width: min(320px, 88%) !important;
+    max-width: calc(100% - var(--space-xl)) !important;
+    height: 100dvh !important;
+    min-height: 0 !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    padding: max(var(--space-md), env(safe-area-inset-top)) var(--space-md) max(var(--space-md), env(safe-area-inset-bottom)) !important;
+    overscroll-behavior: contain;
+    transform: translate3d(-105%, 0, 0);
+    transition: transform .2s ease;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  body.panel-page.mobile-nav-open > aside#panel-sidebar {
+    transform: translate3d(0, 0, 0) !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+  body.panel-page > aside#panel-sidebar .brand { flex: 0 0 auto; }
+  body.panel-page > aside#panel-sidebar nav {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    flex-direction: column !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    padding: 0 2px max(var(--space-md), env(safe-area-inset-bottom)) 0 !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-gutter: stable;
+  }
+  body.panel-page > aside#panel-sidebar nav a,
+  body.panel-page > aside#panel-sidebar .aside-foot a,
+  body.panel-page > aside#panel-sidebar #panel-sidebar-close {
+    min-height: 44px;
+    flex: 0 0 auto;
+  }
+  body.panel-page > aside#panel-sidebar #panel-sidebar-close {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    margin: 0 0 var(--space-sm);
+    background: var(--surface-2);
+  }
+  body.panel-page > aside#panel-sidebar .aside-foot {
+    position: static;
+    flex: 0 0 auto;
+    margin-top: auto;
+    padding-bottom: max(var(--space-sm), env(safe-area-inset-bottom));
+  }
+  .mobile-topbar {
+    inset: 0 0 auto;
+    min-height: calc(var(--console-mobile-topbar) + env(safe-area-inset-top));
+    height: auto;
+    padding: max(var(--space-sm), env(safe-area-inset-top)) var(--space-md) var(--space-sm);
+    padding-left: max(var(--space-md), env(safe-area-inset-left));
+    padding-right: max(var(--space-md), env(safe-area-inset-right));
+  }
+  .mobile-nav-toggle, .mobile-topbar-action {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .mobile-nav-backdrop { overscroll-behavior: contain; touch-action: none; }
+  body.panel-page > main {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    padding: calc(var(--console-mobile-topbar) + env(safe-area-inset-top) + var(--space-md)) var(--console-mobile-gutter) max(var(--space-xl), env(safe-area-inset-bottom)) !important;
+  }
+  body.panel-page > main > *,
+  body.panel-page .card,
+  body.panel-page .grid,
+  body.panel-page .messages-layout,
+  body.panel-page .messages-toolbar,
+  body.panel-page .chat-compose,
+  body.panel-page .integration-card,
+  body.panel-page .settings-actions,
+  body.panel-page .audit-filters {
+    min-width: 0;
+    max-width: 100%;
+  }
+  body.panel-page .table-wrap,
+  body.panel-page .payments-table,
+  body.panel-page .messages-list,
+  body.panel-page .log-output,
+  body.panel-page pre {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.panel-page .table-wrap table,
+  body.panel-page .payments-table table,
+  body.panel-page .messages-list table { width: max-content; min-width: 100%; }
+  body.panel-page .toolbar-filter { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  body.panel-page .toolbar-filter > * { min-width: 0; }
+  body.panel-page .messages-toolbar form { align-items: stretch; }
+  body.panel-page .messages-toolbar label { flex: 1 1 100%; min-width: 0; }
+  body.panel-page .messages-toolbar .button { width: 100%; }
+  body.panel-page .messages-layout { grid-template-columns: minmax(0, 1fr); }
+  body.panel-page .messages-users-list { max-height: min(32dvh, 280px); overscroll-behavior: contain; }
+  body.panel-page .chat-window { height: min(58dvh, 640px); min-height: 240px; }
+  body.panel-page .chat-compose { flex-direction: column; }
+  body.panel-page .chat-compose > button { width: 100%; }
+  body.panel-page .chat-attachment { flex-wrap: wrap; min-width: 0; }
+  body.panel-page .chat-attachment small { overflow-wrap: anywhere; }
+  body.panel-page .tabs { max-width: 100%; overflow-x: auto; flex-wrap: nowrap; overscroll-behavior-x: contain; }
+  body.panel-page .tabs > * { flex: 0 0 auto; }
+  body.panel-page .page-header,
+  body.panel-page > main > header { gap: var(--space-md); }
+  body.panel-page .actions,
+  body.panel-page .toolbar,
+  body.panel-page .settings-links,
+  body.panel-page .integration-actions { min-width: 0; }
+  body.panel-page input[type="file"] { max-width: 100%; }
+  body.panel-page :is(button, a.button, input, select, textarea, summary) { scroll-margin-block: 72px; }
+}
+
+@media (max-width: 560px) {
+  body.panel-page > main { padding-right: max(14px, env(safe-area-inset-right)); padding-left: max(14px, env(safe-area-inset-left)); }
+  body.panel-page .toolbar-filter,
+  body.panel-page .audit-filters { grid-template-columns: minmax(0, 1fr); }
+  body.panel-page .toolbar-filter input,
+  body.panel-page .audit-filters button { grid-column: auto; }
+  body.panel-page .messages-toolbar form > * { min-width: 0; }
+  body.panel-page .messages-toolbar label { flex-basis: 100%; }
+  body.panel-page .quick-actions-grid,
+  body.panel-page .stat-grid,
+  body.panel-page .numbers { grid-template-columns: minmax(0, 1fr); }
+  body.panel-page .message-user-row { min-width: 0; }
+}
+
+@media (max-width: 900px) and (orientation: landscape) {
+  body.panel-page > aside#panel-sidebar { width: min(320px, 78%) !important; }
+  body.panel-page .mobile-topbar { min-height: calc(48px + env(safe-area-inset-top)); }
+  body.panel-page > main { padding-top: calc(48px + env(safe-area-inset-top) + 10px) !important; }
+  body.panel-page .messages-users-list { max-height: 28dvh; }
+  body.panel-page .chat-window { height: 48dvh; min-height: 180px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.panel-page > aside#panel-sidebar { transition: none; }
+}
+
+/* Keep Console dashboard tracks fluid after the shared desktop layer. */
+@media(max-width:1000px){
+ body.panel-page .dash-layout{grid-template-columns:minmax(0,1fr)!important}
+}
+@media(max-width:560px){
+ body.panel-page .dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+ body.panel-page .dash-kpi{padding:var(--space-lg) var(--space-md)!important;border-bottom:1px solid var(--line-soft)!important}
+ body.panel-page .dash-kpi:nth-child(2){border-right:0!important}
+ body.panel-page .dash-kpi:nth-child(n+3){border-bottom:0!important}
+ body.panel-page .quick-actions-grid{grid-template-columns:minmax(0,1fr)!important}
+}
+
+@media(max-width:900px){
+ body.panel-page .mobile-nav-backdrop{z-index:90!important}
+ body.panel-page.mobile-nav-open>aside#panel-sidebar{z-index:100!important}
+ body.panel-page>aside#panel-sidebar #panel-sidebar-close{position:relative!important;top:auto!important;right:auto!important;flex:0 0 44px!important;height:44px!important;min-height:44px!important;margin:0 0 var(--space-sm)!important}
+}
+
+@media(max-width:900px){
+ body.panel-page input:not([type=checkbox]):not([type=radio]),body.panel-page select,body.panel-page textarea{font-size:var(--space-lg)!important}
+}
+
+@media(max-width:900px){
+ body.panel-page>aside#panel-sidebar{transition:transform .2s ease!important}
+ body.panel-page:not(.mobile-nav-open)>aside#panel-sidebar{visibility:hidden!important;pointer-events:none!important}
+}

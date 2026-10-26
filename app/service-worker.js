@@ -3,6 +3,7 @@ const BASE = '__FARGOVPN_BASE__';
 const VERSION = '__FARGOVPN_VERSION__';
 const ASSETS = [
   `${BASE}static/panel.css?v=${VERSION}`,
+  `${BASE}static/console-mobile.css?v=${VERSION}`,
   `${BASE}static/panel.js?v=${VERSION}`,
   `${BASE}manifest.webmanifest?v=${VERSION}`,
   `${BASE}static/icons/icon-192.png`,
