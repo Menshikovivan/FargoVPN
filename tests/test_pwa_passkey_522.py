@@ -14,15 +14,17 @@ CHROME = os.environ.get("FARGOVPN_CHROMIUM") or os.environ.get("FARGOVPN_TEST_CH
 
 
 def login_html():
-    node = next(n for n in ast.parse((APP / "webapp.py").read_text(encoding="utf-8")).body
-                if isinstance(n, ast.FunctionDef) and n.name == "login_page")
-    node.decorator_list = []
-    for arg in node.args.args:
-        arg.annotation = None
+    nodes = [n for n in ast.parse((APP / "webapp.py").read_text(encoding="utf-8")).body
+             if isinstance(n, ast.FunctionDef) and n.name in {"login_page", "_brand_mark"}]
+    for node in nodes:
+        node.decorator_list = []
+        for arg in node.args.args:
+            arg.annotation = None
     namespace = dict(html=html, json=json, config=SimpleNamespace(SERVICE_NAME="FargoVPN"),
                      public_path=lambda path: "/panel" + path,
+                     update_manager=SimpleNamespace(current_version=lambda: (APP / "VERSION").read_text().strip()),
                      page=lambda request, title, body: body)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "login_page", "exec"), namespace)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "login_page", "exec"), namespace)
     return namespace["login_page"](None)
 
 

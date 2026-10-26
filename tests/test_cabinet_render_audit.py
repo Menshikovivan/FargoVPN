@@ -29,7 +29,7 @@ class Tags(HTMLParser):
 
 def cabinet_functions(sub_url='https://example.test/sub'):
     tree = ast.parse((ROOT / 'app/webapp.py').read_text(encoding='utf-8'))
-    names = {'_cabinet_markup', 'cabinet_connection_page'}
+    names = {'_cabinet_markup', 'cabinet_connection_page', '_brand_mark'}
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     for node in functions:
         node.decorator_list = []

@@ -21,7 +21,8 @@ def render(user,app=APP):
          'referral_codes':NS(ensure_referral_code=lambda *a:'1234'),'config':NS(DB_PATH='unused',SERVICE_NAME='Synthetic'),
          'public_path':lambda p:'/qa-panel'+p,'update_manager':NS(current_version=lambda:'test')}
     fn=next(n for n in ast.parse((app/'webapp.py').read_text(encoding='utf-8')).body if isinstance(n,ast.FunctionDef) and n.name=='_cabinet_markup')
-    exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual-cabinet','exec'),env)
+    brand=next(n for n in ast.parse((app/'webapp.py').read_text(encoding='utf-8')).body if isinstance(n,ast.FunctionDef) and n.name=='_brand_mark')
+    exec(compile(ast.Module(body=[brand,fn],type_ignores=[]),'actual-cabinet','exec'),env)
     return env['_cabinet_markup']('synthetic',user,'https://synthetic.invalid/sub'),billing
 
 @pytest.mark.parametrize('family,registration,credentials,enabled,expiry,label,tone',[

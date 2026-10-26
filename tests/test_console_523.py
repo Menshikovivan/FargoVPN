@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _namespace(prefix):
     source = ast.parse((ROOT / "app/webapp.py").read_text(encoding="utf-8"))
-    functions = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in {"page", "_panel_asset_version"}]
+    functions = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in {"page", "_panel_asset_version", "_brand_mark"}]
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *functions], type_ignores=[])
     env = dict(html=html, re=re, hashlib=hashlib, APP_DIR=ROOT / "app",
                update_manager=SimpleNamespace(current_version=lambda: (ROOT / "app/VERSION").read_text().strip()),
@@ -27,7 +27,7 @@ def test_console_mobile_asset_is_linked_for_prefixed_and_root_panels():
         for active in ("", "messages"):
             document = env["page"](None, "Тест", '<form><input id="q" name="q"></form>', active)
             links = re.findall(r'<link rel="stylesheet" href="([^"?]+)', document)
-            assert links == [prefix + "/static/panel.css", prefix + "/static/console-mobile.css"]
+            assert links == [prefix + "/static/panel.css", prefix + "/static/console-grid.css", prefix + "/static/console-mobile.css"]
             assert document.index("panel.css") < document.index("console-mobile.css")
             assert '<input id="q" name="q">' in document
             assert 'viewport-fit=cover' in document

@@ -1,0 +1,430 @@
+/* FargoVPN 5.2.4 — approved Console Grid geometry. Loaded after panel.css. */
+:root {
+  --desktop-rail: 240px;
+  --desktop-offset: 240px;
+  --rail: 240px;
+  --cell: 388px;
+  --graph: 320px;
+  --text-dim: #8198a5;
+  --reading: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --tile-blank: #11191e;
+}
+
+/* Desktop navigation rail: grouped sections scroll; account actions stay at the bottom. */
+@media (min-width: 901px) {
+  body.panel-page > aside#panel-sidebar,
+  body.panel-page > aside#panel-sidebar:hover,
+  body.panel-page > aside#panel-sidebar:focus-within {
+    width: 240px !important;
+    flex-direction: column !important;
+    padding: 16px 12px 12px !important;
+  }
+
+  body.panel-page > aside#panel-sidebar .brand {
+    flex: 0 0 auto !important;
+    padding: 0 8px 12px !important;
+    margin: 0 !important;
+    min-height: 56px;
+  }
+
+  body.panel-page > aside#panel-sidebar .brand .logo {
+    box-sizing: border-box !important;
+    width: 48px !important;
+    height: 48px !important;
+    flex: 0 0 48px !important;
+  }
+
+  body.panel-page > aside#panel-sidebar nav {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    flex-direction: column !important;
+    gap: 0 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    padding: 8px 0 !important;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-soft) transparent;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 0;
+    margin: 0 0 8px;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group:last-child { margin-bottom: 0; }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group-label {
+    min-height: 0;
+    padding: 4px 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group > a {
+    box-sizing: border-box !important;
+    display: flex !important;
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 40px !important;
+    height: 40px !important;
+    align-items: center !important;
+    gap: 12px !important;
+    padding: 4px 12px !important;
+    border: 0 !important;
+    border-left: 2px solid transparent !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    color: var(--muted) !important;
+    font-size: 14px !important;
+    font-weight: 400 !important;
+    white-space: nowrap !important;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group > a:hover,
+  body.panel-page > aside#panel-sidebar nav .nav-group > a.active {
+    background: var(--surface-2) !important;
+    color: var(--text) !important;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group > a.active {
+    border-left-color: var(--blue) !important;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group > a .nav-icon {
+    flex: 0 0 20px !important;
+    width: 20px !important;
+    height: 20px !important;
+    background: transparent !important;
+  }
+
+  body.panel-page > aside#panel-sidebar nav .nav-group > a .nav-label {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font-size: 14px !important;
+    font-weight: 400 !important;
+    letter-spacing: 0 !important;
+  }
+
+  body.panel-page > aside#panel-sidebar .aside-foot {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 4px !important;
+    position: static !important;
+    flex: 0 0 auto !important;
+    margin: auto 0 0 !important;
+    padding: 8px 0 0 !important;
+    border-top: 1px solid var(--line-soft) !important;
+    background: transparent !important;
+  }
+
+  body.panel-page > aside#panel-sidebar .aside-foot a {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    min-height: 40px !important;
+    height: auto !important;
+    padding: 4px 12px !important;
+    gap: 12px !important;
+    border-radius: 0 !important;
+    color: var(--muted) !important;
+    font-size: 14px !important;
+  }
+}
+
+/* Preserve the uploaded Fargo mark inside the existing logo containers. */
+body.panel-page .brand .logo .brand-image,
+.login-card .logo .brand-image,
+.cabinet-login-card .logo .brand-image {
+  display: block;
+  width: 48px;
+  height: 48px;
+  max-width: 100%;
+  object-fit: contain;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: transparent !important;
+}
+
+body.panel-page .brand .logo,
+.login-card .logo,
+.cabinet-login-card .logo {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: transparent !important;
+}
+
+.login-card .logo,
+.cabinet-login-card .logo {
+  width: 64px !important;
+  height: 64px !important;
+  flex: 0 0 64px !important;
+}
+
+body.panel-page .brand .logo .brand-image {
+  width: 48px;
+  height: 48px;
+}
+
+.login-card .logo .brand-image,
+.cabinet-login-card .logo .brand-image {
+  width: 64px;
+  height: 64px;
+}
+
+.mobile-topbar .mobile-brand-image {
+  display: block;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Dashboard cards use a fixed, equal two-by-two grid on desktop. */
+@media (min-width: 901px) {
+  body.panel-page .panel-matrix {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-auto-rows: 388px !important;
+    gap: 24px !important;
+    align-items: stretch !important;
+  }
+
+  body.panel-page .panel-matrix > .card {
+    box-sizing: border-box;
+    width: 100% !important;
+    height: 388px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    overflow: auto;
+    padding: 24px !important;
+    border: 1px solid var(--line-soft) !important;
+    border-radius: var(--radius) !important;
+    background: var(--surface) !important;
+    color: var(--text) !important;
+  }
+}
+
+/* Monitoring plots share one card height and stable title/plot/caption tracks. */
+body.panel-page .monitoring-grid > .chart-card {
+  box-sizing: border-box;
+  display: grid !important;
+  grid-template-rows: 44px minmax(0, 1fr) 28px !important;
+  align-content: stretch !important;
+  gap: 12px !important;
+  height: 320px !important;
+  min-height: 320px !important;
+  max-height: 320px !important;
+  overflow: hidden !important;
+  padding: 24px !important;
+}
+
+body.panel-page .monitoring-grid {
+  display: grid !important;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+  gap: 24px !important;
+  align-items: stretch !important;
+}
+
+body.panel-page .monitoring-grid > .metric,
+body.panel-page .monitoring-grid > .side {
+  grid-column: span 1 !important;
+}
+
+body.panel-page .monitoring-grid > .metric,
+body.panel-page .monitoring-grid > .side {
+  padding: 16px !important;
+  background: var(--surface) !important;
+  color: var(--text) !important;
+}
+
+body.panel-page .monitoring-grid > .chart-card {
+  grid-column: span 2 !important;
+}
+
+body.panel-page .metric .label {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+body.panel-page .metric .hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+body.panel-page .monitoring-grid > .side {
+  font-size: 13px;
+}
+
+body.panel-page .monitoring-grid > .side h2 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+body.panel-page .monitoring-grid > .side p {
+  margin: 4px 0 !important;
+  font-size: 13px !important;
+}
+
+body.panel-page .monitoring-grid > .full {
+  grid-column: 1 / -1 !important;
+}
+
+body.panel-page .monitoring-grid > .chart-card > .section-title,
+body.panel-page .monitoring-grid > .chart-card > h2 {
+  min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+  margin: 0 !important;
+}
+
+body.panel-page .monitoring-grid > .chart-card > .chart {
+  box-sizing: border-box;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  overflow: hidden;
+  border-block: 1px solid var(--line-soft);
+  background: var(--tile-blank);
+}
+
+body.panel-page .monitoring-grid > .chart-card > .muted {
+  min-width: 0;
+  min-height: 0;
+  align-self: center;
+  margin: 0 !important;
+  font-size: 13px;
+}
+
+body.panel-page .monitoring-grid > .chart-card > .chart-caption-slot {
+  min-width: 0;
+  min-height: 0;
+  align-self: center;
+  margin: 0 !important;
+  font-size: 13px;
+}
+
+body.panel-page .monitoring-grid > .metric,
+body.panel-page .monitoring-grid > .side {
+  box-sizing: border-box;
+  height: 192px !important;
+  min-height: 192px !important;
+  max-height: 192px !important;
+  overflow: auto;
+}
+
+body.panel-page .monitoring-grid > .metric .value {
+  font-family: var(--reading);
+  font-size: 28px;
+  font-weight: 400;
+}
+
+/* Keep narrow/tablet layouts owned by the existing responsive layer. */
+@media (max-width: 900px) {
+  body.panel-page .panel-matrix { grid-template-columns: minmax(0, 1fr); }
+  body.panel-page .panel-matrix > .card { height: auto; min-height: 0; }
+  body.panel-page .monitoring-grid > .chart-card {
+    height: 320px !important;
+    min-height: 320px !important;
+    max-height: 320px !important;
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1200px) {
+  body.panel-page .monitoring-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  body.panel-page .monitoring-grid > .metric,
+  body.panel-page .monitoring-grid > .side {
+    grid-column: span 2 !important;
+  }
+
+  body.panel-page .monitoring-grid > .chart-card {
+    grid-column: span 3 !important;
+  }
+}
+
+/* Compact dashboard internals so every live system row fits its fixed cell. */
+body.panel-page .system-list > div {
+  min-height: 0 !important;
+  padding: 4px 0 !important;
+  font-size: 14px !important;
+}
+
+body.panel-page .system-list .system-state {
+  box-sizing: border-box;
+  min-height: 20px !important;
+  line-height: 20px !important;
+  padding: 0 !important;
+  font-size: 12px !important;
+}
+
+/* Journal subsections are transparent content groups, not nested dark cards. */
+body.panel-page .record-part {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+body.panel-page .record-part .dash-section-head {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  margin-bottom: 8px !important;
+}
+
+body.panel-page .record-part .dash-section-head h3 {
+  margin: 0 !important;
+  font-size: 14px !important;
+}
+
+body.panel-page .dash-message,
+body.panel-page .activity-list > div {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  padding: 8px 0 !important;
+}
+
+body.panel-page .dash-message-time,
+body.panel-page .activity-list time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--reading);
+  font-size: 13px !important;
+}
+
+.cabinet-brand{display:flex;align-items:center;gap:var(--space-md)}
+.cabinet-brand>.brand-image{width:40px;height:40px;object-fit:contain;flex:0 0 40px}
+
+/* Live SVG plots fill the shared plot track at every viewport. */
+body.panel-page .monitoring-grid>.chart-card>.chart>svg{display:block;width:100%!important;height:100%!important;max-height:100%!important}
+
+.aside-foot>a{border-left:2px solid transparent}
+.aside-foot>a.active,.aside-foot>a:hover{background:var(--surface-2)!important;color:var(--text)!important;border-left-color:var(--blue)!important}

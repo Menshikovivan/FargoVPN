@@ -102,8 +102,10 @@ def test_login_page_keeps_password_fallback_and_passkey_button_and_javascript_pa
         "config": SimpleNamespace(SERVICE_NAME="FargoVPN"),
         "public_path": lambda path: "/panel" + (path if path.startswith("/") else "/" + path),
         "page": lambda _request, _title, body: body,
+        "update_manager": SimpleNamespace(current_version=lambda: (APP / "VERSION").read_text().strip()),
     }
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "login_page", "exec"), namespace)
+    brand = next(item for item in ast.parse(source).body if isinstance(item, ast.FunctionDef) and item.name == "_brand_mark")
+    exec(compile(ast.Module(body=[brand, node], type_ignores=[]), "login_page", "exec"), namespace)
     body = namespace["login_page"](object())
     assert "Войти по паролю" in body
     assert "Войти по Face ID / Touch ID" in body

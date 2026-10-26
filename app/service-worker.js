@@ -3,11 +3,18 @@ const BASE = '__FARGOVPN_BASE__';
 const VERSION = '__FARGOVPN_VERSION__';
 const ASSETS = [
   `${BASE}static/panel.css?v=${VERSION}`,
+  `${BASE}static/console-grid.css?v=${VERSION}`,
   `${BASE}static/console-mobile.css?v=${VERSION}`,
+  `${BASE}static/fargo-logo.png?v=${VERSION}`,
   `${BASE}static/panel.js?v=${VERSION}`,
   `${BASE}manifest.webmanifest?v=${VERSION}`,
   `${BASE}static/icons/icon-192.png`,
   `${BASE}static/icons/icon-512.png`,
+  `${BASE}static/icons/fargo-192-v524.png`,
+  `${BASE}static/icons/fargo-512-v524.png`,
+  `${BASE}static/icons/fargo-maskable-v524.png`,
+  `${BASE}static/icons/apple-touch-icon-v524.png`,
+
 ];
 
 self.addEventListener('message', event => {
