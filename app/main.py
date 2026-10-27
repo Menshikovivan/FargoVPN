@@ -35,6 +35,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import config as config
+import whitelist_help
 from update_manager import current_version
 import cabinet_service
 import referral_codes
@@ -951,6 +952,7 @@ def get_user_menu(user_id: int, user: dict | None = None):
     if active:
         builder.button(text="🔄 Продлить VPN", callback_data="menu:buy")
     builder.button(text="📘 Как подключить", callback_data="menu:faq")
+    builder.button(text="🛜 Белые списки", callback_data="menu:whitelist")
     builder.button(text="🆘 Поддержка", callback_data="menu:support")
     if user:
         builder.button(text="🎟 Код приглашения", callback_data="menu:invite")
@@ -1042,6 +1044,37 @@ def get_admin_menu():
     builder.button(text="🏠 Меню пользователя", callback_data="menu:home")
     # Short labels share rows; actions with longer names get their own row.
     builder.adjust(2, 1, 2, 1, 2, 1)
+    return builder.as_markup()
+
+
+def get_whitelist_menu(*, platform: str = ""):
+    builder = InlineKeyboardBuilder()
+    if platform in whitelist_help.PLATFORMS:
+        base = cabinet_service.public_web_base_url().rstrip("/")
+        if base:
+            apps = (("happ", "Happ"), ("incy", "Incy")) if platform == "ios" else (("happ", "Happ"),)
+            for app_key, label in apps:
+                for backup in (False, True):
+                    if whitelist_help.subscription_url(config, platform, app_key, backup):
+                        suffix = "?backup=1" if backup else ""
+                        title = f"🛟 Запасная в {label}" if backup else f"⚡ Открыть в {label}"
+                        builder.button(text=title, url=f"{base}/open-whitelist/{platform}/{app_key}{suffix}")
+        app_url = whitelist_help.link(config, "WHITELIST_HAPP_URL")
+        if app_url:
+            builder.button(text="📲 Скачать Happ", url=app_url)
+        if platform == "ios":
+            incy_url = whitelist_help.link(config, "WHITELIST_INCY_URL")
+            if incy_url:
+                builder.button(text="📲 Скачать Incy", url=incy_url)
+        builder.button(text="📱 Выбрать устройство", callback_data="menu:whitelist")
+    else:
+        for key, (label, _, _) in whitelist_help.PLATFORMS.items():
+            builder.button(text=label, callback_data=f"whitelist:{key}")
+    source = whitelist_help.link(config, "WHITELIST_SOURCE_URL")
+    if source:
+        builder.button(text="🔗 Источник подборок", url=source)
+    builder.button(text="🏠 Главное меню", callback_data="menu:home")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -1642,6 +1675,14 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_faq_menu(),
         )
+    elif action == "whitelist":
+        await state.clear()
+        await call.message.answer(
+            whitelist_help.overview_text(),
+            parse_mode="HTML",
+            reply_markup=get_whitelist_menu(),
+            disable_web_page_preview=True,
+        )
     elif action == "admin":
         await state.clear()
         await call.message.answer(
@@ -1649,6 +1690,27 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_admin_menu(),
         )
+
+
+@dp.callback_query(F.data.startswith("whitelist:"))
+async def whitelist_platform_callbacks(call: CallbackQuery, state: FSMContext):
+    await safe_callback_answer(call)
+    if not call.message or not call.from_user:
+        return
+    await state.clear()
+    platform = str(call.data or "").split(":", 1)[-1]
+    if platform not in whitelist_help.PLATFORMS:
+        await call.message.answer(
+            whitelist_help.overview_text(), parse_mode="HTML",
+            reply_markup=get_whitelist_menu(), disable_web_page_preview=True,
+        )
+        return
+    await call.message.answer(
+        whitelist_help.instruction_text(
+            config, platform, auto_import=bool(cabinet_service.public_web_base_url())
+        ), parse_mode="HTML",
+        reply_markup=get_whitelist_menu(platform=platform), disable_web_page_preview=True,
+    )
 
 
 @dp.callback_query(F.data.startswith("connect:"))

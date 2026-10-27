@@ -8,6 +8,16 @@ SUBSCRIPTION_DAYS = 30
 BOT_WELCOME_TEXT = ""  # optional; {service} is replaced with SERVICE_NAME
 BOT_SUPPORT_PROMPT = ""
 FAQ_INCY_URL = "https://apps.apple.com/ru/app/incy/id6756943388"
+# Бесплатные сторонние подборки; менять в панели: Настройки → Бот и сервис.
+# Пустая строка скрывает ссылку. Happ — RAW JSON; Incy и запасная — универсальный RAW TXT.
+WHITELIST_ANDROID_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/Export/Happ/GLOBAL/Vless-Reality-White-Lists-Rus-Mobile-Happ-global.json"
+WHITELIST_IOS_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/Export/Happ/GLOBAL/Vless-Reality-White-Lists-Rus-Mobile-Happ-global.json"
+WHITELIST_WINDOWS_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/Export/Happ/GLOBAL/Vless-Reality-White-Lists-Rus-Mobile-Happ-global.json"
+WHITELIST_INCY_SUB_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
+WHITELIST_BACKUP_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/WHITE-CIDR-RU-all.txt"
+WHITELIST_SOURCE_URL = "https://gitlab.com/igareck/vpn-configs-for-russia/-/tree/main"
+WHITELIST_HAPP_URL = "https://www.happ.su/main"
+WHITELIST_INCY_URL = "https://apps.apple.com/ru/app/incy/id6756943388"
 BOT_IDENTITY_REFRESH_SECONDS = 600
 BOT_SYNC_INTERVAL_SECONDS = 3600
 TELEGRAM_UPDATE_LEASE_SECONDS = 600

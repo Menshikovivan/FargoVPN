@@ -40,6 +40,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
 import config
+import whitelist_help
 from services import billing, subscriptions, privacy
 import auth_security
 import cabinet_service
@@ -375,7 +376,10 @@ async def response_security_headers(request: Request, call_next):
     response.headers["X-FargoVPN-Responder"] = "application"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Referrer-Policy"] = (
+        "no-referrer" if request.url.path.removeprefix(public_prefix()).startswith("/open-whitelist/")
+        else "same-origin"
+    )
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = PANEL_CONTENT_SECURITY_POLICY
     secure_request = request.url.scheme == "https"
@@ -4066,6 +4070,54 @@ def cabinet_logout(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.get("/open-whitelist/{platform}/{app}", response_class=HTMLResponse)
+def open_whitelist_app(request: Request, platform: str, app: str, backup: int = 0):
+    """Launch a public collection chosen from administrator-owned settings only."""
+    if platform not in {"android", "ios", "windows"} or app not in {"happ", "incy"}:
+        raise HTTPException(404, "Неизвестное устройство или приложение")
+    if (app == "incy" and platform != "ios") or backup not in {0, 1}:
+        raise HTTPException(404, "Недоступный вариант подключения")
+    sub_url = whitelist_help.subscription_url(config, platform, app, backup=bool(backup))
+    if not sub_url:
+        raise HTTPException(404, "Ссылка подборки пока не задана администратором")
+    native_url = f"{app}://add/{sub_url}"
+    # An administrator-owned URL can still contain HTML/script delimiters.
+    # Keep it a JavaScript string rather than allowing it to close this script.
+    native_json = (json.dumps(native_url, ensure_ascii=False)
+                   .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+                   .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+    native_html = html.escape(native_url, quote=True)
+    subscription_html = html.escape(sub_url, quote=True)
+    app_label = "Happ" if app == "happ" else "Incy"
+    download_url = whitelist_help.link(config, "WHITELIST_HAPP_URL" if app == "happ" else "WHITELIST_INCY_URL")
+    download = (f'<p><a class="secondary" href="{html.escape(download_url, quote=True)}" '
+                f'rel="noopener noreferrer">Установить {app_label}</a></p>') if download_url else ""
+    body = (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+        '<meta name="referrer" content="no-referrer">'
+        f'<title>Добавить подборку в {app_label}</title>'
+        '<style>body{font-family:system-ui,sans-serif;background:#10161a;color:#fff;min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:20px}'
+        '.box{width:100%;max-width:520px;box-sizing:border-box;background:#111a2d;border:1px solid #263656;border-radius:20px;padding:24px}'
+        'a{display:inline-block;padding:12px 16px;border-radius:12px;background:#2f80ed;color:#fff;text-decoration:none}'
+        '.secondary{background:#263656}textarea{box-sizing:border-box;width:100%;min-height:100px;margin-top:10px;padding:10px;border-radius:10px;overflow-wrap:anywhere;background:#10161a;color:#fff;border:1px solid #52607a}p{line-height:1.5}</style>'
+        '</head><body><main class="box">'
+        f'<h1>Добавить подборку в {app_label}</h1>'
+        '<p>Передаём ссылку в приложение. Если браузер спросит разрешение на открытие, подтвердите его. Затем сохраните подписку в приложении.</p>'
+        '<p>Это бесплатные сторонние подборки igareck/vpn-configs-for-russia. Серверы не принадлежат FargoVPN; доступность зависит от оператора и региона.</p>'
+        f'<a href="{native_html}">Добавить в {app_label}</a>'
+        '<p>Если приложение не открылось, установите его и нажмите кнопку ещё раз. Можно скопировать ссылку ниже и добавить подписку по ссылке вручную:</p>'
+        f'<textarea readonly aria-label="Ссылка подписки" onclick="this.select()">{subscription_html}</textarea>'
+        + download +
+        f'<script>const u={native_json};setTimeout(()=>{{location.replace(u)}},120);</script>'
+        '</main></body></html>'
+    )
+    return HTMLResponse(body, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Referrer-Policy": "no-referrer",
+    })
+
+
 @app.get("/open-app/{app}", response_class=HTMLResponse)
 def open_native_app(request: Request, app: str, exp: int = 0, tg_id: int = 0, sig: str = ""):
     """HTTPS launcher used by Telegram buttons to open HAPP/INCY natively."""
@@ -5671,6 +5723,31 @@ def _config_checked(name: str, default: bool = False) -> str:
     return "checked" if bool(getattr(config, name, default)) else ""
 
 
+def _whitelist_settings_fields() -> str:
+    fields = []
+    for key, name, label, default in whitelist_help.FIELDS:
+        fields.append(
+            f'<div class="setting"><label for="setting-{html.escape(name, quote=True)}">'
+            f'{html.escape(label)}</label><input id="setting-{html.escape(name, quote=True)}" '
+            f'type="url" inputmode="url" name="{html.escape(name, quote=True)}" '
+            f'value="{_config_text(key, default)}" maxlength="1000"></div>'
+        )
+    return "\n".join(fields)
+
+
+def _whitelist_form_values(form) -> dict[str, str]:
+    values = {}
+    for key, name, label, default in whitelist_help.FIELDS:
+        # Old forms and settings integrations omit these fields. Do not erase
+        # their saved URLs; an explicitly submitted empty field hides a link.
+        raw = form[name] if name in form else getattr(config, key, default)
+        try:
+            values[key] = whitelist_help.safe_url(raw)
+        except ValueError as error:
+            raise HTTPException(400, f"{label}: {error}") from error
+    return values
+
+
 def _password_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
     iterations = 260_000
@@ -5833,6 +5910,12 @@ def settings(request: Request):
           <div class="setting"><label for="setting-bot_identity_refresh_seconds">Обновлять Telegram-привязку, сек.</label><input id="setting-bot_identity_refresh_seconds" type="number" name="bot_identity_refresh_seconds" value="{int(getattr(config, 'BOT_IDENTITY_REFRESH_SECONDS', 600))}" min="60" max="86400"></div>
           <div class="setting"><label for="setting-bot_sync_interval_seconds">Синхронизация с 3x-ui, сек.</label><input id="setting-bot_sync_interval_seconds" type="number" name="bot_sync_interval_seconds" value="{int(getattr(config, 'BOT_SYNC_INTERVAL_SECONDS', 3600))}" min="300" max="86400"></div>
         </div>
+      </div>
+      <div class="card full">
+        <h2>Белые списки — ссылки в боте</h2>
+        <p>Бесплатные сторонние подборки igareck/vpn-configs-for-russia. Серверы не принадлежат FargoVPN; доступность зависит от оператора и региона.</p>
+        <div class="muted">Основные ссылки для Happ — RAW-файлы в формате Happ JSON. Для Incy задаётся отдельная универсальная TXT-подписка. Запасная ссылка — универсальная TXT-подписка. Пустое поле скрывает соответствующую ссылку. После сохранения бот перезапускается и использует новые адреса. Свежие списки загружает само приложение при обновлении подписки.</div>
+        <div class="two">{_whitelist_settings_fields()}</div>
       </div>
       <div class="card full">
         <div class="section-title"><h2>Массовая рассылка из веб-панели</h2><a class="button secondary small" href="/broadcast">Открыть рассылку</a></div>
@@ -6101,6 +6184,8 @@ def _save_settings(request: Request, form):
     def checked(name: str) -> bool:
         return text_value(name) == "1"
 
+    whitelist_values = _whitelist_form_values(form)
+
     service_name = text_value("service_name")
     if not service_name or len(service_name) > 100:
         raise HTTPException(400, "Название сервиса должно содержать от 1 до 100 символов")
@@ -6231,6 +6316,7 @@ def _save_settings(request: Request, form):
         raise HTTPException(400, "Нужно выбрать хотя бы один inbound 3x-ui")
 
     values: dict[str, Any] = {
+        **whitelist_values,
         "SERVICE_NAME": service_name,
         "ADMIN_IDS": admin_ids,
         "SUBSCRIPTION_DAYS": _form_int(form, "subscription_days", 30, 1, 3650, "Срок подписки"),
