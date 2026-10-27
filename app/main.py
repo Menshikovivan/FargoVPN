@@ -954,24 +954,44 @@ def get_user_menu(user_id: int, user: dict | None = None):
     builder.button(text="📘 Как подключить", callback_data="menu:faq")
     builder.button(text="🛜 Белые списки", callback_data="menu:whitelist")
     builder.button(text="🆘 Поддержка", callback_data="menu:support")
+    community_url = str(getattr(config, "BOT_COMMUNITY_URL", "https://t.me/fargovpn") or "").strip()
+    if community_url:
+        builder.button(text="📣 Новости и сообщество", url=community_url)
     if user:
         builder.button(text="🎟 Код приглашения", callback_data="menu:invite")
         builder.button(text="👨‍👩‍👧‍👦 Семейный доступ", callback_data="menu:family")
     personal_cabinet_url = get_personal_cabinet_url(user_id, user) if active else ""
     if personal_cabinet_url:
         builder.button(text="👤 Кабинет на сайте", url=personal_cabinet_url)
-    if user_id in config.ADMIN_IDS:
+    is_admin = user_id in config.ADMIN_IDS
+    if is_admin:
         builder.button(text="🛠 Админ-панель", callback_data="menu:admin")
-        builder.adjust(2, 2, 1, 1, 1, 1)
-    elif personal_cabinet_url:
-        builder.adjust(2, 2, 1, 1, 1)
-    elif user:
-        builder.adjust(2, 2, 1, 1)
-    else:
-        builder.adjust(2, 2)
     if not active:
-        builder.adjust(1, 2, 2, 1, 1)
+        if is_admin:
+            builder.adjust(1, 2, 2, 2, 1, 1)
+        elif user:
+            builder.adjust(1, 2, 2, 2, 1)
+        else:
+            builder.adjust(1, 1, 2, 2)
+    elif is_admin:
+        builder.adjust(2, 2, 2, 2, 1, 1)
+    elif personal_cabinet_url:
+        builder.adjust(2, 2, 2, 2, 1)
+    elif user:
+        builder.adjust(2, 2, 2, 2)
+    else:
+        builder.adjust(2, 2, 2)
     return builder.as_markup()
+
+
+def family_member_label(account: dict[str, Any]) -> str:
+    """Return a useful display label even for older profile_accounts shapes."""
+    tg_id = int(account.get("tg_id") or 0)
+    label = str(account.get("label") or account.get("display_name") or "").strip()
+    username = str(account.get("username") or "").strip().lstrip("@")
+    if not label and username:
+        label = f"@{username}"
+    return (label or f"Telegram ID {tg_id}")[:40]
 
 
 async def get_user_menu_async(
@@ -1021,10 +1041,10 @@ def admin_menu_text() -> str:
     """Short, structured entry screen for the Telegram admin keyboard."""
     return (
         f"<b>🛠 Админ-панель {html.escape(str(config.SERVICE_NAME))}</b>\n"
-        "<i>Выберите действие. Отчёты будут отправлены отдельным сообщением.</i>\n\n"
-        "<b>📊 Мониторинг</b> — сводка, пользователи и подписки\n"
-        "<b>⚙️ Обслуживание</b> — резервная копия и синхронизация 3x-ui\n"
-        "<b>💬 Коммуникации</b> — рассылка и сообщения\n"
+        "<i>Выберите раздел:</i>\n\n"
+        "<b>📊 Отчёты</b> — сводка, пользователи, подписки\n"
+        "<b>💬 Коммуникации</b> — рассылка, сообщения\n"
+        "<b>⚙️ Обслуживание</b> — резервная копия, синхронизация с 3x-ui\n"
         "<b>🔑 Доступ</b> — ручная выдача VPN-доступа"
     )
 
@@ -1035,15 +1055,18 @@ def get_admin_menu():
     builder.button(text="👥 Пользователи", callback_data="admin:users")
     builder.button(text="📋 Подписки", callback_data="admin:subscriptions")
     builder.button(text="✉ Рассылка", callback_data="admin:broadcast")
-    builder.button(text="💾 Бэкап", callback_data="admin:backup")
-    builder.button(text="🔄 Синхронизация 3x-ui", callback_data="admin:sync")
-    builder.button(text="🔑 Выдать доступ", callback_data="admin:grant")
     messages_url = get_messages_panel_url()
     if messages_url:
-        builder.button(text="💬 Сообщения", url=messages_url)
-    builder.button(text="🏠 Меню пользователя", callback_data="menu:home")
-    # Short labels share rows; actions with longer names get their own row.
-    builder.adjust(2, 1, 2, 1, 2, 1)
+        builder.button(text="💬 Открыть сообщения", url=messages_url)
+    builder.button(text="💾 Резервная копия", callback_data="admin:backup")
+    builder.button(text="🔄 Синхронизация 3x-ui", callback_data="admin:sync")
+    builder.button(text="🔑 Выдать доступ", callback_data="admin:grant")
+    builder.button(text="🏠 Главное меню", callback_data="menu:home")
+    # Group reports, communication, maintenance, and access into separate rows.
+    if messages_url:
+        builder.adjust(2, 1, 2, 2, 1, 1)
+    else:
+        builder.adjust(2, 1, 1, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -1125,10 +1148,17 @@ def home_text(*, first_visit: bool = False, summary: str = "") -> str:
         f"👋 Добро пожаловать в <b>{html.escape(str(config.SERVICE_NAME))}</b>!"
         if first_visit else f"<b>🏠 {html.escape(str(config.SERVICE_NAME))}</b>"
     )
+    community_note = (
+        "\n\n📣 Новости сервиса, обсуждения и голосования — в сообществе."
+        if str(getattr(config, "BOT_COMMUNITY_URL", "https://t.me/fargovpn") or "").strip() else ""
+    )
     return (
         intro + "\n\n" +
         (summary + "\n\n" if summary else "") +
-        "Выберите нужное действие ниже. Основная информация о подписке всегда доступна в разделе «Моя подписка»."
+        "Чтобы подключиться, откройте «Моя подписка» и проверьте срок. Если подписка активна, скопируйте ссылку. "
+        "Затем выберите «Как подключить» и укажите своё устройство. Если приложение не открылось, "
+        "скопируйте ссылку вручную со страницы запуска. Работа зависит от вашей сети и доступности сервера."
+        + community_note
     )
 
 
@@ -1274,6 +1304,25 @@ def payment_text() -> str:
     )
 
 
+def purchase_cancel_markup(cancel_token: str):
+    """Build a compact cancel button bound to one receipt-wait session."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✖️ Отменить ожидание чека",
+        callback_data=f"purchase:cancel:{cancel_token}",
+    )
+    return builder.as_markup()
+
+
+def purchase_cancel_token_matches(callback_data: str, current_token: str) -> bool:
+    """Accept only the callback tied to the current receipt-wait session."""
+    prefix = "purchase:cancel:"
+    if not current_token or not callback_data.startswith(prefix):
+        return False
+    callback_token = callback_data[len(prefix):]
+    return bool(callback_token) and secrets.compare_digest(callback_token, current_token)
+
+
 async def start_purchase(
     message: Message,
     state: FSMContext,
@@ -1285,9 +1334,38 @@ async def start_purchase(
     profile_id = await asyncio.to_thread(billing.payment_profile_id, payer_id, config.DB_PATH)
     amount = await asyncio.to_thread(billing.expected_payment_amount, profile_id, config.DB_PATH)
     purchased_days = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
-    await state.update_data(purchase_token=secrets.token_hex(24), expected_amount=amount, billing_tg_id=profile_id, purchased_days=purchased_days)
+    cancel_token = secrets.token_hex(8)
+    await state.update_data(
+        purchase_token=secrets.token_hex(24), cancel_token=cancel_token,
+        expected_amount=amount, billing_tg_id=profile_id, purchased_days=purchased_days,
+    )
     await state.set_state(FSMStates.wait_for_receipt)
-    await message.answer(payment_text_for_user(amount, purchased_days), parse_mode="HTML")
+    await message.answer(
+        payment_text_for_user(amount, purchased_days),
+        parse_mode="HTML",
+        reply_markup=purchase_cancel_markup(cancel_token),
+    )
+
+
+@dp.callback_query(F.data.startswith("purchase:cancel"))
+async def cancel_receipt_wait(call: CallbackQuery, state: FSMContext):
+    await safe_callback_answer(call)
+    current_token = str((await state.get_data()).get("cancel_token") or "")
+    if not purchase_cancel_token_matches(str(call.data or ""), current_token):
+        if call.message:
+            await call.message.answer("Эта кнопка относится к предыдущему ожиданию чека. Текущая оплата не изменена.")
+        return
+    if await state.get_state() != FSMStates.wait_for_receipt.state:
+        if call.message:
+            await call.message.answer("Ожидание чека уже завершено или отменено.")
+        return
+    await state.clear()
+    if call.message:
+        await call.message.answer(
+            "Ожидание чека остановлено. Если вы уже отправили чек, он продолжит проверку; "
+            "иначе заявка не создаётся. Чтобы начать оплату заново, в главном меню выберите покупку "
+            "или продление подписки."
+        )
 
 
 def purchase_quote_changed(
@@ -1349,10 +1427,28 @@ async def cmd_start(msg: Message, state: FSMContext):
                 registration_access.registration_state_sync, int(msg.from_user.id)
             )
             if status and status.status == registration_access.ACTIVE:
-                answer = f"✅ Аккаунт добавлен к семейному профилю Telegram ID {owner}. Для этого профиля применяется общая подписка."
+                answer = (
+                    f"✅ Аккаунт добавлен к семейному профилю Telegram ID {owner}. "
+                    "Регистрация завершена. Посмотрите статус общей подписки в разделе «Моя подписка» ниже."
+                )
             else:
-                answer = f"✅ Аккаунт привязан к семейному профилю Telegram ID {owner}. После проверки PIN-кода вы сможете пользоваться подпиской и получать рассылки FargoVPN. Повторно открывать ссылку не нужно."
-            await msg.answer(answer)
+                answer = (
+                    f"✅ Семейная привязка создана для профиля Telegram ID {owner}.\n\n"
+                    "Чтобы завершить регистрацию, отправьте боту 4-значный код приглашения, "
+                    "который вам передал уже зарегистрированный пользователь. Затем откройте «Моя подписка» "
+                    "и проверьте статус общей подписки. Эту ссылку повторно открывать не нужно."
+                )
+            if status and status.status == registration_access.ACTIVE:
+                await msg.answer(
+                    answer,
+                    reply_markup=await get_user_menu_async(
+                        int(msg.from_user.id),
+                        username=msg.from_user.username,
+                        display_name=msg.from_user.full_name,
+                    ),
+                )
+            else:
+                await msg.answer(answer)
             try:
                 await bot.send_message(owner, f"✅ К вашему семейному профилю привязан Telegram аккаунт {int(msg.from_user.id)}.")
             except Exception as notify_error:
@@ -1639,7 +1735,7 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
         for account in accounts:
             member_id = int(account["tg_id"])
             if member_id != user_id:
-                member_name = str(account.get("label") or f"ID {member_id}")[:40]
+                member_name = family_member_label(account)
                 builder.button(text=f"❌ Отвязать {member_name}", callback_data=f"family:remove:{member_id}")
         builder.button(text="🏠 Главное меню", callback_data="menu:home")
         builder.adjust(1)
@@ -1671,7 +1767,12 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
     elif action == "faq":
         await state.clear()
         await call.message.answer(
-            "<b>📚 FAQ и инструкции</b>\n\nВыберите приложение или раздел помощи.",
+            "<b>📘 Как подключить</b>\n\n"
+            "1. Откройте «Моя подписка», проверьте срок и скопируйте ссылку.\n"
+            "2. Выберите устройство, затем приложение.\n"
+            "3. Разрешите браузеру открыть приложение, сохраните подписку и выберите сервер.\n\n"
+            "Если импорт не начался, скопируйте ссылку со страницы запуска и добавьте её в приложении вручную.\n"
+            "Если подключение не удалось, откройте раздел «Если VPN не подключается».",
             parse_mode="HTML",
             reply_markup=get_faq_menu(),
         )
@@ -1732,7 +1833,10 @@ async def connection_platform_callbacks(call: CallbackQuery, state: FSMContext):
         )
         return
     await call.message.answer(
-        f"<b>{platform_label}</b>\n\nВыберите приложение — оно откроется и получит вашу подписку автоматически:",
+        f"<b>{platform_label}</b>\n\n"
+        "Выберите приложение. Кнопка откроет страницу FargoVPN и передаст ссылку в клиент. "
+        "Если браузер запросит разрешение, подтвердите переход. Сохраните подписку в приложении и выберите сервер. "
+        "Если приложение не открылось, скопируйте ссылку на странице и добавьте её вручную.",
         parse_mode="HTML",
         reply_markup=await asyncio.to_thread(_connection_app_markup, int(call.from_user.id), platform=platform),
     )
@@ -1754,12 +1858,35 @@ async def family_callbacks(call: CallbackQuery):
             me = await bot.get_me()
             link = f"https://t.me/{me.username}?start=family_{token}"
             await call.message.answer(
-                "🔗 Одноразовая ссылка привязки действует 30 минут. Отправьте её человеку, которого хотите добавить. Он должен открыть бота по ссылке и пройти проверку PIN-кода.\n\n" + link,
+                "🔗 Одноразовая ссылка привязки действует 30 минут. Отправьте её человеку, которого хотите добавить. "
+                "После открытия ссылки ему нужно отдельно отправить боту 4-значный код приглашения от зарегистрированного пользователя. "
+                "После проверки кода откройте «Моя подписка» и проверьте статус семейной подписки.\n\n" + link,
                 disable_web_page_preview=True,
             )
             return
+        if len(action) == 3 and action[1] == "remove" and action[2] == "cancel":
+            await call.message.answer("Отвязка отменена. Участники семейного профиля не изменились.")
+            return
         if len(action) == 3 and action[1] == "remove":
             member_id = int(action[2])
+            accounts = await asyncio.to_thread(billing.profile_accounts, user_id, config.DB_PATH)
+            member = next((item for item in accounts if int(item["tg_id"]) == member_id and member_id != user_id), None)
+            if member is None:
+                raise ValueError("Этот аккаунт не найден среди участников семейного профиля")
+            label = family_member_label(member)[:60]
+            builder = InlineKeyboardBuilder()
+            builder.button(text="✅ Да, отвязать", callback_data=f"family:remove:confirm:{member_id}")
+            builder.button(text="↩️ Отмена", callback_data="family:remove:cancel")
+            builder.adjust(1)
+            await call.message.answer(
+                f"Отвязать аккаунт «{html.escape(label)}» от семейного профиля? "
+                "Доступ к общей подписке у него прекратится.",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML",
+            )
+            return
+        if len(action) == 4 and action[1:3] == ["remove", "confirm"]:
+            member_id = int(action[3])
             await asyncio.to_thread(billing.unlink_profile_member_sync, user_id, member_id, config.DB_PATH)
             await call.message.answer(f"✅ Аккаунт {member_id} отвязан от семейного профиля.")
             try:
@@ -1773,7 +1900,7 @@ async def family_callbacks(call: CallbackQuery):
             for account in accounts:
                 member = int(account["tg_id"])
                 if member != user_id:
-                    name = str(account.get("label") or f"ID {member}")[:40]
+                    name = family_member_label(account)
                     builder.button(text=f"❌ Отвязать {name}", callback_data=f"family:remove:{member}")
             builder.button(text="🏠 Главное меню", callback_data="menu:home")
             builder.adjust(1)
@@ -1793,12 +1920,11 @@ async def faq_callbacks(call: CallbackQuery, state: FSMContext):
     if action == "incy":
         text = (
             "<b>📱 Подключение через Incy</b>\n\n"
-            "1. Откройте «Моя подписка» и скопируйте ссылку подписки.\n"
-            "2. Установите и откройте Incy.\n"
-            "3. Выберите добавление или импорт подписки и вставьте скопированный URL.\n"
-            "4. Сохраните подписку, обновите список серверов и выберите подходящий сервер.\n"
-            "5. Нажмите подключение и разрешите iOS создать VPN-конфигурацию.\n\n"
-            "Названия пунктов могут немного отличаться в разных версиях приложения."
+            "1. Проверьте срок в разделе «Моя подписка».\n"
+            "2. Нажмите «INCY — открыть и импортировать» и разрешите браузеру перейти в приложение.\n"
+            "3. Сохраните подписку, обновите список серверов, выберите сервер и нажмите подключение.\n\n"
+            "Если Incy не открылся, скопируйте ссылку на странице FargoVPN и добавьте её в Incy через импорт по URL. "
+            "При запросе iOS разрешите создание VPN-конфигурации."
         )
         await call.message.answer(
             text + "\n\n👇 Можно открыть приложение прямо сейчас:",
@@ -1808,22 +1934,22 @@ async def faq_callbacks(call: CallbackQuery, state: FSMContext):
     elif action == "happ":
         await call.message.answer(
             "<b>📘 Подключение через HApp</b>\n\n"
-            "1. Нажмите кнопку ниже — HApp откроется.\n"
-            "2. Подписка передастся в приложение автоматически.\n"
-            "3. Выберите сервер и подключитесь.\n\n"
-            "Если приложение не установлено, установите HApp и повторите.",
+            "1. Проверьте срок в разделе «Моя подписка».\n"
+            "2. Нажмите «HAPP — открыть и импортировать» и разрешите браузеру перейти в приложение.\n"
+            "3. Сохраните подписку, обновите список серверов, выберите сервер и нажмите подключение.\n\n"
+            "Если HApp не открылся, скопируйте ссылку на странице FargoVPN и добавьте её в приложении вручную по URL.",
             parse_mode="HTML",
             reply_markup=await asyncio.to_thread(_connection_app_markup, int(call.from_user.id) if call.from_user else 0),
         )
     elif action == "troubleshoot":
         await call.message.answer(
             "<b>🛟 Если VPN не подключается</b>\n\n"
-            "• Обновите подписку внутри приложения.\n"
-            "• Проверьте, что срок подписки не истёк и доступ не заблокирован.\n"
-            "• Переключите сервер или протокол.\n"
-            "• Отключите другой VPN/Private Relay и повторите подключение.\n"
-            "• Перезапустите приложение и интернет-соединение.\n\n"
-            "Если проблема остаётся, отправьте администратору модель устройства, приложение и текст ошибки.",
+            "1. В «Моя подписка» проверьте срок и статус.\n"
+            "2. В приложении обновите подписку и убедитесь, что выбран её профиль.\n"
+            "3. Попробуйте другой сервер или протокол. Отключите другой VPN; на iOS также проверьте Private Relay.\n"
+            "4. Перезапустите приложение и проверьте интернет-соединение.\n\n"
+            "Если ошибка остаётся, напишите в поддержку: модель и версию ОС, приложение и его версию, сервер и точный текст ошибки. "
+            "Не отправляйте ссылку подписки или коды доступа.",
             parse_mode="HTML",
             reply_markup=get_instruction_menu(),
         )
@@ -1833,7 +1959,10 @@ async def process_instruction(call: CallbackQuery):
     await safe_callback_answer(call)
     await call.message.answer(
         "<b>📘 Подключение через HApp</b>\n\n"
-        "Скопируйте ссылку подписки, нажмите «+», добавьте подписку по URL, сохраните и обновите список серверов.",
+        "1. В «Моя подписка» проверьте срок и скопируйте ссылку.\n"
+        "2. В HApp выберите добавление подписки по URL и вставьте ссылку.\n"
+        "3. Сохраните подписку, обновите список серверов, выберите сервер и проверьте подключение.\n\n"
+        "Если автоматический импорт не сработал, используйте копирование ссылки на странице запуска приложения.",
         parse_mode="HTML",
         reply_markup=get_instruction_menu(),
     )
@@ -1991,8 +2120,10 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         previous_profile_id, previous_amount, current_profile_id, current_amount
     ):
         purchase_token = secrets.token_hex(24)
+        cancel_token = secrets.token_hex(8)
         await state.update_data(
             purchase_token=purchase_token,
+            cancel_token=cancel_token,
             expected_amount=current_amount,
             billing_tg_id=current_profile_id,
             purchased_days=max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30)),
@@ -2003,6 +2134,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
             f"Актуальная сумма: <b>{current_amount} ₽</b>. "
             "Оплатите эту сумму и отправьте новый чек.",
             parse_mode="HTML",
+            reply_markup=purchase_cancel_markup(cancel_token),
         )
         return
 
@@ -2221,7 +2353,7 @@ async def send_crm_list(message: Message, page_no: int = 1) -> None:
             ).fetchall()
     rows = await asyncio.to_thread(_load_crm_users)
     if not rows:
-        await message.answer("📉 База пользователей пуста.", reply_markup=get_admin_menu())
+        await message.answer("Пользователей пока нет.", reply_markup=get_admin_menu())
         return
     has_next = len(rows) > page_size
     rows = rows[:page_size]
@@ -2249,10 +2381,10 @@ async def send_crm_list(message: Message, page_no: int = 1) -> None:
         builder.button(text="← Предыдущая страница", callback_data=f"crm_page:{page_no - 1}")
     if has_next:
         builder.button(text="Следующая страница →", callback_data=f"crm_page:{page_no + 1}")
-    builder.button(text="⬅ Админ-меню", callback_data="menu:admin")
+    builder.button(text="← Админ-меню", callback_data="menu:admin")
     builder.adjust(2)
     await message.answer(
-        f"<b>👥 Пользователи</b>\n\nСтраница {page_no}; показано {len(rows)} записей. Выберите карточку:",
+        f"<b>👥 Пользователи · страница {page_no}</b>\n\nПоказано записей: {len(rows)}. Выберите пользователя:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
@@ -2485,11 +2617,11 @@ def subscription_report_keyboard(page_no: int, total_pages: int):
         return get_admin_menu()
     builder = InlineKeyboardBuilder()
     if page_no > 1:
-        builder.button(text="⬅ Назад", callback_data=f"admin:subscriptions:page:{page_no - 1}")
-    builder.button(text=f"Стр. {page_no}/{total_pages}", callback_data="admin:subscriptions:page:current")
+        builder.button(text="← Предыдущая страница", callback_data=f"admin:subscriptions:page:{page_no - 1}")
+    builder.button(text=f"Страница {page_no}/{total_pages}", callback_data="admin:subscriptions:page:current")
     if page_no < total_pages:
         builder.button(text="Вперёд ➡", callback_data=f"admin:subscriptions:page:{page_no + 1}")
-    builder.button(text="🏠 Админ-меню", callback_data="menu:admin")
+    builder.button(text="← Админ-меню", callback_data="menu:admin")
     builder.adjust(3, 1)
     return builder.as_markup()
 
@@ -2559,15 +2691,15 @@ async def run_admin_backup(message: Message) -> None:
         detail = await asyncio.to_thread(request_backup_now)
         logger.info("Manual backup requested via single service: %s", detail)
         await message.answer(
-            "💾 <b>Полный бэкап запущен</b>\n\n"
+            "💾 <b>Резервная копия запущена</b>\n\n"
             "Архивирование и отправка выполняются единой службой vpn-service-backup. "
-            "Прогресс: Журналы → «Процесс бэкапа · live».",
+            "Прогресс: откройте «Журналы» и выберите «Процесс бэкапа · live».",
             parse_mode="HTML",
             reply_markup=get_admin_menu(),
         )
     except Exception as error:  # noqa: BLE001
-        logger.exception("Ошибка запуска ручного backup")
-        await message.answer(f"❌ Ошибка запуска backup: {html.escape(str(error))}", parse_mode="HTML")
+        logger.exception("Ошибка запуска ручной резервной копии")
+        await message.answer(f"❌ Не удалось запустить резервную копию: {html.escape(str(error))}", parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("admin:"))
@@ -2856,9 +2988,9 @@ async def crmview_card(call: CallbackQuery):
     u = await asyncio.to_thread(db_get_user, tg_id)
     if not u: return
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"➕ Продлить {SUBSCRIPTION_DAYS} дней", callback_data=f"crmmod_{SUBSCRIPTION_DAYS}_{tg_id}")
-    builder.button(text=f"➖ Урезать {SUBSCRIPTION_DAYS} дней", callback_data=f"crmmod_-{SUBSCRIPTION_DAYS}_{tg_id}")
-    builder.button(text="🗑 Полностью удалить", callback_data=f"crmdel_{tg_id}")
+    builder.button(text=f"➕ Продлить на {SUBSCRIPTION_DAYS} дн.", callback_data=f"crmmod_{SUBSCRIPTION_DAYS}_{tg_id}")
+    builder.button(text=f"➖ Сократить на {SUBSCRIPTION_DAYS} дн.", callback_data=f"crmmod_-{SUBSCRIPTION_DAYS}_{tg_id}")
+    builder.button(text="🗑 Удалить пользователя", callback_data=f"crmdel_{tg_id}")
     builder.adjust(2, 1)
     date_str = billing.subscription_label(u)
     if billing.has_subscription(u) and int(u.get("expiry_time") or 0) > 0:
@@ -2866,7 +2998,7 @@ async def crmview_card(call: CallbackQuery):
     amount = await asyncio.to_thread(billing.expected_payment_amount, tg_id, config.DB_PATH)
     linked = await asyncio.to_thread(billing.linked_count, tg_id, config.DB_PATH)
     client_label = html.escape(get_display_name(u, tg_id))
-    card = f"<b>👤 КЛИЕНТ CRM:</b>\n\n🆔 TG ID: <code>{tg_id}</code>\n👤 Имя: <code>{client_label}</code>\n📧 Email: <code>{html.escape(str(u.get('email') or '—'))}</code>\n📅 Статус: <code>{html.escape(date_str)}</code>\n👨‍👩‍👧 Telegram аккаунтов: <code>{linked}</code>\n💳 Платёж за период: <code>{amount}</code> ₽"
+    card = f"<b>👤 Карточка пользователя</b>\n\n🆔 Telegram ID: <code>{tg_id}</code>\n👤 Имя: <code>{client_label}</code>\n📧 Email: <code>{html.escape(str(u.get('email') or '—'))}</code>\n📅 Подписка: <code>{html.escape(date_str)}</code>\n👨‍👩‍👧 Telegram-аккаунтов: <code>{linked}</code>\n💳 Оплата за период: <code>{amount}</code> ₽"
     await call.message.answer(card, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("crmmod_"))

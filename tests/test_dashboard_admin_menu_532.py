@@ -112,9 +112,18 @@ def test_admin_menu_contains_all_existing_actions_and_uses_clear_rows():
         "admin:summary", "admin:users", "admin:subscriptions", "admin:broadcast",
         "admin:backup", "admin:sync", "admin:grant", "menu:home",
     }
-    assert {"📊 Сводка", "👥 Пользователи", "📋 Подписки", "💾 Бэкап", "🔄 Синхронизация 3x-ui"} <= labels
+    assert {
+        "📊 Сводка", "👥 Пользователи", "📋 Подписки", "💾 Резервная копия",
+        "🔄 Синхронизация 3x-ui", "💬 Открыть сообщения", "🏠 Главное меню",
+    } <= labels
     assert any(item.get("url") == "https://panel.example.test/messages" for item in result.buttons)
-    assert result.row_widths == (2, 1, 2, 1, 2, 1)
+    assert result.row_widths == (2, 1, 2, 2, 1, 1)
+
+    builder.buttons.clear()
+    namespace["get_messages_panel_url"] = lambda: ""
+    result = namespace["get_admin_menu"]()
+    assert not any(item.get("url") for item in result.buttons)
+    assert result.row_widths == (2, 1, 1, 2, 1, 1)
 
 
 def test_admin_entry_text_has_section_hierarchy_and_summary_is_grouped():
@@ -122,9 +131,11 @@ def test_admin_entry_text_has_section_hierarchy_and_summary_is_grouped():
     namespace = {"config": SimpleNamespace(SERVICE_NAME="FargoVPN"), "html": html}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "admin_menu_text", "exec"), namespace)
     text = namespace["admin_menu_text"]()
-    assert "📊 Мониторинг" in text
+    assert "📊 Отчёты" in text
     assert "⚙️ Обслуживание" in text
     assert "💬 Коммуникации" in text
+    assert "резервная копия" in text
+    assert "синхронизация с 3x-ui" in text
 
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     summary = source[source.index("def admin_summary_text") : source.index("def subscription_report_text")]

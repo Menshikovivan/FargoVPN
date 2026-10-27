@@ -59,8 +59,8 @@
       text('mon-xui-tcp', available.tcp_count!==false&&s.tcp_count!=null ? number(s.tcp_count) : 'Нет данных');
       text('mon-xui-speed', hasNetwork ? `${bytes(s.net_down_speed)}/с / ${bytes(s.net_up_speed)}/с` : 'Нет данных');
       if (Object.keys(s).length && !d.error) {
-        if(hasCpu){sample(xuiCpu,s.cpu);chart('monitor-xui-cpu-chart',[xuiCpu]);}else{text('monitor-xui-cpu-chart','Нет данных CPU');}
-        if(hasNetwork){sample(download,s.net_down_speed);sample(upload,s.net_up_speed);chart('monitor-speed-chart',[download,upload],Math.max(1,...download,...upload));text('mon-speed-scale','Максимум шкалы: '+bytes(Math.max(1,...download,...upload))+'/с');}else{text('monitor-speed-chart','Нет данных скорости');text('mon-speed-scale','Нет данных');}
+        if(hasCpu){sample(xuiCpu,s.cpu);chart('monitor-xui-cpu-chart',[xuiCpu]);}else{text('monitor-xui-cpu-chart','Пока нет данных CPU от 3x-ui');}
+        if(hasNetwork){sample(download,s.net_down_speed);sample(upload,s.net_up_speed);chart('monitor-speed-chart',[download,upload],Math.max(1,...download,...upload));text('mon-speed-scale','Максимум шкалы: '+bytes(Math.max(1,...download,...upload))+'/с');}else{text('monitor-speed-chart','Пока нет данных скорости от 3x-ui');text('mon-speed-scale','Нет данных от 3x-ui');}
       }
       text('mon-xui-fail2ban', d.fail2ban?.status || 'Нет данных');
       text('mon-xui-error', d.error || '');

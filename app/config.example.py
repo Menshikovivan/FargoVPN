@@ -7,6 +7,8 @@ ADMIN_IDS = []
 SUBSCRIPTION_DAYS = 30
 BOT_WELCOME_TEXT = ""  # optional; {service} is replaced with SERVICE_NAME
 BOT_SUPPORT_PROMPT = ""
+# Публичная ссылка Telegram-сообщества; пустое значение скрывает кнопку в меню бота.
+BOT_COMMUNITY_URL = "https://t.me/fargovpn"
 FAQ_INCY_URL = "https://apps.apple.com/ru/app/incy/id6756943388"
 # Бесплатные сторонние подборки; менять в панели: Настройки → Бот и сервис.
 # Пустая строка скрывает ссылку. Happ — RAW JSON; Incy и запасная — универсальный RAW TXT.

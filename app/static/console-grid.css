@@ -1,4 +1,4 @@
-/* FargoVPN 5.2.4 — approved Console Grid geometry. Loaded after panel.css. */
+/* FargoVPN 5.2.6 — approved Console Grid geometry. Loaded after panel.css. */
 :root {
   --desktop-rail: 240px;
   --desktop-offset: 240px;
@@ -367,6 +367,29 @@ body.panel-page .monitoring-grid > .metric .value {
   }
 }
 
+/* Align the dashboard network label and rates with the neighboring resource heads. */
+body.panel-page .server-resources-main .resource-box.network .resource-box-head {
+  align-items: baseline !important;
+  column-gap: 8px !important;
+  row-gap: 4px !important;
+}
+
+body.panel-page .server-resources-main .resource-box.network .resource-box-head > span:first-child {
+  flex: 0 1 auto !important;
+  min-width: 0;
+}
+
+body.panel-page .server-resources-main .resource-box.network .resource-box-head > b {
+  flex: 0 1 auto !important;
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+}
+
+body.panel-page .server-resources-main .resource-box.network .resource-box-head > b > span {
+  white-space: nowrap;
+}
+
 /* Compact dashboard internals so every live system row fits its fixed cell. */
 body.panel-page .system-list > div {
   min-height: 0 !important;
@@ -428,3 +451,66 @@ body.panel-page .monitoring-grid>.chart-card>.chart>svg{display:block;width:100%
 
 .aside-foot>a{border-left:2px solid transparent}
 .aside-foot>a.active,.aside-foot>a:hover{background:var(--surface-2)!important;color:var(--text)!important;border-left-color:var(--blue)!important}
+
+/* Desktop polish: give the overview search a clear, stable place in the header. */
+@media (min-width: 901px) {
+  body.panel-page .dash-header {
+    align-items: center !important;
+    gap: 24px !important;
+    margin-bottom: 24px !important;
+  }
+
+  body.panel-page .dash-header > div:first-child {
+    min-width: 0;
+  }
+
+  body.panel-page .header-tools {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  body.panel-page .dash-header .global-search {
+    width: min(440px, 36vw) !important;
+    min-width: 260px;
+  }
+
+  body.panel-page .dash-kpis {
+    margin-bottom: 24px !important;
+  }
+
+  /* Keep the six summary tiles compact and make the three plots easier to read. */
+  body.panel-page .monitoring-grid {
+    gap: 20px !important;
+  }
+
+  body.panel-page .monitoring-grid > .metric,
+  body.panel-page .monitoring-grid > .side {
+    height: 176px !important;
+    min-height: 176px !important;
+    max-height: 176px !important;
+  }
+
+  body.panel-page .monitoring-grid > .chart-card {
+    height: 344px !important;
+    min-height: 344px !important;
+    max-height: 344px !important;
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1200px) {
+  body.panel-page .dash-header {
+    align-items: stretch !important;
+    flex-direction: column !important;
+  }
+
+  body.panel-page .header-tools {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) repeat(3, 40px);
+    width: 100%;
+  }
+
+  body.panel-page .dash-header .global-search {
+    width: 100% !important;
+    min-width: 0;
+  }
+}

@@ -5719,6 +5719,62 @@ def _config_text(name: str, default: Any = "") -> str:
     return html.escape(str(getattr(config, name, default) or ""), quote=True)
 
 
+BOT_COMMUNITY_URL_DEFAULT = "https://t.me/fargovpn"
+
+
+def _validate_bot_community_url(value: Any) -> str:
+    """Accept a public Telegram username link, or blank to hide the bot button."""
+    supplied = str(value or "")
+    raw = supplied.strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        path = parsed.path
+        username = path.strip("/")
+        public_username = (
+            path in (f"/{username}", f"/{username}/")
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username) is not None
+        )
+        private_invite = re.fullmatch(r"/\+[A-Za-z0-9_-]{8,128}", path) is not None
+        joinchat_invite = re.fullmatch(r"/joinchat/[A-Za-z0-9_-]{8,128}", path) is not None
+        valid = (
+            len(raw) <= 255
+            and all(char.isprintable() for char in supplied)
+            and not any(char.isspace() for char in raw)
+            and parsed.scheme.lower() == "https"
+            and parsed.netloc.lower() == "t.me"
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port is None
+            and (public_username or private_invite or joinchat_invite)
+        )
+    except (ValueError, TypeError):
+        valid = False
+        username = ""
+    if not valid:
+        raise HTTPException(400, "Укажите ссылку сообщества https://t.me/имя или ссылку-приглашение, либо оставьте поле пустым")
+    canonical_path = f"/{username}" if public_username else parsed.path
+    return f"https://t.me{canonical_path}" + (f"?{parsed.query}" if parsed.query else "") + (f"#{parsed.fragment}" if parsed.fragment else "")
+
+
+def _bot_community_url_from_form(form) -> str:
+    # Missing fields occur in older settings forms; preserve the configured value.
+    raw = form["bot_community_url"] if "bot_community_url" in form else getattr(config, "BOT_COMMUNITY_URL", BOT_COMMUNITY_URL_DEFAULT)
+    return _validate_bot_community_url(raw)
+
+
+def _bot_community_url_field() -> str:
+    value = _config_text("BOT_COMMUNITY_URL", BOT_COMMUNITY_URL_DEFAULT)
+    return (
+        '<div class="setting"><label for="setting-bot_community_url">Ссылка Telegram-сообщества</label>'
+        f'<input id="setting-bot_community_url" type="url" inputmode="url" name="bot_community_url" '
+        f'value="{value}" maxlength="255" placeholder="https://t.me/fargovpn">'
+        '<div class="muted">HTTPS-ссылка на группу или сообщество Telegram: публичная ссылка https://t.me/имя, '
+        'https://t.me/+приглашение или https://t.me/joinchat/приглашение. Пустое поле скрывает кнопку в меню бота.</div></div>'
+    )
+
+
 def _config_checked(name: str, default: bool = False) -> str:
     return "checked" if bool(getattr(config, name, default)) else ""
 
@@ -5903,6 +5959,7 @@ def settings(request: Request):
         <h2>Тексты и интерактивность</h2>
         <div class="setting"><label for="setting-bot_welcome_text">Приветствие / текст главного меню</label><textarea id="setting-bot_welcome_text" name="bot_welcome_text" maxlength="3500" placeholder="Пусто — стандартный текст. Можно использовать {{service}}.">{_config_text('BOT_WELCOME_TEXT')}</textarea></div>
         <div class="setting"><label for="setting-bot_support_prompt">Подсказка перед обращением в поддержку</label><textarea id="setting-bot_support_prompt" name="bot_support_prompt" maxlength="1500" placeholder="Пусто — стандартная подсказка.">{_config_text('BOT_SUPPORT_PROMPT')}</textarea></div>
+        {_bot_community_url_field()}
         <div class="setting"><label for="setting-faq_incy_url">Ссылка на Incy</label><input id="setting-faq_incy_url" type="text" inputmode="url" name="faq_incy_url" value="{_config_text('FAQ_INCY_URL', 'https://apps.apple.com/ru/app/incy/id6756943388')}"></div>
         <div class="setting"><label for="setting-web_timezone">Часовой пояс панели</label><input id="setting-web_timezone" name="web_timezone" value="{_config_text('WEB_TIMEZONE', 'Asia/Almaty')}" maxlength="100" required><div class="muted">Используется для дат/времени в веб-панели, журнале, подписках и статистике. Например: Asia/Almaty.</div></div>
         <div class="setting"><label for="setting-web_domain">Домен веб-панели</label><input id="setting-web_domain" name="web_domain" value="{_config_text('WEB_DOMAIN')}" placeholder="panel.example.com или example.com"><div class="muted">Имя должно входить в SAN сертификата. При пустом поле панель пытается определить hostname из URL/конфигурации текущего reverse-proxy.</div></div>
@@ -6289,6 +6346,7 @@ def _save_settings(request: Request, form):
 
     welcome_text = text_value("bot_welcome_text")
     support_prompt = text_value("bot_support_prompt")
+    bot_community_url = _bot_community_url_from_form(form)
     aliases = text_value("receipt_aliases")
     if len(welcome_text) > 3500 or len(support_prompt) > 1500 or len(aliases) > 2000:
         raise HTTPException(400, "Один из текстовых параметров превышает допустимую длину")
@@ -6322,6 +6380,7 @@ def _save_settings(request: Request, form):
         "SUBSCRIPTION_DAYS": _form_int(form, "subscription_days", 30, 1, 3650, "Срок подписки"),
         "BOT_WELCOME_TEXT": welcome_text,
         "BOT_SUPPORT_PROMPT": support_prompt,
+        "BOT_COMMUNITY_URL": bot_community_url,
         "FAQ_INCY_URL": faq_incy_url,
         "BOT_IDENTITY_REFRESH_SECONDS": _form_int(form, "bot_identity_refresh_seconds", 600, 60, 86_400, "Обновление Telegram-привязки"),
         "BOT_SYNC_INTERVAL_SECONDS": _form_int(form, "bot_sync_interval_seconds", 3600, 300, 86_400, "Синхронизация бота"),
