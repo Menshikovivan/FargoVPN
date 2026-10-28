@@ -59,6 +59,7 @@ import push_service
 import restore_manager
 from security_policy import PANEL_CONTENT_SECURITY_POLICY
 import registration_access
+import expiry_snapshots
 from user_identity import build_unique_identity_index, is_generated_identity_comment, match_local_identity, normalize_username
 from detached_jobs import DetachedJobError, launch_detached
 from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local
@@ -97,6 +98,9 @@ from services.xui_api import (
     set_client_status_sync,
     current_subscription_url_sync,
     inbound_selection_status_sync,
+    list_client_hwids_sync,
+    remove_client_hwid_sync,
+    resolve_hwid_client_email_sync,
 )
 
 
@@ -2920,6 +2924,57 @@ def telegram_link_request_status_api(request: Request, token: str):
     return telegram_link_request_status(token)
 
 
+def _expiry_snapshot_dir() -> Path:
+    return Path(str(getattr(config, "BACKUP_DIR", "/var/backups/vpn-service"))) / "expiry-snapshots"
+
+
+@app.get("/users/expiry-snapshots", response_class=HTMLResponse)
+def expiry_snapshots_page(request: Request, source: str = "manual"):
+    require_auth(request)
+    if source not in {'manual', 'preupdate'}: raise HTTPException(400, "Неизвестный тип снимка")
+    result = None
+    error = ""
+    try:
+        result = expiry_snapshots.compare_latest(_expiry_snapshot_dir(), lambda: fetch_snapshot_sync(force=True), source=source)
+    except Exception:
+        error = "Не удалось получить достоверные данные 3x-ui или прочитать снимок. Проверьте подключение и журналы."
+    report = ""
+    if result and result.get("available"):
+        counts = result.get("counts") or {}
+        def amount(name): return int(counts.get(name, 0))
+        report = f'<p>Дата снимка: {html.escape(result["created_utc"])} · Совпадают: {amount("same")} · Срок изменился: {amount("changed")} · Стали бессрочными: {amount("finite_to_zero")} · Отсутствуют: {amount("missing")} · Новые: {amount("new")} · Идентичность изменилась: {amount("identity_changed")}</p>'
+        if result.get('current_empty'): report += '<p class="notice">Текущий список 3x-ui пуст. Проверьте панель перед любыми решениями.</p>'
+        def fmt(value):
+            return "Бессрочно" if not value else panel_from_timestamp(value / 1000).strftime("%d.%m.%Y %H:%M")
+        lines = []
+        for row in result.get("changes", []):
+            lines.append(f'<tr><td>{html.escape(row["email"])}</td><td>{html.escape(fmt(row["before"]))}</td><td>{html.escape(fmt(row["after"]))}</td></tr>')
+        if lines:
+            report += '<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>В снимке</th><th>Сейчас в 3x-ui</th></tr></thead><tbody>' + ''.join(lines) + '</tbody></table></div>'
+    elif not error:
+        report = '<p>Подтверждённых снимков пока нет.</p>'
+    notice = f'<p class="notice">{html.escape(error)}</p>' if error else ''
+    token = html.escape(session_csrf_token(request), quote=True)
+    selected = 'автоматический перед обновлением FargoVPN (сроки не подтверждены вручную)' if source == 'preupdate' else 'подтверждённый вручную'
+    body = f'''<header><div><h1>Сверка сроков подписок</h1><div class="subtitle">Снимок хранится локально и содержит идентификаторы клиентов и сроки.</div></div><a class="button secondary" href="/users">К пользователям</a></header>
+    <div class="card"><p>Снимок не предотвращает изменения в 3x-ui и не восстанавливает подписки автоматически. Перед восстановлением нужно проверить новые платежи и изменения. Дополнительно храните полный бэкап.</p><div class="actions"><a class="button secondary" href="/users/expiry-snapshots?source=manual">Подтверждённый вручную</a><a class="button secondary" href="/users/expiry-snapshots?source=preupdate">Перед обновлением FargoVPN</a></div><p>Выбран: {selected}.</p>{notice}{report}</div>
+    <div class="card"><h2>Создать снимок текущих сроков</h2><p>Создавайте его до обновления Itman75 только после проверки, что сроки в 3x-ui верны. Будут сделаны два чтения; если данные меняются, снимок не создаётся.</p><form method="post" action="/users/expiry-snapshots"><input type="hidden" name="csrf_token" value="{token}"><label><input type="checkbox" name="confirm" value="yes" required> Я проверил текущие сроки в 3x-ui</label><br><button type="submit">Создать защищённый снимок</button></form></div>'''
+    return page(request, "Сверка сроков", body, active="users")
+
+
+@app.post("/users/expiry-snapshots")
+def expiry_snapshots_create(request: Request, csrf_token: str = Form(""), confirm: str = Form("")):
+    require_auth(request, csrf_token)
+    if confirm != 'yes': raise HTTPException(400, "Подтвердите проверку сроков")
+    try:
+        expiry_snapshots.create_snapshot(_expiry_snapshot_dir(), lambda: fetch_snapshot_sync(force=True))
+    except expiry_snapshots.SnapshotLimitError:
+        raise HTTPException(409, "Достигнут предел 128 снимков сроков. Сохраните нужные копии в надёжном месте и удалите ненужные вручную через сервер.") from None
+    except Exception:
+        raise HTTPException(409, "Снимок не создан: 3x-ui недоступна или данные изменились. Проверьте подключение и повторите.") from None
+    return RedirectResponse('/users/expiry-snapshots', status_code=303)
+
+
 @app.get("/users", response_class=HTMLResponse)
 def users_page(
     request: Request,
@@ -3117,6 +3172,7 @@ def users_page(
         count=1,
         flags=re.S,
     )
+    body = '<div class="actions"><a class="button secondary" href="/users/expiry-snapshots">Сверка сроков и снимки</a></div>' + body
     return page(request, "Пользователи", body, "users", scripts)
 
 
@@ -3404,6 +3460,52 @@ def bind_3xui_user(
     return RedirectResponse(public_path(f"/users/id/{new_tg_id}"), 303)
 
 
+def _hwid_profile_email(tg_id: int) -> str:
+    row = get_user(tg_id)
+    if not row:
+        raise HTTPException(404, "Пользователь не найден")
+    email, uuid = str(row.get("email") or "").strip(), str(row.get("uuid") or "").strip()
+    if not email or not uuid:
+        raise HTTPException(409, "Подписка 3x-ui ещё не привязана к профилю")
+    try:
+        return resolve_hwid_client_email_sync(email, uuid)
+    except Exception:
+        LOGGER.warning("HWID: не удалось проверить привязку профиля в 3x-ui")
+        raise HTTPException(502, "Не удалось проверить привязку 3x-ui. Попробуйте позже.")
+
+
+@app.get("/api/users/{tg_id}/hwids", response_class=JSONResponse)
+def user_hwids_api(request: Request, tg_id: int):
+    require_auth(request)
+    email = _hwid_profile_email(tg_id)
+    try:
+        devices = list_client_hwids_sync(email)
+    except Exception:
+        LOGGER.warning("HWID: не удалось загрузить устройства из 3x-ui")
+        raise HTTPException(502, "Не удалось загрузить устройства. Попробуйте позже.")
+    return JSONResponse({"ok": True, "devices": devices}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/users/{tg_id}/hwids/{device_id}/remove", response_class=JSONResponse)
+def user_hwid_remove_api(request: Request, tg_id: int, device_id: int):
+    require_auth(request)
+    if device_id <= 0:
+        raise HTTPException(400, "Некорректное устройство")
+    email = _hwid_profile_email(tg_id)
+    try:
+        devices = list_client_hwids_sync(email)
+        if not any(int(item.get("id") or 0) == device_id for item in devices):
+            raise HTTPException(404, "Устройство не найдено в этом профиле")
+        remove_client_hwid_sync(email, device_id)
+    except HTTPException:
+        raise
+    except Exception:
+        LOGGER.warning("HWID: не удалось удалить запись устройства из 3x-ui")
+        raise HTTPException(502, "Не удалось удалить запись. Попробуйте позже.")
+    audit(str(request.session.get("user", "web")), "hwid_device_removed", f"profile={tg_id}")
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/users/id/{tg_id}", response_class=HTMLResponse)
 def user_detail_page(request: Request, tg_id: int):
     require_auth(request)
@@ -3526,15 +3628,29 @@ def user_detail_page(request: Request, tg_id: int):
         tg_id, row.get("username"), row.get("display_name"), xui_comment or row.get("notes")
     )
     display_label_html = _panel_user_link(tg_id, display_label, username=row.get("username"))
+    hwid_url = public_path(f"/api/users/{int(tg_id)}/hwids")
+    expiry_caption = fmt_date(int(row.get('expiry_time') or 0)) if billing.has_subscription(row) and profile_status != 'Не зарегистрирован' else 'Нет подписки'
     body = f'''<header><div><h1>{display_label_html}</h1><div class="subtitle">Карточка, Telegram-привязка, переписка и журнал действий</div></div><a class="button secondary" href="/users">Назад</a></header>
-{billing_html}
-<div class="chat-layout"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
+<div class="profile-overview"><div class="profile-overview-subscription"><section class="card profile-subscription-card"><div class="section-title"><h2>Подписка</h2><span class="badge">{html.escape(profile_status)}</span></div><p class="profile-expiry">{html.escape(expiry_caption)}</p><form method="post" action="/users/{int(tg_id)}/days" class="profile-days-form"><input type="hidden" name="csrf_token" value="{html.escape(session_csrf_token(request), quote=True)}"><input type="hidden" name="return_to" value="detail"><label for="profile-days">Изменить срок в днях</label><div class="actions"><input id="profile-days" name="days" type="number" min="-3650" max="3650" step="1" value="30" required><button type="submit">Изменить срок</button></div><small class="muted">Отрицательное значение сокращает срок подписки.</small></form></section>{billing_html}</div>
+<section class="card profile-hwids" aria-labelledby="profile-hwids-title"><div class="section-title"><h2 id="profile-hwids-title">Устройства</h2><span id="profile-hwids-count" class="badge"></span></div><p class="muted">Зарегистрированные устройства по данным 3x-ui. Приложения не всегда передают модель устройства.</p><div id="profile-hwids-list" aria-live="polite">Загрузка…</div><p class="muted">Удаляется запись 3x-ui; устройство может появиться снова. Это не гарантирует отключение VPN.</p></section></div>
+<div class="chat-layout"><div class="profile-left-column"><div class="card"><div class="section-title"><h2>Чат с пользователем</h2><span class="badge {'warn' if disabled else 'good'}">{'Нет TG ID' if disabled else 'Telegram подключён'}</span></div>
 {('<div class="notice">Сначала восстановите или укажите положительный Telegram ID. Ник сам по себе не позволяет боту написать пользователю.</div>' if disabled else '')}
 <div id="chat-window" class="chat-window">{event_html or '<div class="empty-state">История пока пуста. Новые сообщения и действия появятся здесь.</div>'}</div>
-<form id="chat-form" class="chat-compose" method="post" action="/users/{tg_id}/message" enctype="multipart/form-data"><div class="chat-compose-main"><textarea name="message" maxlength="4096" {'disabled' if disabled else ''} placeholder="Сообщение или подпись к фото/видео"></textarea><label class="chat-attachment"><span>＋ Фото или видео</span><input name="media" type="file" accept="image/*,video/*" {'disabled' if disabled else ''}><small>До {media_limit} МБ; для медиа подпись — до 1024 символов.</small></label></div><button {'disabled' if disabled else ''}>Отправить</button></form></div>
+<form id="chat-form" class="chat-compose" method="post" action="/users/{tg_id}/message" enctype="multipart/form-data"><div class="chat-compose-main"><textarea name="message" maxlength="4096" {'disabled' if disabled else ''} placeholder="Сообщение или подпись к фото/видео"></textarea><label class="chat-attachment"><span>＋ Фото или видео</span><input name="media" type="file" accept="image/*,video/*" {'disabled' if disabled else ''}><small>До {media_limit} МБ; для медиа подпись — до 1024 символов.</small></label></div><button {'disabled' if disabled else ''}>Отправить</button></form></div>{referral_html}</div>
 <div class="card"><h2>Идентификация</h2><div class="setting"><label>Проверка Telegram по нику</label><div class="actions"><button type="button" class="secondary" id="telegram-lookup-button">🔎 Найти Telegram ID по @username</button>{('<button type="button" class="secondary" id="telegram-link-button">🔗 Запросить привязку через Telegram</button>' if tg_id <= 0 else '')}</div><div id="telegram-lookup-result" class="muted" style="margin-top:10px;white-space:pre-wrap"></div><div id="telegram-link-result" class="notice" style="display:none;margin-top:10px;word-break:break-all"></div></div><form method="post" action="/users/id/{tg_id}/identity"><div class="setting"><label>Telegram ID</label><input name="new_tg_id" type="number" min="1" value="{tg_id if tg_id > 0 else ''}" required></div><div class="setting"><label>Telegram @username</label><input name="username" value="{html.escape(str(row.get('username') or ''))}" maxlength="100"></div><label class="check-row"><input type="checkbox" name="overwrite_positive" value="1"> Подтверждаю замену существующего положительного ID</label><button>Сохранить и синхронизировать 3x-ui</button></form>
-<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">{xui_extra_html}<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Комментарий пользователя</h2><span class="badge">Синхронизируется с 3x-ui</span></div><p class="muted">Введите имя или произвольный комментарий. Telegram ID, @username и привязка остаются отдельными и не изменяются.</p><form method="post" action="/users/id/{tg_id}/comment"><div class="setting"><label>Комментарий</label><input name="comment" value="{html.escape(xui_comment, quote=True)}" maxlength="255" placeholder="Например: Иван, клиент с Авито" autocomplete="off"></div><button>Сохранить комментарий</button></form></div><div class="setting"><label>Email 3x-ui</label><div class="code">{html.escape(str(row.get('email') or '—'))}</div></div><div class="setting"><label>UUID</label><div class="code">{html.escape(str(row.get('uuid') or '—'))}</div></div><div class="setting"><label>Источник привязки</label><div>{html.escape(identity_source)}</div></div><div class="setting"><label>Ключ регистрации</label><div class="code">{html.escape(str(row.get('referred_by_code') or '—'))}</div></div><div class="setting"><label>Зарегистрирован по приглашению</label><div>{_panel_user_link(row.get("referred_by_tg_id"), _panel_user_label(int(row.get("referred_by_tg_id") or 0), row.get("referred_by_username"), comment=row.get("referred_by_notes"))) if row.get("referred_by_tg_id") else "Нет данных"}</div></div><div class="setting"><label>Собственный ключ приглашения</label><div class="code">{html.escape(str(row.get('referral_code') or '—'))}</div></div><div class="setting"><label>Дата регистрации</label><div>{html.escape(str(row.get('registered_at') or '—'))}</div></div><div class="setting"><label>Последнее обновление</label><div>{html.escape(str(row.get('identity_updated_at') or '—'))}</div></div>{referral_html}<div class="card" style="margin-top:14px"><div class="section-title"><h2>Назначить существующий клиент 3x-ui</h2><span class="badge warn">Администратор</span></div><p class="muted">Выберите локального пользователя FargoVPN и существующий клиент 3x-ui. Новый client не создаётся: UUID, subId, срок и текущая подписка выбранного client сохраняются. Если у обоих пользователей уже есть самостоятельные профили, назначение останавливается для проверки администратора; автоматического объединения нет.</p><div class="two"><div class="setting"><label>Пользователь FargoVPN</label><select id="bind-target-user">{bind_user_options or f'<option value="{tg_id}">{html.escape(str(row.get("username") or "Без имени"))} · TG {tg_id}</option>'}</select></div><div class="setting"><label>Поиск клиента 3x-ui</label><input id="bind-xui-search" type="search" placeholder="Email, UUID, имя или TG ID" inputmode="search" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-autocomplete="none" enterkeyhint="search" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"></div></div><div class="actions"><button type="button" class="secondary" id="bind-xui-search-button">Найти клиентов</button></div><div id="bind-xui-result" class="xui-bind-results muted" style="margin-top:10px">Нажмите «Найти клиентов», чтобы получить актуальный список из 3x-ui.</div><form id="bind-xui-form" method="post" action="{html.escape(xui_bind_url, quote=True)}" style="display:none;margin-top:12px"><input type="hidden" name="email" id="bind-xui-email"><input type="hidden" name="new_tg_id" id="bind-xui-target"><input type="hidden" name="username" id="bind-xui-username" value="{html.escape(str(row.get('username') or ''), quote=True)}"><input type="hidden" name="confirm" value="1"><div class="notice" id="bind-xui-confirm-text"></div><button type="submit">Подтвердить назначение подписки</button></form></div></div></div>'''
+<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">{xui_extra_html}<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div class="card" style="margin-bottom:14px"><div class="section-title"><h2>Комментарий пользователя</h2><span class="badge">Синхронизируется с 3x-ui</span></div><p class="muted">Введите имя или произвольный комментарий. Telegram ID, @username и привязка остаются отдельными и не изменяются.</p><form method="post" action="/users/id/{tg_id}/comment"><div class="setting"><label>Комментарий</label><input name="comment" value="{html.escape(xui_comment, quote=True)}" maxlength="255" placeholder="Например: Иван, клиент с Авито" autocomplete="off"></div><button>Сохранить комментарий</button></form></div><div class="setting"><label>Email 3x-ui</label><div class="code">{html.escape(str(row.get('email') or '—'))}</div></div><div class="setting"><label>UUID</label><div class="code">{html.escape(str(row.get('uuid') or '—'))}</div></div><div class="setting"><label>Источник привязки</label><div>{html.escape(identity_source)}</div></div><div class="setting"><label>Ключ регистрации</label><div class="code">{html.escape(str(row.get('referred_by_code') or '—'))}</div></div><div class="setting"><label>Зарегистрирован по приглашению</label><div>{_panel_user_link(row.get("referred_by_tg_id"), _panel_user_label(int(row.get("referred_by_tg_id") or 0), row.get("referred_by_username"), comment=row.get("referred_by_notes"))) if row.get("referred_by_tg_id") else "Нет данных"}</div></div><div class="setting"><label>Собственный ключ приглашения</label><div class="code">{html.escape(str(row.get('referral_code') or '—'))}</div></div><div class="setting"><label>Дата регистрации</label><div>{html.escape(str(row.get('registered_at') or '—'))}</div></div><div class="setting"><label>Последнее обновление</label><div>{html.escape(str(row.get('identity_updated_at') or '—'))}</div></div><div class="card" style="margin-top:14px"><div class="section-title"><h2>Назначить существующий клиент 3x-ui</h2><span class="badge warn">Администратор</span></div><p class="muted">Выберите локального пользователя FargoVPN и существующий клиент 3x-ui. Новый client не создаётся: UUID, subId, срок и текущая подписка выбранного client сохраняются. Если у обоих пользователей уже есть самостоятельные профили, назначение останавливается для проверки администратора; автоматического объединения нет.</p><div class="two"><div class="setting"><label>Пользователь FargoVPN</label><select id="bind-target-user">{bind_user_options or f'<option value="{tg_id}">{html.escape(str(row.get("username") or "Без имени"))} · TG {tg_id}</option>'}</select></div><div class="setting"><label>Поиск клиента 3x-ui</label><input id="bind-xui-search" type="search" placeholder="Email, UUID, имя или TG ID" inputmode="search" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-autocomplete="none" enterkeyhint="search" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"></div></div><div class="actions"><button type="button" class="secondary" id="bind-xui-search-button">Найти клиентов</button></div><div id="bind-xui-result" class="xui-bind-results muted" style="margin-top:10px">Нажмите «Найти клиентов», чтобы получить актуальный список из 3x-ui.</div><form id="bind-xui-form" method="post" action="{html.escape(xui_bind_url, quote=True)}" style="display:none;margin-top:12px"><input type="hidden" name="email" id="bind-xui-email"><input type="hidden" name="new_tg_id" id="bind-xui-target"><input type="hidden" name="username" id="bind-xui-username" value="{html.escape(str(row.get('username') or ''), quote=True)}"><input type="hidden" name="confirm" value="1"><div class="notice" id="bind-xui-confirm-text"></div><button type="submit">Подтвердить назначение подписки</button></form></div></div></div>'''
     script = f'''<script>
+(function(){{
+const base={json.dumps(hwid_url)}, list=document.getElementById('profile-hwids-list'), count=document.getElementById('profile-hwids-count');
+const token=document.querySelector('meta[name="fargovpn-csrf-token"]')?.content||'';
+async function load(){{
+  try{{const response=await fetch(base,{{credentials:'same-origin',cache:'no-store'}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.detail||'Устройства недоступны');
+  list.replaceChildren();count.textContent=String(data.devices.length);if(!data.devices.length){{list.textContent='Зарегистрированных устройств пока нет.';return;}}
+  for(const device of data.devices){{const row=document.createElement('div');row.className='profile-hwid-row';const details=document.createElement('div');const title=document.createElement('strong');title.textContent=[device.deviceModel,device.deviceOs].filter(Boolean).join(' · ')||'Неизвестное устройство';const meta=document.createElement('div');meta.className='muted';let last='';if(Number(device.lastSeen)>0){{const d=new Date(Number(device.lastSeen));if(!Number.isNaN(d.valueOf()))last=d.toLocaleString('ru-RU');}}meta.textContent=[device.userAgent,last?'Обнаружено: '+last:''].filter(Boolean).join(' · ');details.append(title,meta);const button=document.createElement('button');button.type='button';button.className='secondary small';button.textContent='Удалить запись';button.addEventListener('click',async()=>{{if(!window.confirm('Удалить запись этого устройства? Устройство может появиться снова; VPN не обязательно отключится.'))return;button.disabled=true;try{{const result=await fetch(base+'/'+encodeURIComponent(String(device.id))+'/remove',{{method:'POST',credentials:'same-origin',headers:{{'X-CSRF-Token':token}}}});const resultData=await result.json();if(!result.ok||!resultData.ok)throw new Error(resultData.detail||'Не удалось удалить запись');await load();}}catch(e){{window.alert(e.message||'Ошибка удаления');button.disabled=false;}}}});row.append(details,button);list.appendChild(row);}}
+  }}catch(e){{count.textContent='';list.textContent=e.message||'Устройства временно недоступны';}}
+}}
+load();
+}})();
 (function(){{
 const b=document.getElementById('telegram-lookup-button'),r=document.getElementById('telegram-lookup-result');
 const initialChatScroll=()=>{{const chat=document.getElementById('chat-window');if(chat)chat.scrollTop=chat.scrollHeight;}};
@@ -4507,8 +4623,8 @@ def create_user(request: Request, tg_id: str = Form(""), username: str = Form(),
 
 
 @app.post("/users/{tg_id}/days")
-def adjust_days(request: Request, tg_id: int, days: int = Form()):
-    require_auth(request)
+def adjust_days(request: Request, tg_id: int, days: int = Form(), return_to: str = Form(""), csrf_token: str = Form("")):
+    require_auth(request, csrf_token)
     if days == 0 or not -3650 <= days <= 3650:
         raise HTTPException(400, "Укажите число дней от -3650 до 3650, кроме нуля")
     row = get_user(tg_id)
@@ -4550,7 +4666,7 @@ def adjust_days(request: Request, tg_id: int, days: int = Form()):
     verb = "Добавлено" if days > 0 else "Убавлено"
     warning_text = local_warning + sync_warning
     set_flash(request, f"{verb} {abs(days)} дн. Новый срок: {fmt_date(int(result.get('expiry_time') or 0))}" + warning_text, "warn" if warning_text else "good")
-    return RedirectResponse(public_path("/users"), 303)
+    return RedirectResponse(public_path(f"/users/id/{tg_id}" if return_to == "detail" else "/users"), 303)
 
 
 @app.get("/users/{tg_id}/bind-telegram", response_class=HTMLResponse)

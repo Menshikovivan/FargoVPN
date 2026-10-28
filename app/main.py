@@ -38,6 +38,7 @@ import config as config
 import whitelist_help
 from update_manager import current_version
 import cabinet_service
+import bot_devices
 import referral_codes
 import referral_rewards
 import rate_limit
@@ -951,6 +952,8 @@ def get_user_menu(user_id: int, user: dict | None = None):
     builder.button(text="📋 Моя подписка", callback_data="menu:stats")
     if active:
         builder.button(text="🔄 Продлить VPN", callback_data="menu:buy")
+    if user and has_subscription(user):
+        builder.button(text="📱 Устройства", callback_data="menu:devices")
     builder.button(text="📘 Как подключить", callback_data="menu:faq")
     builder.button(text="🛜 Белые списки", callback_data="menu:whitelist")
     builder.button(text="🆘 Поддержка", callback_data="menu:support")
@@ -1014,7 +1017,8 @@ async def get_user_menu_async(
         profile_id = await asyncio.to_thread(billing.payment_profile_id, int(user_id), config.DB_PATH)
         user = await asyncio.to_thread(db_get_user, profile_id)
     elif user is None:
-        user = await asyncio.to_thread(db_get_user, int(user_id))
+        profile_id = await asyncio.to_thread(billing.payment_profile_id, int(user_id), config.DB_PATH)
+        user = await asyncio.to_thread(db_get_user, profile_id)
     return await asyncio.to_thread(get_user_menu, int(user_id), user)
 
 def get_messages_panel_url() -> str:
@@ -1283,6 +1287,7 @@ async def send_user_stats(
     builder.button(text="🍎 iPhone / iPad", callback_data="connect:ios")
     builder.button(text="🤖 Android", callback_data="connect:android")
     builder.button(text="🔄 Продлить", callback_data="menu:buy")
+    builder.button(text="📱 Устройства", callback_data="menu:devices")
     personal_cabinet_url = await asyncio.to_thread(get_personal_cabinet_url, user_id, u)
     if personal_cabinet_url:
         builder.button(text="👤 Кабинет на сайте", url=personal_cabinet_url)
@@ -1714,6 +1719,10 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
         await safe_callback_answer(call, "Недостаточно прав", show_alert=True)
         return
     await safe_callback_answer(call)
+    if action == "devices":
+        await state.clear()
+        await send_device_list(call.message, user_id)
+        return
     if action == "invite":
         user = await asyncio.to_thread(db_get_user, int(call.from_user.id))
         if not user:
@@ -1791,6 +1800,58 @@ async def dynamic_user_menu(call: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_admin_menu(),
         )
+
+
+async def send_device_list(message: Message, actor_id: int, page: int = 1) -> None:
+    if not message or not message.chat or message.chat.type != 'private' or int(message.chat.id) != int(actor_id):
+        return
+    try:
+        owner, devices = await asyncio.to_thread(bot_devices.list_for_actor, actor_id, config.DB_PATH, db_get_user)
+        text, markup = bot_devices.render_list(actor_id, owner, devices, page)
+        await message.answer(text, parse_mode='HTML', reply_markup=markup)
+    except PermissionError:
+        await message.answer('Устройства доступны пользователям с оформленной подпиской.')
+    except Exception as error:
+        logger.warning('Не удалось получить список устройств (%s)', type(error).__name__)
+        await message.answer('Не удалось загрузить устройства. Попробуйте позже.')
+
+
+@dp.callback_query(F.data.startswith('device:'))
+async def device_callbacks(call: CallbackQuery):
+    if not call.message or not call.from_user or not call.message.chat or call.message.chat.type != 'private' or int(call.message.chat.id) != int(call.from_user.id):
+        await safe_callback_answer(call, 'Откройте устройства в личном чате', show_alert=True)
+        return
+    actor = int(call.from_user.id)
+    parts = str(call.data or '').split(':')
+    if len(parts) != 3 or parts[1] not in {'page', 'ask', 'delete'} or not parts[2].isdigit():
+        await safe_callback_answer(call, 'Некорректное действие', show_alert=True)
+        return
+    value = int(parts[2])
+    if value < 1 or value > 2_147_483_647:
+        await safe_callback_answer(call, 'Некорректное действие', show_alert=True)
+        return
+    await safe_callback_answer(call)
+    try:
+        if parts[1] == 'page':
+            await send_device_list(call.message, actor, value)
+            return
+        if parts[1] == 'ask':
+            owner, devices = await asyncio.to_thread(bot_devices.list_for_actor, actor, config.DB_PATH, db_get_user)
+            if owner != actor:
+                raise PermissionError('Только владелец может удалять устройства')
+            matches = [item for item in devices if int(item.get('id') or 0) == value]
+            if len(matches) != 1:
+                raise ValueError('Устройство не найдено')
+            await call.message.answer(bot_devices.render_confirmation(matches[0]), parse_mode='HTML', reply_markup=bot_devices.confirmation_keyboard(value))
+            return
+        await asyncio.to_thread(bot_devices.delete_for_actor, actor, value, config.DB_PATH, db_get_user)
+        await call.message.answer('Запись устройства удалена. Оно может появиться снова при обновлении подписки.')
+        await send_device_list(call.message, actor)
+    except PermissionError:
+        await call.message.answer('Удалять записи устройств может только владелец профиля.')
+    except Exception as error:
+        logger.warning('Не удалось выполнить действие с устройством (%s)', type(error).__name__)
+        await call.message.answer('Не удалось выполнить действие. Обновите список устройств и попробуйте снова.')
 
 
 @dp.callback_query(F.data.startswith("whitelist:"))
@@ -2337,9 +2398,9 @@ async def process_support_msg(msg: Message, state: FSMContext):
     await state.clear()
 
 
-async def send_crm_list(message: Message, page_no: int = 1) -> None:
+async def send_crm_list(message: Message, page_no: int = 1, edit: bool = False) -> None:
     page_no = max(1, int(page_no))
-    page_size = 50
+    page_size = 10
     def _load_crm_users():
         with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
             return connection.execute(
@@ -2382,12 +2443,15 @@ async def send_crm_list(message: Message, page_no: int = 1) -> None:
     if has_next:
         builder.button(text="Следующая страница →", callback_data=f"crm_page:{page_no + 1}")
     builder.button(text="← Админ-меню", callback_data="menu:admin")
-    builder.adjust(2)
-    await message.answer(
-        f"<b>👥 Пользователи · страница {page_no}</b>\n\nПоказано записей: {len(rows)}. Выберите пользователя:",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML",
-    )
+    builder.adjust(1)
+    text = f"<b>👥 Пользователи · страница {page_no}</b>\n\nПоказано: {len(rows)}. Нажмите на пользователя, чтобы открыть карточку."
+    if edit and hasattr(message, 'edit_text'):
+        try:
+            await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='HTML')
+            return
+        except TelegramBadRequest:
+            pass
+    await message.answer(text, reply_markup=builder.as_markup(), parse_mode='HTML')
 
 
 async def run_admin_sync(message: Message) -> None:
@@ -2442,7 +2506,7 @@ def admin_summary_text() -> str:
 SUBSCRIPTION_REPORT_PAGE_SIZE = 8
 
 
-def subscription_report_text(page_no: int = 1) -> str:
+def subscription_report_text(page_no: int = 1, filter_key: str = 'all') -> str:
     """Render a safe, readable page of the current subscriber list."""
     with database_adapter.connect(config.DB_PATH, timeout=20) as connection:
         users = connection.execute(
@@ -2531,15 +2595,21 @@ def subscription_report_text(page_no: int = 1) -> str:
         return (0 if days_left <= 7 else 1, expiry, tg_id)
 
     users.sort(key=report_group)
+    counts = [0, 0, 0, 0, 0]
+    for user in users:
+        counts[report_group(user)[0]] += 1
+    filter_names = {'all':'Все', 'soon':'Скоро истекают', 'active':'Активные', 'expired':'Истекшие', 'disabled':'Отключены', 'unpaid':'Без подписки'}
+    filter_groups = {'soon':{0}, 'active':{0, 1}, 'expired':{2}, 'disabled':{3}, 'unpaid':{4}}
+    filter_key = filter_key if filter_key in filter_names else 'all'
+    if filter_key != 'all':
+        users = [user for user in users if report_group(user)[0] in filter_groups[filter_key]]
     page_size = SUBSCRIPTION_REPORT_PAGE_SIZE
     total_pages = max(1, (len(users) + page_size - 1) // page_size)
     page_no = max(1, min(int(page_no or 1), total_pages))
     selected = users[(page_no - 1) * page_size:page_no * page_size]
-    counts = [0, 0, 0, 0, 0]
-    for user in users:
-        counts[report_group(user)[0]] += 1
     lines = [
         f"📋 <b>Подписки</b> · Страница {page_no}/{total_pages} · всего: {len(users)}",
+        f"Фильтр: <b>{filter_names[filter_key]}</b>",
         f"🟡 Скоро: {counts[0]} · 🟢 Активные/бессрочные: {counts[1]} · 🔴 Истекшие: {counts[2]}",
         f"⚫ Отключены: {counts[3]} · ⚪ Без подписки: {counts[4]}",
         "",
@@ -2611,18 +2681,23 @@ def subscription_report_text(page_no: int = 1) -> str:
     return "\n".join(lines).rstrip()
 
 
-def subscription_report_keyboard(page_no: int, total_pages: int):
+def subscription_report_keyboard(page_no: int, total_pages: int, filter_key: str = 'all'):
     """Create compact page navigation without adding buttons to a single-page list."""
-    if total_pages <= 1:
-        return get_admin_menu()
     builder = InlineKeyboardBuilder()
+    for label, key in [('Все','all'),('Скоро','soon'),('Активные','active'),('Истекли','expired'),('Отключены','disabled'),('Без подписки','unpaid')]:
+        builder.button(text=('✓ ' if filter_key == key else '') + label, callback_data=f'admin:subscriptions:filter:{key}:1')
+    nav_count = 0
     if page_no > 1:
-        builder.button(text="← Предыдущая страница", callback_data=f"admin:subscriptions:page:{page_no - 1}")
-    builder.button(text=f"Страница {page_no}/{total_pages}", callback_data="admin:subscriptions:page:current")
+        builder.button(text="◀", callback_data=f"admin:subscriptions:filter:{filter_key}:{page_no - 1}")
+        nav_count += 1
+    if total_pages > 1:
+        builder.button(text=f"{page_no}/{total_pages}", callback_data=f"admin:subscriptions:filter:{filter_key}:{page_no}")
+        nav_count += 1
     if page_no < total_pages:
-        builder.button(text="Вперёд ➡", callback_data=f"admin:subscriptions:page:{page_no + 1}")
+        builder.button(text="▶", callback_data=f"admin:subscriptions:filter:{filter_key}:{page_no + 1}")
+        nav_count += 1
     builder.button(text="← Админ-меню", callback_data="menu:admin")
-    builder.adjust(3, 1)
+    builder.adjust(*([3, 3] + ([nav_count] if nav_count else []) + [1]))
     return builder.as_markup()
 
 def split_subscription_report(text: str, max_length: int = 3900) -> list[str]:
@@ -2666,17 +2741,21 @@ def split_subscription_report(text: str, max_length: int = 3900) -> list[str]:
     return chunks or [text]
 
 
-async def send_subscription_report(message: Message, page_no: int = 1, edit: bool = False) -> None:
+async def send_subscription_report(message: Message, page_no: int = 1, edit: bool = False, filter_key: str = 'all') -> None:
     # Keep the synchronous PostgreSQL query off the Telegram event loop.
-    text = await asyncio.to_thread(subscription_report_text, page_no)
+    text = await asyncio.to_thread(subscription_report_text, page_no, filter_key)
     match = re.search(r"Страница\s+(\d+)/(\d+)", text)
     current_page, total_pages = (int(match.group(1)), int(match.group(2))) if match else (1, 1)
     chunks = split_subscription_report(text, max_length=3900)
     for index, chunk in enumerate(chunks):
         last = index == len(chunks) - 1
-        keyboard = subscription_report_keyboard(current_page, total_pages) if last else None
+        keyboard = subscription_report_keyboard(current_page, total_pages, filter_key) if last else None
         if edit and len(chunks) == 1 and hasattr(message, "edit_text"):
-            await message.edit_text(chunk, parse_mode="HTML", reply_markup=keyboard)
+            try:
+                await message.edit_text(chunk, parse_mode="HTML", reply_markup=keyboard)
+            except TelegramBadRequest as error:
+                if 'message is not modified' not in str(error).lower():
+                    raise
         else:
             await message.answer(
                 chunk,
@@ -2709,6 +2788,12 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
         return
     action = str(call.data or "").split(":", 1)[-1]
     subscription_page = None
+    subscription_filter = 'all'
+    filter_match = re.fullmatch(r'subscriptions:filter:(all|soon|active|expired|disabled|unpaid):([1-9][0-9]{0,4})', action)
+    if filter_match:
+        subscription_filter = filter_match.group(1)
+        subscription_page = int(filter_match.group(2))
+        action = 'subscriptions:page'
     page_match = re.fullmatch(r"subscriptions:page:(current|[1-9][0-9]{0,4})", action)
     if page_match:
         if page_match.group(1) == "current":
@@ -2733,7 +2818,7 @@ async def dynamic_admin_menu(call: CallbackQuery, state: FSMContext):
             if subscription_page is None:
                 await send_subscription_report(call.message)
             else:
-                await send_subscription_report(call.message, subscription_page, edit=True)
+                await send_subscription_report(call.message, subscription_page, edit=True, filter_key=subscription_filter)
         except Exception:
             logger.exception("Не удалось отправить отчёт подписок из Telegram-админки")
             try:
@@ -2975,7 +3060,7 @@ async def crm_page_callback(call: CallbackQuery):
         await safe_callback_answer(call, "Некорректная страница", show_alert=True)
         return
     await safe_callback_answer(call)
-    await send_crm_list(call.message, page_no)
+    await send_crm_list(call.message, page_no, edit=True)
 
 
 @dp.callback_query(F.data.startswith("crmv_"))

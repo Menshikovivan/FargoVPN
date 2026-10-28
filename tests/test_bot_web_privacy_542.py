@@ -143,7 +143,7 @@ def test_group_callback_is_blocked_before_registration_or_admin_bypass():
     assert handler.await_count==0
     assert env['_answer_callback'].await_count==1
 
-@pytest.mark.parametrize('page_no,first_id,shown,has_next',[(1,1,50,True),(3,101,21,False)])
+@pytest.mark.parametrize('page_no,first_id,shown,has_next',[(1,1,10,True),(11,101,10,True),(13,121,1,False)])
 def test_crm_pagination_reaches_records_beyond_old_hundred_row_limit(page_no,first_id,shown,has_next):
     buttons=[];queries=[]
     records=[(i,f'user_{i}','',1,0,'uuid','email','sub','active','') for i in range(1,122)]
@@ -162,7 +162,7 @@ def test_crm_pagination_reaches_records_beyond_old_hundred_row_limit(page_no,fir
     load('main.py',{'send_crm_list'},env);immediate(env['send_crm_list'](msg,page_no))
     profiles=[b for b in buttons if b['callback_data'].startswith('crmv_')]
     assert len(profiles)==shown and profiles[0]['callback_data']==f'crmv_{first_id}'
-    assert queries==[(51,(page_no-1)*50)]
+    assert queries==[(11,(page_no-1)*10)]
     assert any(b['callback_data']==f'crm_page:{page_no+1}' for b in buttons)==has_next
 
 def test_bot_operational_delete_refuses_family_before_revoke():

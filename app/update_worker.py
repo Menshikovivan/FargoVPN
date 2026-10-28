@@ -14,6 +14,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import update_manager
+from expiry_snapshots import SnapshotLimitError
+
+
+def _snapshot_before_upgrade() -> dict:
+    """Capture current 3x-ui dates before any installer writes.
+
+    A remote API snapshot can never guarantee that 3x-ui is not modified by
+    external tools after capture. Refuse unsafe/unstable captures; allow an
+    empty 3x-ui list only when no local client identity exists.
+    """
+    import config
+    import db
+    import expiry_snapshots
+    from services.xui_api import fetch_snapshot_sync
+    conn = db.connect(config.DB_PATH, timeout=20)
+    try:
+        row = conn.execute("SELECT count(*) FROM users WHERE COALESCE(email,'')<>'' OR COALESCE(uuid,'')<>''").fetchone()
+        local_count = int(row[0])
+    finally:
+        conn.close()
+    directory = Path(str(getattr(config, 'BACKUP_DIR', '/var/backups/vpn-service'))) / 'expiry-snapshots'
+    return expiry_snapshots.create_snapshot(directory, lambda: fetch_snapshot_sync(force=True), pre_update=True, allow_empty=local_count==0)
 
 
 def _status(job_id: str, state: str, progress: int, phase: str, message: str, **extra: object) -> None:
@@ -52,7 +74,10 @@ def run(job_id: str, startup_delay: float = 0.0) -> int:
             manifest = update_manager.read_job_manifest(job_id)
             info = manifest.get("update") if isinstance(manifest.get("update"), dict) else {}
             if info:
-                info = dict(info)
+                # Recheck GitHub in the detached worker: the web panel may
+                # have held stale metadata, or an older publisher-local file.
+                # Explicitly uploaded archives remain pinned to user intent.
+                info = update_manager.resolve_automatic_latest_update(dict(info))
                 version = str(info.get("version") or "")
                 installed = update_manager.current_version()
                 allow_reinstall = bool(info.get("allow_reinstall"))
@@ -90,6 +115,15 @@ def run(job_id: str, startup_delay: float = 0.0) -> int:
 
             package_root, archive_info = update_manager.stage_update(archive, progress=extract_progress)
             version = str(archive_info["version"])
+            _status(job_id, "checking", 49, "expiry_snapshot", "Сохраняется снимок сроков подписок перед обновлением", version=version)
+            try:
+                _snapshot_before_upgrade()
+            except SnapshotLimitError:
+                raise update_manager.UpdateError("Достигнут предел 128 снимков сроков. Сохраните нужные копии в надёжном месте и удалите ненужные вручную через сервер; обновление не началось.") from None
+            except Exception:
+                # Connection exceptions can contain DSNs or customer identifiers;
+                # do not print the original exception in the update log.
+                raise update_manager.UpdateError("Защитный снимок сроков не создан; обновление остановлено до установки. Проверьте доступность 3x-ui и состояние подписок.") from None
             command, environment = update_manager.installer_command(package_root)
             environment["VPN_UPDATE_JOB_ID"] = job_id
             _status(job_id, "installing", 50, "install", "Установщик запущен и выполняет подготовку", version=version)

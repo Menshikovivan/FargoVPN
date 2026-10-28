@@ -725,7 +725,7 @@ setup_existing_nginx_route() {
     echo "FargoVPN nginx guard not found: $TARGET/nginx_panel_guard.py" >&2
     return 1
   fi
-  if ! target_python "$TARGET/nginx_panel_guard.py" --once >>"$INSTALL_LOG" 2>&1; then
+  if ! target_python "$TARGET/nginx_panel_guard.py" --install-check >>"$INSTALL_LOG" 2>&1; then
     echo 'Внешний nginx: не удалось синхронизировать managed FargoVPN location.' >&2
     return 1
   fi

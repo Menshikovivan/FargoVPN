@@ -93,6 +93,16 @@ def test_subscription_pages_clamp_to_total_page():
     assert "Страница 2/2" in report(999)
     assert "user9" in report(999)
 
+def test_filters_narrow_report_but_active_includes_soon():
+    rows = [_row(111,'soon',expiry=NOW_MS+2*DAY_MS,has_sub=True),
+            _row(112,'active',expiry=NOW_MS+20*DAY_MS,has_sub=True),
+            _row(113,'expired',expiry=NOW_MS-DAY_MS,has_sub=True)]
+    report = _report(rows)
+    active = report(1, 'active')
+    assert '@soon' in active and '@active' in active and '@expired' not in active
+    expired = report(1, 'expired')
+    assert '@expired' in expired and '@soon' not in expired
+
 
 def test_long_operator_note_is_bounded_before_html_rendering():
     text = _report([_row(777, notes="<comment>" * 1000)])()

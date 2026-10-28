@@ -1496,6 +1496,32 @@ def invalidate_update_cache() -> None:
         _CHECK_CACHE["info"] = None
 
 
+def resolve_automatic_latest_update(info: dict[str, Any]) -> dict[str, Any]:
+    """Refresh automatic updates in the worker before selecting the archive.
+
+    Explicit manual uploads stay pinned. A publisher's already verified local
+    archive remains available when GitHub cannot be reached, but never shadows
+    a newer GitHub release that was successfully checked.
+    """
+    selected = dict(info or {})
+    source = str(selected.get('source') or '')
+    if source not in {'github', 'local'}:
+        return selected
+    remote = check_available_update(force=True)
+    if remote.get('error'):
+        if source == 'local':
+            return selected
+        raise UpdateError('Не удалось проверить последнюю версию GitHub: ' + str(remote['error']))
+    if source == 'local' and (
+        not remote.get('available')
+        or version_key(str(selected.get('version') or '')) >= version_key(str(remote.get('version') or ''))
+    ):
+        return selected
+    if not remote.get('available'):
+        raise UpdateError('Последняя опубликованная версия уже установлена')
+    return dict(remote)
+
+
 def github_main_sync_enabled() -> bool:
     return bool(getattr(config, "GITHUB_MAIN_SYNC_ENABLED", True))
 

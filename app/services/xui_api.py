@@ -691,6 +691,10 @@ def request_json_sync(
 ) -> dict[str, Any]:
     """Perform an authenticated 3x-ui request with bounded concurrency and safe retries."""
     method = method.upper()
+    # HWID URLs contain a client identifier; never put it in performance or
+    # fallback logs, even when 3x-ui is slow or reports an error.
+    hwid_path = 'panel/api/clients/hwids/' in path
+    log_path = 'panel/api/clients/hwids/[redacted]' if hwid_path else path
     configured_timeout = max(3.0, float(getattr(config, "XUI_REQUEST_TIMEOUT_SECONDS", 12.0)))
     timeout_value = max(3.0, min(float(timeout if timeout is not None else configured_timeout), 60.0))
     headers = _headers()
@@ -737,11 +741,11 @@ def request_json_sync(
                     if elapsed_ms >= 1000:
                         logger.warning(
                             "performance operation=xui_http method=%s path=%s duration_ms=%s status=%s attempt=%s",
-                            method, path, elapsed_ms, response.status_code, attempt,
+                            method, log_path, elapsed_ms, response.status_code, attempt,
                         )
                     last_response = response
                     if response.status_code == 404 and index < len(candidates) - 1:
-                        logger.warning("3x-ui returned 404 for %s; trying API fallback", url)
+                        logger.warning("3x-ui returned 404 for %s; trying API fallback", log_path if hwid_path else url)
                         break
                     if response.status_code in retry_statuses and attempt < retry_attempts:
                         retry_after = 0.0
@@ -752,7 +756,7 @@ def request_json_sync(
                         delay = max(0.25, min(retry_after, 3.0), 0.5 * (2 ** (attempt - 1)))
                         logger.warning(
                             "3x-ui transient status=%s method=%s path=%s retry_in=%.2fs attempt=%s/%s",
-                            response.status_code, method, path, delay, attempt, retry_attempts,
+                            response.status_code, method, log_path, delay, attempt, retry_attempts,
                         )
                         time.sleep(delay)
                         continue
@@ -762,7 +766,7 @@ def request_json_sync(
                         raise RuntimeError("3x-ui вернула некорректный JSON")
                     if not data.get("success"):
                         raise RuntimeError(str(data.get("msg") or "3x-ui отклонила запрос"))
-                    logger.debug("3x-ui API endpoint selected: %s %s", method, candidates[min(index, len(candidates)-1)])
+                    logger.debug("3x-ui API endpoint selected: %s %s", method, log_path if hwid_path else candidates[min(index, len(candidates)-1)])
                     return data
                 except httpx.HTTPStatusError as exc:
                     # Non-transient HTTP failures must not be retried; in particular,
@@ -777,7 +781,7 @@ def request_json_sync(
                         delay = 0.5 * (2 ** (attempt - 1))
                         logger.warning(
                             "3x-ui HTTP status error method=%s path=%s status=%s retry_in=%.2fs attempt=%s/%s",
-                            method, path, exc.response.status_code, delay, attempt, retry_attempts,
+                            method, log_path, exc.response.status_code, delay, attempt, retry_attempts,
                         )
                         time.sleep(delay)
                         continue
@@ -794,7 +798,7 @@ def request_json_sync(
                         delay = 0.5 * (2 ** (attempt - 1))
                         logger.warning(
                             "3x-ui transport error method=%s path=%s retry_in=%.2fs attempt=%s/%s: %s",
-                            method, path, delay, attempt, retry_attempts, exc,
+                            method, log_path, delay, attempt, retry_attempts, type(exc).__name__ if hwid_path else exc,
                         )
                         time.sleep(delay)
                         continue
@@ -1965,6 +1969,90 @@ def add_client_sync(client: dict[str, Any], inbound_ids: list[int] | None = None
         ) from verify_error
     invalidate_snapshot_cache()
     return result
+
+
+def resolve_hwid_client_email_sync(email: str, uuid: str) -> str:
+    """Resolve the exact 3x-ui spelling only after a unique identity match.
+
+    3x-ui's HWID endpoint is case-sensitive. Never accept an email from a
+    browser/callback as authority: callers must supply a trusted local row.
+    """
+    expected_email = str(email or '').strip()
+    expected_uuid = str(uuid or '').strip()
+    if not expected_uuid:
+        raise ValueError('У профиля нет подтверждённого идентификатора 3x-ui')
+    data = _client_list_sync()
+    records = data.get('obj')
+    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+        raise RuntimeError('Не удалось проверить список клиентов 3x-ui')
+    found = set()
+    for item in records:
+        nested = item.get('client') if isinstance(item.get('client'), dict) else {}
+        actual_uuid = _client_credential_id(item) or _client_credential_id(nested)
+        actual_email = str(item.get('email') or nested.get('email') or '').strip()
+        uuid_matches = actual_uuid.casefold() == expected_uuid.casefold()
+        email_matches = bool(expected_email and actual_email.casefold() == expected_email.casefold())
+        if uuid_matches or email_matches:
+            if not uuid_matches or not actual_email or (expected_email and not email_matches):
+                raise RuntimeError('Идентификация клиента неоднозначна; требуется сверка')
+            found.add(actual_email)
+    if len(found) != 1:
+        raise RuntimeError('Идентификация клиента неоднозначна; требуется сверка')
+    return next(iter(found))
+
+
+def list_client_hwids_sync(email: str) -> list[dict[str, Any]]:
+    """List subscription HWID records (not current VPN connections).
+
+    Some panels return null when a client has no subscription ID; successful
+    null is an empty list, while unsupported/failed requests remain errors.
+    """
+    clean_email = str(email or '').strip()
+    if not clean_email:
+        raise ValueError('Не удалось определить клиента 3x-ui')
+    try:
+        data = request_json_sync('POST', f"panel/api/clients/hwids/{quote(clean_email, safe='')}")
+    except Exception:
+        raise RuntimeError('Не удалось получить список устройств 3x-ui') from None
+    if not isinstance(data, dict) or not data.get('success') or 'obj' not in data:
+        raise RuntimeError('3x-ui вернула некорректный список устройств')
+    devices = data['obj']
+    if devices is None:
+        return []
+    if not isinstance(devices, list) or any(not isinstance(item, dict) for item in devices):
+        raise RuntimeError('3x-ui вернула некорректный список устройств')
+    seen: set[int] = set()
+    for item in devices:
+        raw_id = item.get('id')
+        text_id = str(raw_id).strip()
+        if isinstance(raw_id, bool) or not text_id.isascii() or not text_id.isdigit():
+            raise RuntimeError('3x-ui вернула некорректный список устройств')
+        value = int(text_id)
+        if value <= 0 or value > 2147483647 or value in seen:
+            raise RuntimeError('3x-ui вернула некорректный список устройств')
+        seen.add(value)
+    return [dict(item) for item in devices]
+
+
+def remove_client_hwid_sync(email: str, device_id: int) -> None:
+    """Remove one HWID registration scoped to this subscription, never all."""
+    clean_email = str(email or '').strip()
+    if not clean_email or isinstance(device_id, bool):
+        raise ValueError('Некорректное устройство')
+    text_id = str(device_id).strip()
+    if not text_id.isascii() or not text_id.isdigit() or not 0 < int(text_id) <= 2147483647:
+        raise ValueError('Некорректное устройство')
+    wanted = int(text_id)
+    # The remote DELETE is scoped by subscription, and this pre-check gives a
+    # clear failure before a stale/tampered callback can request another ID.
+    if not any(str(d.get('id', '')).strip() == str(wanted) for d in list_client_hwids_sync(clean_email)):
+        raise ValueError('Устройство не найдено; обновите список')
+    try:
+        data = request_json_sync('DELETE', f"panel/api/clients/hwids/{quote(clean_email, safe='')}/{wanted}")
+    except Exception:
+        raise RuntimeError('Не удалось удалить запись устройства в 3x-ui') from None
+    if not isinstance(data, dict) or not data.get('success'):
+        raise RuntimeError('Не удалось удалить запись устройства в 3x-ui')
 
 
 def get_client_record_sync(email: str) -> dict[str, Any]:

@@ -137,7 +137,8 @@ def public_domain_from_nginx_text(text: str, p: str | None = None) -> str:
 def _set_config_value(name: str, value) -> None:
     from config_store import config_write_lock
     with config_write_lock(CONFIG):
-        _set_config_value_locked(name, value)
+        if not str(cfg(name, "") or "").strip():
+            _set_config_value_locked(name, value)
 
 
 def _set_config_value_locked(name: str, value) -> None:
@@ -411,22 +412,56 @@ def _location_exists_in_nginx() -> bool:
     # Looking at source files after a stale dump can approve an inactive route.
     return _location_exists_in_text(dump, p, sock)
 
+def _unique_route_domain(dump: str, p: str, sock: str) -> str:
+    """Discover a first-install hostname only when the routed host is unambiguous."""
+    names = []
+    for _, _, server in _server_blocks(dump):
+        if _server_score(server) < 0 or not _location_exists_in_text(server, p, sock):
+            continue
+        names.append(_server_names(server))
+    if len(names) != 1 or len(names[0]) != 1:
+        return ""
+    domain = names[0][0]
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain) or ".." in domain:
+        return ""
+    return domain
+
+
 def _persist_public_identity() -> str:
+    """Fill unset identity fields; never replace an administrator's settings."""
+    from urllib.parse import urlsplit
     p = prefix()
     if not p:
         return ""
-    domain = public_domain_from_nginx_text(_nginx_dump(), p)
-    if not domain:
-        return public_url()
-    _set_config_value("WEB_DOMAIN", domain)
-    _set_config_value("WEB_TLS_SERVER_NAME", domain)
+    keys = ("WEB_DOMAIN", "WEB_TLS_SERVER_NAME", "BOT_PANEL_URL", "PUBLIC_PANEL_URL")
+    values = {key: str(cfg(key, "") or "").strip() for key in keys}
+    existing_url = values["PUBLIC_PANEL_URL"] or values["BOT_PANEL_URL"]
+    domains = []
+    for value in (values["WEB_DOMAIN"], values["WEB_TLS_SERVER_NAME"]):
+        if value:
+            normalized = urlsplit(value).hostname if "://" in value else value.split(":", 1)[0]
+            domains.append((normalized or "").lower())
+    for value in (values["BOT_PANEL_URL"], values["PUBLIC_PANEL_URL"]):
+        if value:
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                return ""
+            domains.append(parsed.hostname.lower())
+    if len(set(domains)) > 1 or (domains and not domains[0]):
+        return existing_url
+    sock = str(cfg("WEB_SOCKET_PATH", "/run/vpn-service/fargovpn.sock") or "/run/vpn-service/fargovpn.sock")
+    domain = domains[0] if domains else _unique_route_domain(_nginx_dump(), p, sock)
+    if not domain or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain) or ".." in domain:
+        return ""
     url = f"https://{domain}{p}/"
-    _set_config_value("BOT_PANEL_URL", url)
-    _set_config_value("PUBLIC_PANEL_URL", url)
-    return url
+    for key, value in (("WEB_DOMAIN", domain), ("WEB_TLS_SERVER_NAME", domain),
+                       ("BOT_PANEL_URL", url), ("PUBLIC_PANEL_URL", url)):
+        if not values[key] and not str(cfg(key, "") or "").strip():
+            _set_config_value(key, value)
+    return existing_url or url
 
 
-def ensure_once():
+def ensure_once(*, persist_identity=True, expected_target=None, expected_source=None):
     if not bool(cfg("WEB_REVERSE_PROXY", False)):
         print("FargoVPN nginx guard: WEB_REVERSE_PROXY выключен", file=sys.stderr)
         return False
@@ -450,62 +485,170 @@ def ensure_once():
         # A pre-existing correct route is fine even when its source file is not
         # one of the common include directories (for example generated config).
         ok = _location_exists_in_nginx()
-        if ok:
+        if ok and persist_identity:
             _persist_public_identity()
         return ok
-    text = target.read_text(encoding="utf-8", errors="replace")
-    new = _insert_into_named_https_server(text, block(p, socket_path))
+    if expected_target is not None and target != expected_target:
+        return False
+    text = target.read_text(encoding="utf-8", errors="strict" if expected_source is not None else "replace")
+    if expected_source is not None and target.read_bytes() != expected_source.encode('utf-8'):
+        return False
+    managed_block = block(p, socket_path)
+    new = _insert_into_named_https_server(text, managed_block)
     if new is None:
         print(f"FargoVPN nginx guard: HTTPS server в {target} не выбран для вставки", file=sys.stderr)
         ok = _location_exists_in_nginx()
-        if ok:
+        if ok and persist_identity:
             _persist_public_identity()
         return ok
+    if expected_source is not None and new != text:
+        # The install check may insert one block only; the legacy helper can
+        # also remove old locations, which requires an explicit operator.
+        inserted = managed_block + "\n"
+        if new.count(inserted) != 1 or new.replace(inserted, "", 1) != text:
+            print("FargoVPN nginx guard: требуется ручная проверка существующих маршрутов", file=sys.stderr)
+            return False
     if new == text and _location_exists_in_nginx():
         return True
     backup = target.with_name(target.name + ".fargovpn-backup")
     temp = target.with_name("." + target.name + ".fargovpn.tmp")
     mode = stat.S_IMODE(target.stat().st_mode)
-    temp.write_text(new, encoding="utf-8")
+    if expected_source is not None:
+        if backup.exists() or temp.exists():
+            print("FargoVPN nginx guard: найдена незавершённая копия; требуется проверка", file=sys.stderr)
+            return False
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+            output.write(new)
+            output.flush()
+            os.fsync(output.fileno())
+    else:
+        temp.write_text(new, encoding="utf-8")
     os.chmod(temp, mode)
     os.chown(temp, target.stat().st_uid, target.stat().st_gid)
     changed = False
+    reload_attempted = False
     try:
         # Install first, then validate the actual loaded configuration. If the
         # active configuration becomes invalid, restore the exact prior file.
-        os.replace(target, backup)
+        if expected_source is not None and target.read_bytes() != expected_source.encode('utf-8'):
+            return False
+        if expected_source is not None:
+            # Independent exclusive backup: a hardlink could be modified by
+            # an external process writing the current target in place.
+            original_stat = target.stat()
+            bfd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+            with os.fdopen(bfd, "wb") as saved:
+                saved.write(expected_source.encode("utf-8"))
+                saved.flush()
+                os.fsync(saved.fileno())
+            os.chmod(backup, mode)
+            os.chown(backup, original_stat.st_uid, original_stat.st_gid)
+            current_stat = target.stat()
+            if (current_stat.st_ino, current_stat.st_size, current_stat.st_mtime_ns) != (original_stat.st_ino, original_stat.st_size, original_stat.st_mtime_ns):
+                print("FargoVPN nginx guard: конфигурация изменилась; резервная копия сохранена", file=sys.stderr)
+                return False
+            if target.read_bytes() != expected_source.encode('utf-8'):
+                print("FargoVPN nginx guard: конфигурация изменилась; резервная копия сохранена", file=sys.stderr)
+                return False
+        else:
+            os.replace(target, backup)
         os.replace(temp, target)
         changed = True
         test = subprocess.run(["nginx", "-t"], capture_output=True, text=True, timeout=20)
         if test.returncode != 0:
-            print(f"FargoVPN nginx guard: nginx -t после изменения {target}: {(test.stderr or test.stdout).strip()}", file=sys.stderr)
+            detail = (test.stderr or test.stdout).strip() if persist_identity else 'проверка конфигурации не прошла'
+            print(f"FargoVPN nginx guard: nginx -t после изменения {target}: {detail}", file=sys.stderr)
             return False
+        reload_attempted = True
         reload_result = subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=20)
         if reload_result.returncode != 0:
             print(f"FargoVPN nginx guard: reload nginx: {(reload_result.stderr or reload_result.stdout).strip()}", file=sys.stderr)
             return False
         ok = _location_exists_in_nginx()
+        if expected_source is not None and target.read_bytes() != new.encode('utf-8'):
+            print("FargoVPN nginx guard: конфигурация изменилась во время проверки; сохранена резервная копия", file=sys.stderr)
+            return False
         if ok:
-            _persist_public_identity()
+            if persist_identity:
+                _persist_public_identity()
             backup.unlink(missing_ok=True)
         else:
-            print(f"FargoVPN nginx guard: маршрут {p} отсутствует в nginx -T после изменения {target}", file=sys.stderr)
+            route = p if persist_identity else '[redacted]'
+            print(f"FargoVPN nginx guard: маршрут {route} отсутствует в nginx -T после изменения {target}", file=sys.stderr)
         return ok
     except Exception as exc:
         print(f"FargoVPN nginx guard: {type(exc).__name__}: {exc}", file=sys.stderr)
         return False
     finally:
         if changed and backup.exists():
-            os.replace(backup, target)
-            subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=20)
+            if expected_source is None or (target.exists() and target.read_bytes() == new.encode('utf-8')):
+                os.replace(backup, target)
+                if reload_attempted:
+                    subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=20)
+            else:
+                print("FargoVPN nginx guard: внешний процесс изменил конфигурацию; резервная копия сохранена", file=sys.stderr)
         temp.unlink(missing_ok=True)
+
+
+NGINX_CONFIG_ROOT = Path('/etc/nginx').resolve()
+
+def ensure_install_route():
+    """Check a unique loaded host and insert only a missing FargoVPN route."""
+    if not bool(cfg("WEB_REVERSE_PROXY", False)) or not prefix():
+        return False
+    domain = str(cfg("WEB_DOMAIN", "") or cfg("WEB_TLS_SERVER_NAME", "") or "").strip().lower()
+    if domain.startswith("https://"):
+        from urllib.parse import urlsplit
+        domain = urlsplit(domain).hostname or ""
+    domain = domain.split(":", 1)[0].strip()
+    if subprocess.run(["nginx", "-t"], capture_output=True, text=True, timeout=20).returncode:
+        print("FargoVPN nginx guard: исходная конфигурация nginx содержит ошибки", file=sys.stderr)
+        return False
+    dump = _nginx_dump()
+    if not dump:
+        return False
+    candidates = []
+    for path in _nginx_loaded_conf_files():
+        try:
+            raw = path.read_bytes()
+            if b"\r" in raw:
+                return False
+            source = raw.decode("utf-8")
+        except (OSError, UnicodeError):
+            return False
+        for _, _, server in _server_blocks(source):
+            score = _server_score(server)
+            if score >= 0 and (not domain or domain in _server_names(server)):
+                candidates.append((score, path, source, server))
+    if not candidates:
+        print("FargoVPN nginx guard: HTTPS-хост не найден", file=sys.stderr)
+        return False
+    best = max(item[0] for item in candidates)
+    selected = candidates if domain else [item for item in candidates if item[0] == best]
+    if len(selected) != 1:
+        print("FargoVPN nginx guard: неоднозначный HTTPS-хост; нужна ручная проверка", file=sys.stderr)
+        return False
+    _, path, source, server = selected[0]
+    if not path.resolve().is_relative_to(NGINX_CONFIG_ROOT):
+        return False
+    p = prefix()
+    sock = str(cfg("WEB_SOCKET_PATH", "/run/vpn-service/fargovpn.sock") or "/run/vpn-service/fargovpn.sock")
+    if _location_exists_in_text(server, p, sock) and _location_exists_in_text(dump, p, sock):
+        return True
+    if re.search(rf"(?m)^\s*location\s+(?:=|\^~)?\s*{re.escape(p)}(?:/|\s|\{{)", dump):
+        print("FargoVPN nginx guard: конфликтующий маршрут; нужна ручная проверка", file=sys.stderr)
+        return False
+    return ensure_once(persist_identity=False, expected_target=path, expected_source=source)
 
 if __name__=="__main__":
     args=set(os.sys.argv[1:])
+    if "--install-check" in args:
+        raise SystemExit(0 if ensure_install_route() else 1)
     if "--check" in args:
         raise SystemExit(0 if _location_exists_in_nginx() else 1)
     if "--print-url" in args:
-        url = _persist_public_identity() or public_url()
+        url = _persist_public_identity()
         if url:
             print(url)
             raise SystemExit(0)

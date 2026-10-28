@@ -1370,3 +1370,16 @@ body.panel-page>aside#panel-sidebar .aside-foot { background:transparent!importa
   }
   body.panel-page .mobile-nav-toggle span { background:var(--text)!important; }
 }
+.profile-overview{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:14px}
+.profile-overview-subscription,.profile-hwids{min-width:0}
+.chat-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+.profile-left-column{min-width:0}
+.profile-subscription-card .profile-expiry{font-size:1.35rem;font-weight:700;margin:.55rem 0}
+.profile-days-form{display:grid;gap:8px}
+.profile-days-form .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.profile-days-form input{width:110px;min-height:44px}
+.profile-hwids{height:100%}
+.profile-hwid-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.profile-hwid-row>div{min-width:0;overflow-wrap:anywhere}
+.profile-hwid-row button{min-height:44px;flex-shrink:0}
+@media(max-width:768px){.profile-overview,.chat-layout{grid-template-columns:minmax(0,1fr)}.profile-hwids{height:auto}}
