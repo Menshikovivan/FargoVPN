@@ -384,6 +384,27 @@ def normalize_timestamp_ms(value: Any) -> int:
     return timestamp
 
 
+def _has_expiry_value(raw: dict[str, Any]) -> bool:
+    """Distinguish absent expiry from the explicit unlimited value zero."""
+    if not isinstance(raw, dict):
+        return False
+    nested = raw.get('client') if isinstance(raw.get('client'), dict) else {}
+    for obj in (raw, nested, raw.get('traffic'), nested.get('traffic')):
+        if isinstance(obj, dict) and 'expiryTime' in obj:
+            return True
+    return False
+
+
+def _validated_expiry(value: Any) -> int:
+    """Unknown, malformed and unsupported delayed-activation dates are not unlimited."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError('3x-ui вернула некорректный срок клиента; синхронизация отменена')
+    text = str(value).strip()
+    if not text or not text.isascii() or not text.isdigit():
+        raise ValueError('3x-ui вернула некорректный или отложенный срок; требуется сверка')
+    return normalize_timestamp_ms(int(text))
+
+
 def normalize_client(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize current and legacy 3x-ui client list response shapes.
 
@@ -410,9 +431,14 @@ def normalize_client(raw: dict[str, Any]) -> dict[str, Any]:
             traffic.get("totalGB", client.get("total", client.get("totalGB", 0))),
         )
     )
-    expiry = normalize_timestamp_ms(
-        traffic.get("expiryTime", client.get("expiryTime", nested.get("expiryTime", 0)))
-    )
+    # 3x-ui's clients/list returns ClientRecord alongside a traffic record;
+    # the ClientRecord's expiry (including zero) describes the subscription.
+    if 'expiryTime' in client:
+        expiry = _validated_expiry(client['expiryTime'])
+    elif 'expiryTime' in traffic:
+        expiry = _validated_expiry(traffic['expiryTime'])
+    else:
+        expiry = 0  # Not authoritative until resolved from clientStats below.
     last_online = normalize_timestamp_ms(
         traffic.get("lastOnline", client.get("lastOnline", nested.get("lastOnline", 0)))
     )
@@ -586,19 +612,36 @@ def _client_list_sync() -> dict[str, Any]:
             raise
     inbound_data = request_json_sync("GET", "panel/api/inbounds/list")
     records = []
-    for inbound in inbound_data.get("obj") or []:
-        if not isinstance(inbound, dict):
-            continue
-        settings = inbound.get("settings") or {}
+    inbounds = inbound_data.get('obj')
+    if not isinstance(inbounds, list):
+        raise ValueError('3x-ui вернула некорректный список подключений; синхронизация отменена')
+    for inbound in inbounds:
+        if not isinstance(inbound, dict) or 'settings' not in inbound:
+            raise ValueError('3x-ui вернула неполные настройки подключения; синхронизация отменена')
+        settings = inbound.get("settings")
         if isinstance(settings, str):
             settings = json.loads(settings)
-        stats = {str(x.get("email")): x for x in inbound.get("clientStats") or [] if isinstance(x, dict)}
-        for client in settings.get("clients") or []:
-            if isinstance(client, dict):
-                record = {**stats.get(str(client.get("email")), {}), **client}
-                record["uuid"] = client.get("id") or client.get("uuid") or ""
-                record["inboundId"] = inbound.get("id")
-                records.append(record)
+        if not isinstance(settings, dict):
+            raise ValueError('3x-ui вернула некорректные настройки подключения; синхронизация отменена')
+        protocol = str(inbound.get('protocol') or '').strip().lower()
+        if not protocol:
+            raise ValueError('3x-ui не указала протокол подключения; синхронизация отменена')
+        if protocol in {'vless', 'vmess', 'trojan'} and 'clients' not in settings:
+            raise ValueError('3x-ui не указала клиентов подключения; синхронизация отменена')
+        stats_items = inbound.get('clientStats', [])
+        if stats_items is None:
+            stats_items = []
+        if not isinstance(stats_items, list) or any(not isinstance(x, dict) for x in stats_items):
+            raise ValueError('3x-ui вернула неполную статистику; синхронизация отменена')
+        stats = {str(x.get("email")): x for x in stats_items}
+        clients = settings.get('clients', [])
+        if not isinstance(clients, list) or any(not isinstance(x, dict) for x in clients):
+            raise ValueError('3x-ui вернула неполный список клиентов подключения; синхронизация отменена')
+        for client in clients:
+            record = {**stats.get(str(client.get("email")), {}), **client}
+            record["uuid"] = client.get("id") or client.get("uuid") or ""
+            record["inboundId"] = inbound.get("id")
+            records.append(record)
     return {"success": True, "obj": records}
 
 
@@ -820,6 +863,7 @@ def deduplicate_clients(clients: list[dict[str, Any]]) -> tuple[list[dict[str, A
     direction and retain all inbound IDs for diagnostics.
     """
     merged: dict[str, dict[str, Any]] = {}
+    expiry_explicit: dict[str, bool] = {}
     duplicate_records = 0
     for source in clients:
         if not isinstance(source, dict) or not source.get("email"):
@@ -828,10 +872,29 @@ def deduplicate_clients(clients: list[dict[str, Any]]) -> tuple[list[dict[str, A
         if key not in merged:
             merged[key] = dict(source)
             merged[key]["inbound_ids"] = list(source.get("inbound_ids") or [])
+            raw = source.get('raw')
+            expiry_explicit[key] = _has_expiry_value(raw) if isinstance(raw, dict) else source.get('expiry_time') is not None
             continue
         duplicate_records += 1
         target = merged[key]
-        for field in ("up", "down", "total", "last_online_ts", "expiry_time"):
+        # 3x-ui 3.11 permits case-sensitive email identities. Never collapse
+        # differently cased identities or conflicting positive Telegram IDs.
+        if str(target.get('email') or '').strip() != str(source.get('email') or '').strip():
+            raise ValueError('3x-ui вернула конфликт регистров идентификаторов; требуется сверка')
+        target_tg, source_tg = _int(target.get('tg_id')), _int(source.get('tg_id'))
+        if target_tg > 0 and source_tg > 0 and target_tg != source_tg:
+            raise ValueError('3x-ui вернула конфликт Telegram ID; требуется сверка')
+        raw = source.get('raw')
+        incoming_explicit = _has_expiry_value(raw) if isinstance(raw, dict) else source.get('expiry_time') is not None
+        previous_explicit = expiry_explicit[key]
+        if previous_explicit and incoming_explicit and _int(target.get('expiry_time')) != _int(source.get('expiry_time')):
+            raise ValueError('3x-ui вернула дублирующиеся записи с разными сроками; требуется сверка')
+        if incoming_explicit and not previous_explicit:
+            target['expiry_time'] = _int(source.get('expiry_time'))
+        elif not previous_explicit and not incoming_explicit:
+            target['expiry_time'] = max(_int(target.get('expiry_time')), _int(source.get('expiry_time')))
+        expiry_explicit[key] = previous_explicit or incoming_explicit
+        for field in ("up", "down", "total", "last_online_ts"):
             target[field] = max(_int(target.get(field)), _int(source.get(field)))
         target["enable"] = bool(target.get("enable")) or bool(source.get("enable"))
         target["online"] = bool(target.get("online")) or bool(source.get("online"))
@@ -1173,13 +1236,19 @@ def fetch_snapshot_sync(force: bool = False) -> dict[str, Any]:
         refresh_started = time.monotonic()
         try:
             list_data = _client_list_sync()
-            raw_clients = list_data.get("obj") if isinstance(list_data.get("obj"), list) else []
-            clients = [normalize_client(item) for item in raw_clients if isinstance(item, dict)]
-            clients = [item for item in clients if item.get("email")]
+            raw_clients = list_data.get("obj")
+            if not isinstance(raw_clients, list):
+                raise ValueError("3x-ui вернула некорректный список клиентов; синхронизация отменена")
+            if any(not isinstance(item, dict) for item in raw_clients):
+                raise ValueError("3x-ui вернула неполный список клиентов; синхронизация отменена")
+            clients = [normalize_client(item) for item in raw_clients]
+            if any(not item.get("email") for item in clients):
+                raise ValueError("3x-ui вернула клиента без идентификатора; синхронизация отменена")
             # 3x-ui current builds expose authoritative per-client counters as
             # inbound.clientStats too. Merge them only when clients/list did not
             # provide usable traffic, keeping clients/list as the primary source.
             inbound_rows = None
+            expiry_resolved: set[str] = set()
             try:
                 inbound_probe = request_json_sync("GET", "panel/api/inbounds/list")
                 inbound_rows = inbound_probe.get("obj") if isinstance(inbound_probe.get("obj"), list) else []
@@ -1197,7 +1266,8 @@ def fetch_snapshot_sync(force: bool = False) -> dict[str, Any]:
                         current["up"] = max(_int(current.get("up")), _int(stat.get("up")))
                         current["down"] = max(_int(current.get("down")), _int(stat.get("down")))
                         current["total"] = max(_int(current.get("total")), _int(stat.get("total")))
-                        current["expiryTime"] = max(_int(current.get("expiryTime")), _int(stat.get("expiryTime")))
+                        if 'expiryTime' in stat:
+                            current.setdefault('_expiry_values', []).append(stat['expiryTime'])
                         current["lastOnline"] = max(_int(current.get("lastOnline")), _int(stat.get("lastOnline")))
                         if not current.get("uuid") and stat.get("uuid"):
                             current["uuid"] = stat.get("uuid")
@@ -1211,14 +1281,23 @@ def fetch_snapshot_sync(force: bool = False) -> dict[str, Any]:
                         item["down"] = _int(fallback.get("down"))
                     if _int(item.get("total")) == 0:
                         item["total"] = _int(fallback.get("total"))
-                    if _int(item.get("expiry_time")) == 0:
-                        item["expiry_time"] = normalize_timestamp_ms(fallback.get("expiryTime"))
+                    if not _has_expiry_value(item.get("raw")):
+                        values = fallback.get('_expiry_values', [])
+                        if values:
+                            parsed = {_validated_expiry(value) for value in values}
+                            if len(parsed) != 1:
+                                raise ValueError('3x-ui вернула конфликтующие сроки статистики; требуется сверка')
+                            item['expiry_time'] = parsed.pop()
+                            expiry_resolved.add(str(item.get('email') or '').strip().lower())
                     if _int(item.get("last_online_ts")) == 0:
                         item["last_online_ts"] = normalize_timestamp_ms(fallback.get("lastOnline"))
                     if not item.get("uuid") and fallback.get("uuid"):
                         item["uuid"] = str(fallback.get("uuid"))
             except Exception as error:
                 logger.debug("3x-ui clientStats fallback unavailable: %s", error)
+            if any(not _has_expiry_value(item.get('raw')) and
+                   str(item.get('email') or '').strip().lower() not in expiry_resolved for item in clients):
+                raise ValueError('Срок клиента 3x-ui неизвестен; синхронизация отменена')
             clients, duplicate_records = deduplicate_clients(clients)
     
             traffic_summary: dict[str, Any] = {}
@@ -1486,6 +1565,11 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
         rows = connection.execute(
             "SELECT tg_id,username,uuid,email,expiry_time,enable,last_reminder_days,notes FROM users"
         ).fetchall()
+        if not clients and any(str(row['email'] or '').strip() for row in rows):
+            # A genuinely empty 3x-ui list is valid, but interpreting it as
+            # proof that every local profile should be disabled is unsafe.
+            logger.warning('3x-ui вернула пустой список при существующих клиентах FargoVPN; требуется сверка')
+            return 0
         row_dicts = [dict(row) for row in rows]
         by_email, ambiguous_emails = build_unique_identity_index(row_dicts, "email")
         by_uuid, ambiguous_uuids = build_unique_identity_index(row_dicts, "uuid")
@@ -1966,6 +2050,8 @@ def extend_client_sync(
         raise ValueError("Количество дней для продления должно быть положительным")
     record = get_client_record_sync(email)
     client = record["client"]
+    if int(client.get('expiryTime') or 0) < 0:
+        raise ValueError('Подписка ожидает первого подключения; продление требует ручной сверки')
     current = normalize_timestamp_ms(client.get("expiryTime", record["normalized"].get("expiry_time", 0)))
     if current <= 0:
         raise ValueError("Бессрочная подписка: конечный срок задаётся только явным действием администратора")
@@ -2070,6 +2156,8 @@ def change_client_days_sync(
         raise ValueError("Изменение количества дней не может быть равно нулю")
     record = get_client_record_sync(email)
     normalized = dict(record.get("normalized") or {})
+    if int(record.get('client', {}).get('expiryTime') or 0) < 0:
+        raise ValueError('Подписка ожидает первого подключения; изменение срока требует ручной сверки')
     current = normalize_timestamp_ms(
         record.get("client", {}).get("expiryTime", normalized.get("expiry_time", 0))
     )

@@ -1338,3 +1338,35 @@ body.panel-page label input[type=checkbox],body.panel-page label input[type=radi
 body.panel-page summary,body.panel-page a.button{min-width:44px!important;min-height:44px!important}
 
 body.panel-page button{min-width:44px!important}
+
+
+/* Console overrides for older sidebar states at every viewport size. */
+body.panel-page>aside#panel-sidebar:hover,
+body.panel-page>aside#panel-sidebar:focus-within {
+  background:var(--surface)!important;
+  box-shadow:none!important;
+}
+body.panel-page>aside#panel-sidebar nav a:hover {
+  background:var(--surface-2)!important;
+  color:var(--text)!important;
+}
+body.panel-page>aside#panel-sidebar nav a.active,
+body.panel-page>aside#panel-sidebar nav a.active:hover {
+  background:var(--surface-2)!important;
+  color:var(--text)!important;
+  border-left-color:var(--blue)!important;
+  box-shadow:none!important;
+}
+body.panel-page>aside#panel-sidebar nav a.active:before { display:none!important; }
+body.panel-page>aside#panel-sidebar .aside-foot { background:transparent!important; }
+@media (max-width:900px) {
+  body.panel-page button.mobile-nav-toggle:not(.secondary):not(.danger),
+  body.panel-page button.mobile-nav-close:not(.secondary):not(.danger),
+  body.panel-page .mobile-topbar-action {
+    background:var(--surface-2)!important;
+    color:var(--text)!important;
+    border-color:var(--line)!important;
+    -webkit-tap-highlight-color:transparent;
+  }
+  body.panel-page .mobile-nav-toggle span { background:var(--text)!important; }
+}

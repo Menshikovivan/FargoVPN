@@ -530,7 +530,7 @@
     window.addEventListener('pagehide', () => clearTimeout(timer), {once:true});
   }
 
-  const PANEL_BUILD_VERSION = '5.2.7';
+  const PANEL_BUILD_VERSION = '5.2.8';
 
   function enforceClientVersion() {
     const meta = document.querySelector('meta[name="fargovpn-app-version"]');
