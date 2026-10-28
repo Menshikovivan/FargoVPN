@@ -308,9 +308,15 @@ def _editable_client_payload(
         if key in source and source[key] is not None:
             payload[key] = str(source[key])
 
-    for key in ("totalGB", "expiryTime", "limitIp", "tgId", "reset", "keepAlive"):
+    for key in ("totalGB", "expiryTime", "limitIp", "tgId", "reset"):
         if key in source:
             payload[key] = _int(source.get(key))
+
+    if "keepAlive" in source:
+        # 3x-ui 3.11 returns an AmneziaWG range as a string and scalar
+        # values as numbers. Keep the original range through a full update.
+        value = source.get("keepAlive")
+        payload["keepAlive"] = value if isinstance(value, str) and "-" in value else _int(value)
 
     if "enable" in source:
         payload["enable"] = _bool(source.get("enable"), True)
@@ -338,7 +344,7 @@ def _editable_client_payload(
     # Fields added to the current 3x-ui client model after the original
     # FargoVPN integration. Preserve them so a full-row update cannot silently
     # reset subscription/traffic-reset settings on v3.8.x.
-    for key in ("resetDay", "resetMax", "trafficResetDay", "limitHwid"):
+    for key in ("resetDay", "resetWeekday", "resetMax", "trafficResetDay", "limitHwid"):
         if key in source:
             payload[key] = _int(source.get(key))
     for key in ("trafficReset", "forwardedPorts"):
