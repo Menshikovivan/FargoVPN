@@ -173,7 +173,7 @@ def test_publish_progress_contract():
     assert "publish_log_tail" in manager
     assert 'publish-cancel-button' in web
     installer=(ROOT/'install.sh').read_text(encoding='utf-8')
-    assert 'nginx_panel_guard.py" --once' in installer
+    assert 'nginx_panel_guard.py" --install-check' in installer
     assert 'proxy_hide_header Content-Security-Policy' in (ROOT/'nginx_panel_guard.py').read_text(encoding='utf-8')
 
 def test_update_completion_refresh_contract():

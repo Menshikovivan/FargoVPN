@@ -76,7 +76,7 @@ def test_new_user_menu_and_stats():
         import pytest
         pytest.skip("aiogram is not installed in this isolated QA environment")
     from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from services.subscription_status import has_active_subscription
+    from services.subscription_status import has_active_subscription, has_subscription
     billing_stub = types.SimpleNamespace(
         payment_profile_id=lambda tg_id, _path: tg_id,
         subscription_label=lambda _user: 'Без подписки',
@@ -85,7 +85,7 @@ def test_new_user_menu_and_stats():
     ns = functions('main.py', ['get_user_menu', 'send_user_stats'], {
         'Message': object, 'InlineKeyboardBuilder': InlineKeyboardBuilder, 'asyncio': asyncio,
         'billing': billing_stub, 'config': types.SimpleNamespace(ADMIN_IDS=[], DB_PATH='unused'),
-        'has_active_subscription': has_active_subscription,
+        'has_active_subscription': has_active_subscription, 'has_subscription': has_subscription,
         'refresh_telegram_identity': lambda *_args: None,
         'logger': types.SimpleNamespace(debug=lambda *_args: None),
         'get_personal_cabinet_url': lambda *args: '',

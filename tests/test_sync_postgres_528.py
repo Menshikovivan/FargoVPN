@@ -1,5 +1,7 @@
-from test_billing_concurrency_pg import app, sample
+from test_billing_concurrency_pg import app, sample, DSN
 import pytest
+
+pytestmark = pytest.mark.skipif(not DSN, reason='requires explicit disposable PostgreSQL billing DSN')
 
 @pytest.mark.parametrize('old,panel', [(1800000000000,0),(0,1800000000000),(1800000000000,1900000000000)])
 def test_live_postgres_source_of_truth(app,sample,old,panel):

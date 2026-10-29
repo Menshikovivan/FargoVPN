@@ -218,7 +218,7 @@ def test_subscription_report_chunks_preserve_lines_and_html_entities():
     answer = AsyncMock()
     sender_namespace = {
         "asyncio": asyncio,
-        "subscription_report_text": lambda _page_no=1: text,
+        "subscription_report_text": lambda _page_no=1, _filter_key="all": text,
         "split_subscription_report": namespace["split_subscription_report"],
         "get_admin_menu": lambda: menu,
         "subscription_report_keyboard": lambda *_args: menu,
