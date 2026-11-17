@@ -95,6 +95,26 @@ if [[ -z "$UPDATE_PATH" && ! -t 0 ]]; then
   fi
 fi
 
+# Panel updates pass the worker's lock descriptor. Direct console installs
+# acquire the same lock, including mode 3 which invokes restore_manager.
+MAINTENANCE_LOCK=/run/vpn-service-maintenance.lock
+if [[ -n "${FARGOVPN_MAINTENANCE_FD:-}" ]]; then
+  if [[ ! "$FARGOVPN_MAINTENANCE_FD" =~ ^[1-9][0-9]*$ ||
+        "$FARGOVPN_MAINTENANCE_FD" -lt 3 ||
+        ! "/proc/$$/fd/$FARGOVPN_MAINTENANCE_FD" -ef "$MAINTENANCE_LOCK" ]]; then
+    echo 'Не удалось проверить блокировку установщика.' >&2
+    exit 1
+  fi
+else
+  (umask 077; : >> "$MAINTENANCE_LOCK")
+  exec {FARGOVPN_MAINTENANCE_FD}<>"$MAINTENANCE_LOCK"
+  export FARGOVPN_MAINTENANCE_FD
+fi
+if ! flock -n "$FARGOVPN_MAINTENANCE_FD"; then
+  echo 'Уже выполняется установка, обновление, откат или восстановление.' >&2
+  exit 1
+fi
+
 INSTALL_LOG="/var/log/vpn-service-install.log"
 mkdir -p "$(dirname "$INSTALL_LOG")"
 # Сохраняем полный журнал установки, не скрывая вывод в терминале.

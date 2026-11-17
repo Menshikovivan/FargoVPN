@@ -15,6 +15,7 @@ from pathlib import Path
 
 import update_manager
 from expiry_snapshots import SnapshotLimitError
+from maintenance_lock import INHERITED_FD_ENV, MaintenanceBusyError, maintenance_lock
 
 
 def _snapshot_before_upgrade() -> dict:
@@ -53,6 +54,20 @@ def _status(job_id: str, state: str, progress: int, phase: str, message: str, **
 
 
 def run(job_id: str, startup_delay: float = 0.0) -> int:
+    try:
+        with maintenance_lock() as lock_fd:
+            return _run_locked(job_id, startup_delay, lock_fd)
+    except (MaintenanceBusyError, OSError) as error:
+        active_job = update_manager.read_status().get("job_id")
+        if not active_job or active_job == job_id:
+            update_manager.write_status(
+                "failed", job_id=job_id, progress=1, phase="maintenance-lock",
+                message="Установка не началась", error=str(error), exit_code=1,
+            )
+        return 1
+
+
+def _run_locked(job_id: str, startup_delay: float, lock_fd: int) -> int:
     log_path = update_manager.update_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8", buffering=1) as log:
@@ -126,12 +141,14 @@ def run(job_id: str, startup_delay: float = 0.0) -> int:
                 raise update_manager.UpdateError("Защитный снимок сроков не создан; обновление остановлено до установки. Проверьте доступность 3x-ui и состояние подписок.") from None
             command, environment = update_manager.installer_command(package_root)
             environment["VPN_UPDATE_JOB_ID"] = job_id
+            environment[INHERITED_FD_ENV] = str(lock_fd)
             _status(job_id, "installing", 50, "install", "Установщик запущен и выполняет подготовку", version=version)
             log.write("Команда: " + " ".join(command) + "\n")
             log.flush()
             result = subprocess.run(
                 command,
                 env=environment,
+                pass_fds=(lock_fd,),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,

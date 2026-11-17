@@ -23,6 +23,7 @@ def erase_user_data(tg_id: int, *, confirmed_tg_id: int, actor: str,
     # Identifiers below are developer-owned constants, never request/backup SQL.
     predicates = {
         "payments": ("tg_id=?", (target,)),
+        "payment_quotes": ("payer_tg_id=? OR billing_tg_id=?", (target, target)),
         "referral_rewards": ("referrer_tg_id=? OR referred_tg_id=?", (target, target)),
         "user_events": ("tg_id=? OR telegram_chat_id=?", (target, target)),
         "user_message_state": ("tg_id=?", (target,)),
@@ -63,6 +64,9 @@ def erase_user_data(tg_id: int, *, confirmed_tg_id: int, actor: str,
         for table, (where, params) in predicates.items():
             counts[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0])
             conn.execute(f"DELETE FROM {table} WHERE {where}", params)
+        # Preserve the family's financial history but erase the deleted
+        # payer's optional personal attribution from those records.
+        conn.execute("UPDATE payments SET payer_tg_id=NULL,username=NULL WHERE payer_tg_id=?", (target,))
         # Structured histories have been deleted. Redact identity occurrences in
         # free-form operational audit, preserving other users' entries and dates.
         for table, columns in (("audit_log", ("actor", "details")),

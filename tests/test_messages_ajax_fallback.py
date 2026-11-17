@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 
@@ -67,7 +68,7 @@ def test_messages_fallback_posts_json_without_navigation(status_code, payload, e
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
-            executable_path="/usr/bin/chromium",
+            executable_path=os.environ.get("FARGOVPN_CHROMIUM") or pw.chromium.executable_path,
             args=["--no-sandbox"],
         )
         page = browser.new_page()

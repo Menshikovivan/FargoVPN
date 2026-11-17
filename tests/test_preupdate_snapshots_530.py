@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 import pytest
 
@@ -27,6 +28,7 @@ def _worker(monkeypatch,tmp_path):
     monkeypatch.setitem(sys.modules,'update_manager',manager)
     spec=importlib.util.spec_from_file_location('worker_test_530',ROOT/'app/update_worker.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'maintenance_lock', lambda: nullcontext(7))
     return module,state
 
 

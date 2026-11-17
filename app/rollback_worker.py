@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 import update_manager
+from maintenance_lock import MaintenanceBusyError, maintenance_lock
 
 UNITS=["vpn-service-bot.service","vpn-service-web.service","vpn-service-backup.timer","vpn-service-reminders.timer"]
 
@@ -57,7 +58,18 @@ def restart_services():
         subprocess.run(["systemctl","restart",unit],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
-def run(job_id,backup):
+def run(job_id, backup):
+    try:
+        with maintenance_lock():
+            return _run_locked(job_id, backup)
+    except (MaintenanceBusyError, OSError) as error:
+        active_job = update_manager.read_status().get("job_id")
+        if not active_job or active_job == job_id:
+            write(job_id, "failed", 1, "maintenance-lock", "Откат не начался", error=str(error), exit_code=1)
+        return 1
+
+
+def _run_locked(job_id, backup):
     target=update_manager.APP_DIR.resolve()
     previous=update_manager._preupdate_version(backup) or "предыдущей версии"
     old=None

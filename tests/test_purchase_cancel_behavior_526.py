@@ -19,15 +19,27 @@ def test_only_current_purchase_cancel_clears_receipt_wait():
     async def acknowledge(_):
         return None
 
+    quote = {"cancel_token": "new-session"}
+
+    def cancel(payer_id, token, _db_path):
+        assert payer_id == 101 and token == "new-session"
+        quote.clear()
+        return True
+
+    async def run_in_thread(function, *args):
+        return function(*args)
+
     env = {'secrets': secrets, 'safe_callback_answer': acknowledge,
+           'asyncio': SimpleNamespace(to_thread=run_in_thread),
+           'config': SimpleNamespace(DB_PATH='test'),
+           'get_purchase_quote_sync': lambda *_: dict(quote),
+           'cancel_purchase_quote_sync': cancel,
            'FSMStates': SimpleNamespace(wait_for_receipt=SimpleNamespace(state='receipt'))}
     exec(compile(ast.fix_missing_locations(module), 'purchase-cancel-handler', 'exec'), env)
 
     class State:
         def __init__(self, status='receipt'):
             self.status, self.cleared = status, 0
-        async def get_data(self):
-            return {'cancel_token': 'new-session'}
         async def get_state(self):
             return self.status
         async def clear(self):
@@ -40,12 +52,13 @@ def test_only_current_purchase_cancel_clears_receipt_wait():
     async def exercise():
         state = State()
         for data in ('purchase:cancel', 'purchase:cancel:old-session'):
-            await env['cancel_receipt_wait'](SimpleNamespace(data=data, message=Message()), state)
+            await env['cancel_receipt_wait'](SimpleNamespace(data=data, message=Message(), from_user=SimpleNamespace(id=101)), state)
             assert state.cleared == 0
-        await env['cancel_receipt_wait'](SimpleNamespace(data='purchase:cancel:new-session', message=Message()), state)
-        assert state.cleared == 1
-        completed = State(status='another-state')
-        await env['cancel_receipt_wait'](SimpleNamespace(data='purchase:cancel:new-session', message=Message()), completed)
-        assert completed.cleared == 0
+        await env['cancel_receipt_wait'](SimpleNamespace(data='purchase:cancel:new-session', message=Message(), from_user=SimpleNamespace(id=101)), state)
+        assert state.cleared == 1 and not quote
+        quote['cancel_token'] = 'new-session'
+        completed = State(status=None)
+        await env['cancel_receipt_wait'](SimpleNamespace(data='purchase:cancel:new-session', message=Message(), from_user=SimpleNamespace(id=101)), completed)
+        assert completed.cleared == 0 and not quote
 
     asyncio.run(exercise())

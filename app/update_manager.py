@@ -28,6 +28,7 @@ import httpx
 
 import config
 from detached_jobs import DetachedJobError, launch_detached
+from maintenance_lock import MaintenanceBusyError, ensure_maintenance_idle
 
 APP_DIR = Path(__file__).resolve().parent
 LOGGER = logging.getLogger(__name__)
@@ -552,6 +553,7 @@ def validate_preupdate_backup(path: str) -> Path:
 
 def start_rollback_job(actor: str, backup_path: str) -> dict[str, Any]:
     target = validate_preupdate_backup(backup_path)
+    _ensure_maintenance_idle()
     if update_job_busy():
         raise UpdateError("Другая задача обновления уже выполняется")
     job_id = secrets.token_hex(12)
@@ -1548,6 +1550,17 @@ TMP_BASE="${{FARGOVPN_BOOTSTRAP_TMPDIR:-/var/tmp}}"
 if [[ ${{EUID:-$(id -u)}} -ne 0 ]]; then
   echo "Запустите установщик через sudo или от пользователя root." >&2
   exit 1
+fi
+
+# A bootstrap started as a file may already be inside an unpacked FULL release.
+# Calls via curl | bash and explicit remote overrides retain the download path.
+if [[ -n "${{BASH_SOURCE[0]:-}}" && -f "${{BASH_SOURCE[0]}}" && "${{FARGOVPN_USE_REMOTE_LATEST:-0}}" != "1" && -z "${{FARGOVPN_ARCHIVE_URL:-}}" && -z "${{FARGOVPN_CHECKSUM_URL:-}}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd -P)"
+  LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"
+  LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"
+  if [[ -f "$LOCAL_INSTALLER" && -f "$LOCAL_VERSION_FILE" ]]; then
+    exec /bin/bash "$LOCAL_INSTALLER" "$@"
+  fi
 fi
 
 mkdir -p "$TMP_BASE"
@@ -2751,6 +2764,13 @@ def _make_update_launcher(job_id: str, command: list[str]) -> Path:
     os.chmod(path, 0o700)
     return path
 
+def _ensure_maintenance_idle() -> None:
+    try:
+        ensure_maintenance_idle()
+    except (MaintenanceBusyError, OSError) as error:
+        raise UpdateError(str(error)) from error
+
+
 def start_update_job(
     actor: str = "web",
     update_info: dict[str, Any] | None = None,
@@ -2769,6 +2789,7 @@ def start_update_job(
     lock_path = root / "start.lock"
     with _START_LOCK, lock_path.open("a+") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        _ensure_maintenance_idle()
         current = read_status()
         if update_job_busy(current):
             raise UpdateError("Другая установка обновления уже выполняется")
@@ -2895,6 +2916,7 @@ def installer_command(package_root: Path) -> tuple[list[str], dict[str, str]]:
 
 
 def launch_update(package_root: Path, version: str) -> str:
+    _ensure_maintenance_idle()
     installer = _package_installer(package_root)
     root = update_dir()
     root.mkdir(parents=True, exist_ok=True)

@@ -666,9 +666,10 @@ def assign_existing_panel_client(
     if not clean_email:
         raise IdentityImportError('Нужно указать email существующего клиента 3x-ui')
 
-    from services.xui_api import get_client_record_sync, bind_client_tg_id_sync, update_client_sync
+    from services.xui_api import get_client_record_sync, bind_client_tg_id_sync, require_client_record_expiry, update_client_sync
 
     record = get_client_record_sync(clean_email)
+    expiry = require_client_record_expiry(record)
     client = dict(record.get('client') or {})
     normalized = dict(record.get('normalized') or {})
     actual_email = str(client.get('email') or clean_email).strip()
@@ -700,7 +701,7 @@ def assign_existing_panel_client(
         target_fields = {
             'email': actual_email,
             'uuid': selected_uuid,
-            'expiry_time': int(normalized.get('expiry_time') or 0),
+            'expiry_time': expiry,
             'enable': int(bool(normalized.get('enable', True))),
             'sub_id': str(normalized.get('sub_id') or ''),
             'username': clean_username or str(target['username'] or ''),
@@ -805,9 +806,10 @@ def bind_existing_panel_client(
     if not clean_email:
         raise IdentityImportError("Нужно указать email существующего клиента 3x-ui")
 
-    from services.xui_api import get_client_record_sync, bind_client_tg_id_sync
+    from services.xui_api import get_client_record_sync, bind_client_tg_id_sync, require_client_record_expiry
 
     record = get_client_record_sync(clean_email)
+    expiry = require_client_record_expiry(record)
     normalized = dict(record.get("normalized") or {})
     actual_email = str(record.get("client", {}).get("email") or clean_email).strip()
     selected_uuid = str(normalized.get("uuid") or "").strip()
@@ -847,7 +849,7 @@ def bind_existing_panel_client(
         target_fields = {
             "email": actual_email,
             "uuid": selected_uuid,
-            "expiry_time": int(normalized.get("expiry_time") or 0),
+            "expiry_time": expiry,
             "enable": int(bool(normalized.get("enable", True))),
             "sub_id": str(normalized.get("sub_id") or ""),
             "username": clean_username or str(current["username"] or ""),

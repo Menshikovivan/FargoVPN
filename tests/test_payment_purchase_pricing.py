@@ -63,8 +63,8 @@ def test_purchase_price_is_resolved_from_explicit_payer_profile():
     assert threaded_call.args[1].id == "payer_id"
 
 
-def test_receipt_requotes_when_family_price_changes_from_200_to_400():
-    """A two-person family change invalidates a previously shown 200 ₽ quote."""
+def test_receipt_sends_changed_quote_to_manual_review():
+    """A change in family billing suppresses automatic approval of the receipt."""
     tree = ast.parse((APP / "main.py").read_text(encoding="utf-8"))
     quote_check = next(
         item for item in tree.body
@@ -81,30 +81,20 @@ def test_receipt_requotes_when_family_price_changes_from_200_to_400():
         item for item in tree.body
         if isinstance(item, ast.AsyncFunctionDef) and item.name == "process_receipt_photo"
     )
-    stale_quote_branch = next(
-        item for item in ast.walk(handler)
-        if isinstance(item, ast.If)
-        and isinstance(item.test, ast.Call)
-        and isinstance(item.test.func, ast.Name)
-        and item.test.func.id == "purchase_quote_changed"
+    submit = next(
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.Call)
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "submit_quoted_receipt_sync"
     )
-    submit_reference = next(
-        item for item in ast.walk(handler)
-        if isinstance(item, ast.Name) and item.id == "submit_receipt_sync"
+    assert any(isinstance(arg, ast.Name) and arg.id == "needs_manual_review" for arg in submit.args)
+    ocr_branch = next(
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.If) and "analysis.passed" in ast.unparse(node.test) and "not needs_manual_review" in ast.unparse(node.test)
     )
-    assert stale_quote_branch.lineno < submit_reference.lineno
-    assert any(
-        isinstance(item, ast.Call)
-        and isinstance(item.func, ast.Attribute)
-        and item.func.attr == "update_data"
-        for item in ast.walk(stale_quote_branch)
-    )
-    assert any(
-        isinstance(item, ast.Constant)
-        and isinstance(item.value, str)
-        and "Чек не принят" in item.value
-        for item in ast.walk(stale_quote_branch)
-    )
+    assert "approve_payment_sync" in ast.unparse(ocr_branch)
+    assert "Оплатите эту сумму" not in ast.unparse(handler)
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import BaseFilter, CommandStart, Command
 from aiogram.types import (
     CallbackQuery,
     KeyboardButton,
@@ -72,7 +72,12 @@ from services.telegram_events import (
     telegram_message_media,
 )
 from services.receipt_ocr import ReceiptAnalysis, analyze_payment_receipt
-from services.payment_submission import submit_receipt_sync
+from services.payment_submission import (
+    cancel_purchase_quote_sync,
+    get_purchase_quote_sync,
+    open_purchase_quote_sync,
+    submit_quoted_receipt_sync,
+)
 from services import billing, subscriptions
 from services.subscription_status import has_subscription, has_active_subscription
 from telegram_registration_middleware import InvitationAccessMiddleware, PendingInviteCodeFilter, send_registration_prompt
@@ -1339,37 +1344,39 @@ async def start_purchase(
     profile_id = await asyncio.to_thread(billing.payment_profile_id, payer_id, config.DB_PATH)
     amount = await asyncio.to_thread(billing.expected_payment_amount, profile_id, config.DB_PATH)
     purchased_days = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
-    cancel_token = secrets.token_hex(8)
-    await state.update_data(
-        purchase_token=secrets.token_hex(24), cancel_token=cancel_token,
-        expected_amount=amount, billing_tg_id=profile_id, purchased_days=purchased_days,
+    quote_data = await asyncio.to_thread(
+        open_purchase_quote_sync, payer_id, profile_id, amount, purchased_days, config.DB_PATH
     )
     await state.set_state(FSMStates.wait_for_receipt)
     await message.answer(
-        payment_text_for_user(amount, purchased_days),
+        payment_text_for_user(quote_data["expected_amount"], quote_data["purchased_days"]),
         parse_mode="HTML",
-        reply_markup=purchase_cancel_markup(cancel_token),
+        reply_markup=purchase_cancel_markup(quote_data["cancel_token"]),
     )
 
 
 @dp.callback_query(F.data.startswith("purchase:cancel"))
 async def cancel_receipt_wait(call: CallbackQuery, state: FSMContext):
     await safe_callback_answer(call)
-    current_token = str((await state.get_data()).get("cancel_token") or "")
+    payer_id = int(call.from_user.id)
+    quote_data = await asyncio.to_thread(get_purchase_quote_sync, payer_id, config.DB_PATH)
+    current_token = str((quote_data or {}).get("cancel_token") or "")
     if not purchase_cancel_token_matches(str(call.data or ""), current_token):
         if call.message:
             await call.message.answer("Эта кнопка относится к предыдущему ожиданию чека. Текущая оплата не изменена.")
         return
-    if await state.get_state() != FSMStates.wait_for_receipt.state:
+    cancelled = await asyncio.to_thread(cancel_purchase_quote_sync, payer_id, current_token, config.DB_PATH)
+    if not cancelled:
         if call.message:
             await call.message.answer("Ожидание чека уже завершено или отменено.")
         return
-    await state.clear()
+    if await state.get_state() == FSMStates.wait_for_receipt.state:
+        await state.clear()
     if call.message:
         await call.message.answer(
-            "Ожидание чека остановлено. Если вы уже отправили чек, он продолжит проверку; "
-            "иначе заявка не создаётся. Чтобы начать оплату заново, в главном меню выберите покупку "
-            "или продление подписки."
+            "Ожидание чека остановлено. Если вы уже отправили чек, он продолжит проверку. "
+            "Если перевод уже сделан, обратитесь к администратору с чеком. "
+            "Для нового перевода выберите покупку или продление подписки в меню."
         )
 
 
@@ -2144,9 +2151,25 @@ async def send_receipt_to_admin(msg: Message, admin_id: int, file_id: str, capti
             )
 
 
-@dp.message(F.photo, FSMStates.wait_for_receipt)
-@dp.message(F.document, FSMStates.wait_for_receipt)
-async def process_receipt_photo(msg: Message, state: FSMContext):
+class ActivePurchaseReceiptFilter(BaseFilter):
+    async def __call__(self, msg: Message, state: FSMContext) -> bool | dict:
+        if not msg.from_user or msg.chat.type != "private":
+            return False
+        active_state = await state.get_state()
+        if active_state not in (None, FSMStates.wait_for_receipt.state):
+            return False
+        quote_data = await asyncio.to_thread(
+            get_purchase_quote_sync, int(msg.from_user.id), config.DB_PATH,
+            include_submitted=active_state == FSMStates.wait_for_receipt.state,
+        )
+        if quote_data or active_state == FSMStates.wait_for_receipt.state:
+            return {"purchase_data": quote_data}
+        return False
+
+
+@dp.message(F.photo, ActivePurchaseReceiptFilter())
+@dp.message(F.document, ActivePurchaseReceiptFilter())
+async def process_receipt_photo(msg: Message, state: FSMContext, purchase_data: dict | None):
     if msg.photo:
         file_id = msg.photo[-1].file_id
     elif msg.document:
@@ -2159,45 +2182,20 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     else:
         return
 
-    purchase_token = str((await state.get_data()).get("purchase_token") or "")
-    if not purchase_token:
-        await msg.answer("ℹ️ Если чек уже отправлен, заявка принята. Для новой оплаты откройте «Купить подписку» в меню.")
+    if not purchase_data:
+        await msg.answer("Срок действия реквизитов истёк. Если перевод уже сделан, обратитесь к администратору с чеком.")
         return
 
-    # A family member may have joined or left after the payment instructions
-    # were shown. Requote against the payer's current owner and price before
-    # the receipt is recorded, so no check is reviewed against stale billing.
-    purchase_data = await state.get_data()
+    purchase_token = str(purchase_data["purchase_token"])
     payer_id = int(msg.from_user.id)
-    current_profile_id = await asyncio.to_thread(
-        billing.payment_profile_id, payer_id, config.DB_PATH
+    current_profile_id = await asyncio.to_thread(billing.payment_profile_id, payer_id, config.DB_PATH)
+    current_amount = await asyncio.to_thread(billing.expected_payment_amount, current_profile_id, config.DB_PATH)
+    billing_tg_id = int(purchase_data["billing_tg_id"])
+    expected_amount = int(purchase_data["expected_amount"])
+    purchased_days = int(purchase_data["purchased_days"])
+    needs_manual_review = purchase_quote_changed(
+        billing_tg_id, expected_amount, current_profile_id, current_amount
     )
-    current_amount = await asyncio.to_thread(
-        billing.expected_payment_amount, current_profile_id, config.DB_PATH
-    )
-    previous_profile_id = int(purchase_data.get("billing_tg_id") or 0)
-    previous_amount = int(purchase_data.get("expected_amount") or 0)
-    if purchase_quote_changed(
-        previous_profile_id, previous_amount, current_profile_id, current_amount
-    ):
-        purchase_token = secrets.token_hex(24)
-        cancel_token = secrets.token_hex(8)
-        await state.update_data(
-            purchase_token=purchase_token,
-            cancel_token=cancel_token,
-            expected_amount=current_amount,
-            billing_tg_id=current_profile_id,
-            purchased_days=max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30)),
-        )
-        await msg.answer(
-            "⚠️ Состав профиля или сумма подписки изменилась после показа реквизитов. "
-            "Чек не принят и заявка на оплату не создана.\n\n"
-            f"Актуальная сумма: <b>{current_amount} ₽</b>. "
-            "Оплатите эту сумму и отправьте новый чек.",
-            parse_mode="HTML",
-            reply_markup=purchase_cancel_markup(cancel_token),
-        )
-        return
 
     submit_limit = await asyncio.to_thread(
         rate_limit.consume,
@@ -2212,18 +2210,15 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         )
         return
 
-    expected_amount = int((await state.get_data()).get("expected_amount") or 0)
-    if expected_amount <= 0:
-        expected_amount = await asyncio.to_thread(billing.expected_payment_amount, int(msg.from_user.id), config.DB_PATH)
-    billing_tg_id = int((await state.get_data()).get("billing_tg_id") or await asyncio.to_thread(billing.payment_profile_id, int(msg.from_user.id), config.DB_PATH))
-    purchased_days = max(1, int((await state.get_data()).get("purchased_days") or getattr(config, "SUBSCRIPTION_DAYS", 30)))
     payment_id, created = await asyncio.to_thread(
-        submit_receipt_sync, billing_tg_id, msg.from_user.username or "",
-        file_id, expected_amount, purchase_token, config.DB_PATH,
-        purchased_days=purchased_days,
+        submit_quoted_receipt_sync, payer_id, purchase_token, msg.from_user.username or "",
+        file_id, needs_manual_review, config.DB_PATH,
     )
     if not created:
-        await msg.answer("ℹ️ Заявка на оплату уже принята. Дождитесь результата проверки; повторный чек не создаёт новую оплату.")
+        if payment_id:
+            await msg.answer("ℹ️ Заявка на оплату уже принята. Дождитесь результата проверки.")
+        else:
+            await msg.answer("Реквизиты больше не действуют. Если перевод уже сделан, обратитесь к администратору с чеком.")
         return
 
     # Admin browser/PWA notification for every newly submitted payment.
@@ -2263,7 +2258,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
                 content,
                 **receipt_ocr_options(expected_amount),
             )
-            if analysis.passed and bool(getattr(config, "RECEIPT_AUTO_APPROVE", True)):
+            if analysis.passed and not needs_manual_review and bool(getattr(config, "RECEIPT_AUTO_APPROVE", True)):
                 approval = await asyncio.to_thread(
                     approve_payment_sync,
                     payment_id,
@@ -2293,6 +2288,10 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         f"📑 Чек #{payment_id} от {receipt_user_label} "
         f"(ID: <code>{msg.from_user.id}</code>)"
     )
+    if needs_manual_review:
+        user_info += ("\n\n⚠️ Условия оплаты изменились. "
+                      f"Исходная сумма <b>{expected_amount} ₽</b> / {purchased_days} дней. "
+                      "Проверьте исходный профиль и чек в веб-панели.")
     if analysis:
         user_info += "\n\n<b>Автопроверка:</b>\n<pre>" + html.escape(analysis.compact_summary()) + "</pre>"
     elif not ocr_enabled:
@@ -2307,7 +2306,8 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
         if approval and not approval.success:
             user_info += "\n\n⚠ Совпадения найдены, но активация не выполнена: " + html.escape(approval.message)
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="☑ Подтвердить", callback_data=f"approve_{msg.from_user.id}_{payment_id}")
+        if not needs_manual_review:
+            keyboard.button(text="☑ Подтвердить", callback_data=f"approve_{msg.from_user.id}_{payment_id}")
         keyboard.button(text="❌ Отказать", callback_data=f"decline_{msg.from_user.id}_{payment_id}")
         keyboard.adjust(1)
         builder = keyboard.as_markup()
@@ -2327,7 +2327,8 @@ async def process_receipt_photo(msg: Message, state: FSMContext):
     await msg.answer(user_reply, reply_markup=await get_user_menu_async(
         msg.from_user.id, username=msg.from_user.username, display_name=msg.from_user.full_name
     ), parse_mode="HTML")
-    if str((await state.get_data()).get("purchase_token") or "") == purchase_token:
+    current_quote = await asyncio.to_thread(get_purchase_quote_sync, payer_id, config.DB_PATH)
+    if (current_quote or {}).get("purchase_token") == purchase_token and await state.get_state() == FSMStates.wait_for_receipt.state:
         await state.clear()
 
 @dp.message(lambda m: m.text and "Связь" in m.text)

@@ -255,12 +255,21 @@ def test_public_bootstrap_downloads_verified_release_package():
     assert "FargoVPN_FULL.tar.gz" in bootstrap
     assert "sha256sum -c" in bootstrap
     assert "app/install.sh" in bootstrap
-    if 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap:
-        assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
-        assert 'exec /bin/bash "$LOCAL_INSTALLER" "$@"' in bootstrap
-        assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
-    else:
-        assert 'INSTALLER="$PACKAGE_ROOT/app/install.sh"' in bootstrap
+    assert 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap
+    assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
+    assert 'exec /bin/bash "$LOCAL_INSTALLER" "$@"' in bootstrap
+    assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
+    assert 'INSTALLER="$PACKAGE_ROOT/app/install.sh"' in bootstrap
+    assert bootstrap.index('exec /bin/bash "$LOCAL_INSTALLER"') < bootstrap.index('download "$ARCHIVE_URL"')
+
+    import ast
+    source = (ROOT / "update_manager.py").read_text(encoding="utf-8")
+    generator = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+                     and node.name == "_github_main_bootstrap")
+    namespace = {"github_owner": lambda: "Menshikovivan", "github_repo": lambda: "FargoVPN"}
+    exec(compile(ast.Module(body=[generator], type_ignores=[]), "update_manager.py", "exec"), namespace)
+    generated = namespace["_github_main_bootstrap"]()
+    assert generated[generated.index('# A bootstrap'):].strip() == bootstrap[bootstrap.index('# A bootstrap'):].strip()
 
 
 def test_publish_worker_ack_is_persistent():

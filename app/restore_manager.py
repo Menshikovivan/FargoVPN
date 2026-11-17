@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from maintenance_lock import MaintenanceBusyError, ensure_maintenance_idle, maintenance_lock
+
 APP_DIR = Path(__file__).resolve().parent
 SERVICE_DIR = Path("/var/lib/vpn-service")
 RESTORE_STATE_PATH = SERVICE_DIR / "restore-state.json"
@@ -42,11 +44,12 @@ SAFE_PART_RE = re.compile(r"^(?P<base>.+\.tar\.gz)\.part(?P<index>\d{1,4})$")
 # security, audit, push, Telegram-update and worker state and are intentionally
 # left untouched by "users-only" restore.
 USERS_ONLY_TABLES = ("users", "payments", "referral_rewards", "telegram_profile_links")
-# Authentication/invitation state is never imported from an archive. Revoke the
-# current user-facing tokens atomically with the profile replacement.
+# Revoke the current authentication/invitation tokens and pending payment
+# quotes atomically with the user profile replacement.
 USERS_ONLY_REVOKE_TABLES = ("telegram_profile_link_requests", "telegram_link_requests",
-                            "cabinet_login_requests", "cabinet_access_tokens", "access_invites")
+                            "cabinet_login_requests", "cabinet_access_tokens", "access_invites", "payment_quotes")
 USERS_ONLY_SNAPSHOT_TABLES = USERS_ONLY_TABLES + USERS_ONLY_REVOKE_TABLES
+APP_RESTORE_DISCARD_TABLES = ("payment_quotes",)
 APP_HEALTH_TABLES = ("users", "payments", "user_events", "audit_log")
 PROTECTED_CONFIG = {
     "DATABASE_URL", "DB_PATH", "BACKUP_DIR", "BACKUP_LOCK_PATH", "BACKUP_STATE_PATH",
@@ -757,7 +760,10 @@ def _clone_live_schema(schema_dsn: str, staging_dsn: str, *, section: str = "pre
         _restore_trusted_schema(schema, staging_dsn)
 
 
-def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tuple[str, ...] = (), include_tables: tuple[str, ...] | None = None) -> None:
+def restore_dump(
+    dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tuple[str, ...] = (),
+    include_tables: tuple[str, ...] | None = None, exclude_tables: tuple[str, ...] = (),
+) -> None:
     """Restore archive DATA into current trusted schema; never execute archive SQL."""
     import psycopg
     from psycopg import sql
@@ -778,11 +784,9 @@ def restore_dump(dump: Path, dsn: str, *, schema_dsn: str, preserve_tables: tupl
                                 writer.write_row(row)
                 _reset_table_sequences(conn, table, columns)
             for table, columns, rows in _copy_data_blocks(dump):
-                if include_tables is not None and table not in include_tables:
-                    for _ in rows:
-                        pass
-                    continue
-                if table in preserve_tables:
+                if table in preserve_tables or table in exclude_tables or (
+                    include_tables is not None and table not in include_tables
+                ):
                     for _ in rows:
                         pass
                     continue
@@ -1010,7 +1014,10 @@ def _drop_snapshot_schema(target_dsn: str, snapshot_schema: str) -> None:
 def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging_dsn: str, *, include_tables: tuple[str, ...] | None = None) -> None:
     kind, artifact = find_application_artifact(root, manifest)
     if kind == "PostgreSQL":
-        restore_dump(artifact, staging_dsn, schema_dsn=str(_cfg("DATABASE_URL", "")), include_tables=include_tables)
+        restore_dump(
+            artifact, staging_dsn, schema_dsn=str(_cfg("DATABASE_URL", "")),
+            include_tables=include_tables, exclude_tables=APP_RESTORE_DISCARD_TABLES,
+        )
         return
     # SQLite is also untrusted data: never recreate its DDL/defaults/triggers.
     import psycopg
@@ -1021,7 +1028,9 @@ def restore_application_to_staging(root: Path, manifest: dict[str, Any], staging
         source.execute('PRAGMA trusted_schema=OFF')
         with psycopg.connect(raw_dsn(staging_dsn)) as conn:
             for (table,) in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
-                if include_tables is not None and table not in include_tables:
+                if table in APP_RESTORE_DISCARD_TABLES or (
+                    include_tables is not None and table not in include_tables
+                ):
                     continue
                 target_columns = _table_columns(conn, table)
                 if not target_columns:
@@ -1258,107 +1267,28 @@ def _current_xui_dsn() -> str:
         raise RuntimeError(f"Не удалось определить PostgreSQL DSN 3x-ui: {exc}") from exc
 
 
-def _snapshot_files(paths: list[tuple[Path, Path]]) -> Path:
-    root = Path(tempfile.mkdtemp(prefix="fargovpn_restore_files_"))
-    for source, relative in paths:
-        if not source.exists():
-            continue
-        destination = root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_file():
-            shutil.copy2(source, destination)
-        elif source.is_dir():
-            _copy_tree_safe(source, destination)
-    return root
-
-
-def _copy_tree_safe(source: Path, destination: Path) -> None:
-    for current, dirnames, filenames in os.walk(source, followlinks=False):
-        current_path = Path(current)
-        for dirname in list(dirnames):
-            src = current_path / dirname
-            if src.is_symlink():
-                raise RuntimeError(f"Символическая ссылка запрещена в конфигурации: {src}")
-        for filename in filenames:
-            src = current_path / filename
-            if src.is_symlink():
-                raise RuntimeError(f"Символическая ссылка запрещена в конфигурации: {src}")
-        rel = current_path.relative_to(source)
-        dest_dir = destination / rel
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for dirname in dirnames:
-            (dest_dir / dirname).mkdir(parents=True, exist_ok=True)
-        for filename in filenames:
-            shutil.copy2(current_path / filename, dest_dir / filename)
-        try:
-            shutil.copystat(current_path, dest_dir, follow_symlinks=False)
-        except OSError:
-            pass
-
-
-def _restore_tree(snapshot: Path, source: Path, destination: Path) -> None:
-    if not source.exists():
-        if destination.is_dir():
-            shutil.rmtree(destination)
-        elif destination.exists():
-            destination.unlink()
-        return
-    if source.is_dir():
-        if destination.exists():
-            if destination.is_dir():
-                shutil.rmtree(destination)
-            else:
-                destination.unlink()
-        destination.mkdir(parents=True, exist_ok=True)
-        _copy_tree_safe(source, destination)
-    else:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-
-
 def _snapshot_current_state() -> tuple[Path, dict[str, dict[str, bool]]]:
-    pairs = [
-        (APP_DIR / "config.py", Path("app/config.py")),
-        (APP_DIR / ".env", Path("app/.env")),
-        (Path("/etc/x-ui"), Path("etc/x-ui")),
-        (Path("/etc/xray"), Path("etc/xray")),
-        (Path(str(_cfg("XUI_DB_ENV_FILE", "/etc/default/x-ui"))), Path("etc/default/x-ui")),
-    ]
-    units = [u for u in ("vpn-service-bot.service", "vpn-service-web.service", "vpn-service-web.socket", "vpn-service-backup.service", "vpn-service-backup.timer", "vpn-service-reminders.service", "vpn-service-reminders.timer", "vpn-service-nginx-guard.service", "x-ui.service", "3x-ui.service", "xray.service") if _service_exists(u)]
-    unit_paths: list[tuple[Path, Path]] = []
-    for unit in units:
-        source = Path("/etc/systemd/system") / unit
-        if source.is_file():
-            unit_paths.append((source, Path("etc/systemd/system") / unit))
-    pairs.extend(unit_paths)
-    vapid = Path(str(_cfg("PUSH_VAPID_PRIVATE_KEY_PATH", "/var/lib/vpn-service/vapid_private.pem"))).expanduser()
-    pairs.append((vapid, Path("runtime/vapid_private.pem")))
-    states = _capture_service_states(units)
-    return _snapshot_files(pairs), states
+    # The data-only restore changes config.py. The database engines have their
+    # own rollback paths and the service definitions stay installed.
+    states = _capture_service_states(_external_units() + _fargovpn_units())
+    root = Path(tempfile.mkdtemp(prefix="fargovpn_restore_files_"))
+    target = APP_DIR / "config.py"
+    try:
+        if target.is_file():
+            shutil.copy2(target, root / "config.py")
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return root, states
 
 
 def _rollback_files(snapshot: Path) -> None:
-    targets = {
-        Path("app/config.py"): APP_DIR / "config.py",
-        Path("app/.env"): APP_DIR / ".env",
-        Path("etc/x-ui"): Path("/etc/x-ui"),
-        Path("etc/xray"): Path("/etc/xray"),
-        Path("etc/default/x-ui"): Path(str(_cfg("XUI_DB_ENV_FILE", "/etc/default/x-ui"))),
-        Path("runtime/vapid_private.pem"): Path(str(_cfg("PUSH_VAPID_PRIVATE_KEY_PATH", "/var/lib/vpn-service/vapid_private.pem"))).expanduser(),
-    }
-    for source_relative, destination in targets.items():
-        _restore_tree(snapshot, snapshot / source_relative, destination)
-    unit_destination = Path("/etc/systemd/system")
-    unit_destination.mkdir(parents=True, exist_ok=True)
-    for pattern in ("vpn-service-*", "fargovpn*", "x-ui*", "xray*", "3x-ui*"):
-        for current in unit_destination.glob(pattern):
-            if current.is_file() or current.is_symlink():
-                current.unlink(missing_ok=True)
-    unit_root = snapshot / "etc/systemd/system"
-    if unit_root.is_dir():
-        for unit in unit_root.iterdir():
-            _restore_tree(snapshot, unit, unit_destination / unit.name)
-    subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True, text=True, timeout=60)
+    source = snapshot / "config.py"
+    target = APP_DIR / "config.py"
+    if source.is_file():
+        shutil.copy2(source, target)
+    else:
+        target.unlink(missing_ok=True)
 
 
 def _restore_fargo_config_from_archive(root: Path) -> None:
@@ -1539,7 +1469,7 @@ def restore_lock():
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Другое восстановление уже выполняется") from exc
+            raise MaintenanceBusyError("Другое восстановление уже выполняется") from exc
         try:
             yield
         finally:
@@ -1613,11 +1543,15 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
     unit_states: dict[str, dict[str, bool]] = {}
     xui_current_db = Path(str(getattr(config, "XUI_DB_PATH", "/etc/x-ui/x-ui.db"))).expanduser()
     xui_dsn = ""
+    stop_attempted = False
+    config_restore_attempted = False
+    start_attempted = False
     try:
         if safety_archive:
             validate_archive_file(safety_archive, require_xui=True)
         current_snapshot, unit_states = _snapshot_current_state()
         write_restore_state(job_id="", status="running", phase="snapshot", progress=8, message="Сохранён снимок текущей конфигурации", mode="full")
+        stop_attempted = True
         stop_services(include_xui=True)
 
         restore_application_to_staging(root, manifest, app_staging_dsn)
@@ -1635,6 +1569,7 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
             xui_rollback_file = _sqlite_xui_swap(root, Path(manifest["_xui_artifact"]), xui_current_db, suffix)
         write_restore_state(job_id="", status="running", phase="configuration", progress=58, message="Данные подготовлены; применяются безопасные настройки сервиса", mode="full")
 
+        config_restore_attempted = True
         _restore_fargo_config_from_archive(root)
         _restore_system_configs(root)
         _restore_systemd_units(root)
@@ -1647,9 +1582,9 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
         final_counts = app_counts(target_dsn)
         _verify_imported_counts(staged_counts, final_counts)
         write_restore_state(job_id="", status="running", phase="services", progress=78, message="Конфигурация установлена; запускаются bot/web/3x-ui", mode="full")
+        start_attempted = True
         start_services(full=True)
         verify_live(True, target_config)
-        write_restore_state(job_id="", status="success", phase="done", progress=100, message="Полное восстановление завершено и health-check пройден", mode="full", rollback=False)
 
         # Keep rollback DBs as forensic/manual safety copies for one retention window;
         # do not destroy the only recovery path immediately after success.
@@ -1667,7 +1602,8 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
         write_restore_state(job_id="", status="rolling_back", phase="rollback", progress=85, message="Ошибка восстановления; выполняется полный откат", mode="full", error=str(exc))
         rollback_error: Exception | None = None
         try:
-            stop_services(include_xui=True)
+            if start_attempted:
+                stop_services(include_xui=True)
             if app_rollback_name:
                 _db_swap_rollback(target_dsn, app_rollback_name)
             else:
@@ -1676,9 +1612,10 @@ def _restore_full(root: Path, manifest: dict[str, Any], safety_archive: Path | N
                 _db_swap_rollback(xui_dsn, xui_rollback_name)
             elif xui_rollback_file:
                 _sqlite_xui_rollback(xui_current_db, xui_rollback_file)
-            if current_snapshot:
+            if current_snapshot and config_restore_attempted:
                 _rollback_files(current_snapshot)
-            _restore_service_states(unit_states)
+            if stop_attempted:
+                _restore_service_states(unit_states)
             write_restore_state(job_id="", status="failed", phase="rollback_done", progress=100, message="Восстановление не применено; исходное состояние возвращено", mode="full", error=str(exc), rollback=True)
         except Exception as rollback_exc:  # noqa: BLE001
             rollback_error = rollback_exc
@@ -1710,7 +1647,7 @@ def run_restore(
     mode = str(mode).strip().lower()
     if mode not in {"users-only", "full"}:
         raise RuntimeError("Режим восстановления должен быть users-only или full")
-    with restore_lock():
+    with maintenance_lock(inherit=True), restore_lock():
         write_restore_state(job_id=job_id, status="validating", phase="archive", progress=3, message="Проверка архива перед восстановлением", mode=mode, archive=str(archive))
         with tempfile.TemporaryDirectory(prefix="fargovpn_restore_job_") as temp:
             root = safe_extract(archive, Path(temp))
@@ -1727,11 +1664,16 @@ def run_restore(
                 else:
                     result = _restore_full(root, manifest, safety_archive=safety_archive)
                 result.update({"job_id": job_id, "archive": str(archive), "actor": actor, "safety_archive": str(safety_archive or "")})
-                return result
             except Exception as exc:
                 if mode == "users-only":
                     write_restore_state(job_id=job_id, status="failed", phase="error", progress=100, message="Users-only восстановление не применено", mode=mode, archive=str(archive), error=str(exc), rollback=True)
                 raise
+            write_restore_state(
+                job_id=job_id, status="success", phase="done", progress=100,
+                message="Восстановление завершено и проверено", mode=mode,
+                archive=str(archive), rollback=False, extra={"result": result},
+            )
+            return result
 
 
 def create_safety_only(*, json_mode: bool = False) -> int:

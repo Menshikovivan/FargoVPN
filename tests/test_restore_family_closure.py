@@ -26,6 +26,8 @@ def test_family_fk_closure_is_parent_first():
     order = ns['_users_only_order'](catalog(rows))
     assert order.index('users') < order.index('telegram_profile_links')
     assert 'telegram_profile_link_requests' not in ns['USERS_ONLY_TABLES']
+    assert 'payment_quotes' in order
+    assert 'payment_quotes' not in ns['USERS_ONLY_TABLES']
 
 @pytest.mark.parametrize('row', [('unknown', 'users', 'public', 'public'), ('users','users','other','public'), ('users','users','public','public')])
 def test_unknown_cross_schema_and_cyclic_fks_fail_closed(row):
@@ -49,7 +51,11 @@ def test_rollback_restores_stopped_enabled_unit_without_starting():
     assert ['systemctl','stop','off.service'] in calls
     assert ['systemctl','start','off.service'] not in calls
 
-def test_users_only_staging_skips_archived_security_data_before_column_validation(monkeypatch):
+@pytest.mark.parametrize(('table', 'filter_options'), [
+    ('webauthn_credentials', {'include_tables': ('users',)}),
+    ('payment_quotes', {'exclude_tables': ('payment_quotes',)}),
+])
+def test_restore_skips_excluded_archive_data_before_column_validation(monkeypatch, table, filter_options):
     import sys
     tree = ast.parse((APP / 'restore_manager.py').read_text(encoding='utf-8-sig'))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'restore_dump')
@@ -66,10 +72,10 @@ def test_users_only_staging_skips_archived_security_data_before_column_validatio
     def forbidden(*args): raise AssertionError('Excluded archive security table must not be inspected/imported')
     ns = {'Path':Path, 'raw_dsn':lambda x:x,
           '_clone_live_schema':lambda *args,**kwargs:calls.append(kwargs.get('section','pre-data')),
-          '_copy_data_blocks':lambda dump: [('webauthn_credentials',['unknown_column'],rows())],
+          '_copy_data_blocks':lambda dump: [(table,['unknown_column'],rows())],
           '_table_columns':forbidden}
     monkeypatch.setitem(sys.modules,'psycopg',SimpleNamespace(connect=lambda dsn:Context(),sql=SimpleNamespace()))
     exec(compile(ast.Module(body=[node],type_ignores=[]),'restore_dump','exec'),ns)
-    ns['restore_dump'](Path('synthetic.sql'),'stage',schema_dsn='live',include_tables=('users',))
+    ns['restore_dump'](Path('synthetic.sql'),'stage',schema_dsn='live',**filter_options)
     assert consumed == [True]
     assert calls == ['pre-data','post-data']

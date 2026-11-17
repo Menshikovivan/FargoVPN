@@ -18,17 +18,8 @@ def main() -> int:
     parser.add_argument("--safety-archive", type=Path)
     args = parser.parse_args()
 
-    manager.write_restore_state(
-        job_id=args.job_id,
-        status="queued",
-        phase="worker",
-        progress=1,
-        message="Восстановление передано отдельной systemd-службе",
-        mode=args.mode,
-        archive=str(args.archive.resolve()),
-    )
     try:
-        result = manager.run_restore(
+        manager.run_restore(
             args.archive.resolve(),
             mode=args.mode,
             job_id=args.job_id,
@@ -36,21 +27,14 @@ def main() -> int:
             create_safety=args.safety_archive is None,
             actor=args.actor,
         )
-        manager.write_restore_state(
-            job_id=args.job_id,
-            status="success",
-            phase="done",
-            progress=100,
-            message="Восстановление завершено и проверено",
-            mode=args.mode,
-            archive=str(args.archive.resolve()),
-            rollback=False,
-            extra={"result": result},
-        )
         return 0
     except Exception as exc:  # noqa: BLE001
         detail = f"{type(exc).__name__}: {exc}"
         manager.logger.error("Restore worker failed: %s\n%s", detail, traceback.format_exc())
+        state = manager._read_restore_state_raw()
+        owner = state.get("job_id")
+        if (owner and owner != args.job_id) or (owner == args.job_id and state.get("status") == "failed"):
+            return 1
         manager.write_restore_state(
             job_id=args.job_id,
             status="failed",

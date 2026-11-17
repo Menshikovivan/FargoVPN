@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import db as database_adapter
 
+import json
 import logging
 import re
 import secrets
@@ -17,13 +18,13 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import config
 import referral_rewards
-from user_identity import is_generated_identity_comment, normalize_username
+from user_identity import build_unique_identity_index, is_generated_identity_comment, normalize_username
 from services.xui_api import (
     add_client_sync,
     bind_client_tg_id_sync,
@@ -58,6 +59,9 @@ class PaymentApprovalResult:
     already_processed: bool = False
     referral: dict[str, Any] | None = None
     purchased_days: int | None = None
+
+
+PaymentPanelCheckpoint = Callable[[str, str, int, bool, tuple[int, ...]], None]
 
 
 def clean_username(username: str | None, tg_id: int) -> str:
@@ -349,6 +353,7 @@ def ensure_subscription_sync(
     db_path: str | Path | None = None,
     *,
     trust_username: bool = True,
+    before_write: PaymentPanelCheckpoint | None = None,
 ) -> SubscriptionResult:
     """Extend/create a subscription while serializing concurrent renewals.
 
@@ -357,7 +362,9 @@ def ensure_subscription_sync(
     """
     tg_id = int(tg_id)
     with _subscription_identity_lock_sync(tg_id, db_path):
-        return _ensure_subscription_sync_unlocked(tg_id, username, days, db_path, trust_username=trust_username)
+        return _ensure_subscription_sync_unlocked(
+            tg_id, username, days, db_path, trust_username=trust_username, before_write=before_write,
+        )
 
 
 def _ensure_subscription_sync_unlocked(
@@ -367,6 +374,7 @@ def _ensure_subscription_sync_unlocked(
     db_path: str | Path | None = None,
     *,
     trust_username: bool = True,
+    before_write: PaymentPanelCheckpoint | None = None,
 ) -> SubscriptionResult:
     """Implementation of :func:`ensure_subscription_sync` without the cross-worker lock.
 
@@ -390,7 +398,10 @@ def _ensure_subscription_sync_unlocked(
         email = str(candidate.get("email") or "")
         if int(candidate.get("expiry_time") or 0) <= 0:
             raise ValueError("Бессрочную подписку можно перевести на конечный срок только явным действием администратора")
-        updated = extend_client_sync(email, days, tg_id=tg_id)
+        if before_write is None:
+            updated = extend_client_sync(email, days, tg_id=tg_id)
+        else:
+            updated = extend_client_sync(email, days, tg_id=tg_id, before_write=before_write)
         user = _upsert_user(tg_id, display_name, updated, db_path, allow_seed_username=trust_username)
         return SubscriptionResult(
             tg_id=tg_id,
@@ -434,8 +445,11 @@ def _ensure_subscription_sync_unlocked(
         "flow": "",
         "security": "auto",
     }
+    target_inbounds = inbound_ids_sync()
+    if before_write is not None:
+        before_write(email, client_uuid, expiry, True, tuple(target_inbounds))
     try:
-        add_client_sync(client, inbound_ids_sync())
+        add_client_sync(client, target_inbounds)
         panel_client = {
             "email": email,
             "uuid": client_uuid,
@@ -448,6 +462,10 @@ def _ensure_subscription_sync_unlocked(
         created = True
         recovered = False
     except Exception as error:
+        if before_write is not None:
+            # A timed-out create may already have succeeded. Never resolve it
+            # by adding paid days to a record that might be the same creation.
+            raise
         # The common upgrade failure is an existing 3x-ui client whose local row
         # was lost. Resolve the duplicate and extend it rather than approving a
         # payment without access.
@@ -488,51 +506,95 @@ def _ensure_subscription_sync_unlocked(
 
 
 def repair_panel_client_identities_sync(db_path: str | Path | None = None) -> dict[str, Any]:
-    """Repair visible 3x-ui client names/emails for registered Telegram users.
+    """Repair unambiguous 3x-ui identities and fill empty local panel comments."""
+    from services.xui_api import fill_empty_local_client_comment_sync, update_client_sync
 
-    The bot DB remains authoritative for Telegram identity.  This function only
-    changes client rows through the 3x-ui API and never edits x-ui's SQLite schema.
-    Legacy ``name_123``/numeric records are matched by tgId or old email and are
-    moved to the current ``username+TelegramID`` format.
-    """
-    from services.xui_api import fetch_snapshot_sync, update_client_sync
     with _connect(db_path) as connection:
         rows = [dict(row) for row in connection.execute(
-            "SELECT tg_id,username,email,notes FROM users WHERE tg_id>0 ORDER BY tg_id"
+            "SELECT tg_id,username,email,uuid,notes FROM users WHERE tg_id>0 ORDER BY tg_id"
         ).fetchall()]
+    _, duplicate_local_emails = build_unique_identity_index(rows, "email")
+    _, duplicate_local_uuids = build_unique_identity_index(rows, "uuid")
     snapshot = fetch_snapshot_sync(force=True)
+    if snapshot.get("stale"):
+        raise RuntimeError("Не удалось подтвердить актуальный список клиентов 3x-ui")
     clients = [dict(item) for item in snapshot.get("clients", []) if isinstance(item, dict)]
-    by_email = {str(item.get("email") or "").strip().casefold(): item for item in clients if str(item.get("email") or "").strip()}
-    by_tg = {int(item.get("tg_id") or 0): item for item in clients if int(item.get("tg_id") or 0) > 0}
+    by_email, duplicate_emails = build_unique_identity_index(clients, "email")
+    by_uuid, duplicate_uuids = build_unique_identity_index(clients, "uuid")
+    by_tg, duplicate_tg = build_unique_identity_index(clients, "tg_id")
     result: dict[str, Any] = {"checked": 0, "updated": 0, "unchanged": 0, "missing": 0, "errors": []}
+
     for row in rows:
-        tg_id = int(row.get("tg_id") or 0)
+        tg_id = int(row["tg_id"])
         stored_username = normalize_username(row.get("username"), tg_id) or None
-        panel_name = clean_username(stored_username or row.get("username"), tg_id)
-        manual_comment = str(row.get("notes") or "").strip()[:255] or panel_name
-        desired = panel_email_for(panel_name, tg_id)
-        current_email = str(row.get("email") or "").strip()
-        client = by_tg.get(tg_id) or by_email.get(current_email.casefold()) or by_email.get(desired.casefold())
+        desired = panel_email_for(stored_username or row.get("username"), tg_id)
+        note = str(row.get("notes") or "").strip()[:255]
+        current_email = str(row.get("email") or "").strip().casefold()
+        current_uuid = str(row.get("uuid") or "").strip().casefold()
+        keys = ((current_email, by_email, duplicate_emails), (current_uuid, by_uuid, duplicate_uuids),
+                (str(tg_id), by_tg, duplicate_tg))
         result["checked"] += 1
-        if not client:
-            result["missing"] += 1
-            continue
-        old_email = str(client.get("email") or current_email).strip()
         try:
-            changes: dict[str, Any] = {"comment": manual_comment, "tgId": tg_id}
-            if old_email != desired and desired.casefold() not in by_email:
-                changes["email"] = desired
-            if changes.keys() == {"comment", "tgId"} and old_email == desired:
+            candidates = {id(index[key]): index[key] for key, index, _ in keys if key in index}
+            if (
+                current_email in duplicate_local_emails or current_uuid in duplicate_local_uuids
+                or any(key in duplicates for key, _, duplicates in keys) or len(candidates) > 1
+            ):
+                raise RuntimeError("Неоднозначное совпадение клиента 3x-ui; требуется сверка")
+            if not candidates:
+                result["missing"] += 1
+                continue
+            client = next(iter(candidates.values()))
+            old_email = str(client.get("email") or "").strip()
+            panel_uuid = str(client.get("uuid") or "").strip().casefold()
+            panel_tg_id = int(client.get("tg_id") or 0)
+            if (panel_tg_id > 0 and panel_tg_id != tg_id) or (current_uuid and panel_uuid and current_uuid != panel_uuid):
+                raise RuntimeError("Идентификаторы клиента 3x-ui расходятся; требуется сверка")
+            rename = (
+                old_email.casefold() != desired.casefold()
+                and desired.casefold() not in by_email and desired.casefold() not in duplicate_emails
+            )
+            backfill = bool(note and not str(client.get("comment") or "").strip())
+            if not (rename or panel_tg_id == 0 or backfill):
                 result["unchanged"] += 1
                 continue
+
             record = get_client_record_sync(old_email)
-            update_client_sync(old_email, changes, record=record)
-            with _connect(db_path) as connection:
-                connection.execute("UPDATE users SET email=?,username=?,last_sync_at=CURRENT_TIMESTAMP WHERE tg_id=?", (desired if "email" in changes else old_email, stored_username, tg_id))
-            result["updated"] += 1
-            if "email" in changes:
-                by_email.pop(old_email.casefold(), None)
-                by_email[desired.casefold()] = {**client, "email": desired, "tg_id": tg_id}
+            actual = record["normalized"]
+            if (
+                actual.get("email") != old_email
+                or (panel_uuid and str(actual.get("uuid") or "").casefold() != panel_uuid)
+                or int(actual.get("tg_id") or 0) not in {0, tg_id}
+            ):
+                raise RuntimeError("Карточка 3x-ui изменилась во время проверки; требуется сверка")
+            changes: dict[str, Any] = {}
+            if rename:
+                changes["email"] = desired
+            if "tgId" in record["client"] and int(actual.get("tg_id") or 0) == 0:
+                changes["tgId"] = tg_id
+            if changes:
+                update_client_sync(old_email, changes, record=record)
+                with _connect(db_path) as connection:
+                    connection.execute(
+                        "UPDATE users SET email=?,username=?,last_sync_at=CURRENT_TIMESTAMP WHERE tg_id=?",
+                        (changes.get("email", old_email), stored_username, tg_id),
+                    )
+                if rename:
+                    by_email.pop(old_email.casefold(), None)
+                    by_email[desired.casefold()] = client
+                    client["email"] = desired
+                if "tgId" in changes:
+                    by_tg[str(tg_id)] = client
+                    client["tg_id"] = tg_id
+                result["updated"] += 1
+
+            comment_filled = False
+            if backfill and not str(actual.get("comment") or "").strip():
+                comment_filled = fill_empty_local_client_comment_sync(changes.get("email", old_email), note)
+                if comment_filled:
+                    client["comment"] = note
+            if not changes:
+                result["updated" if comment_filled else "unchanged"] += 1
         except Exception as error:
             result["errors"].append(f"{tg_id}: {str(error)[:500]}")
     return result
@@ -613,6 +675,8 @@ def approve_payment_sync(
     processed_by: str,
     days: int = 30,
     db_path: str | Path | None = None,
+    *,
+    accept_original_quote: bool = False,
 ) -> PaymentApprovalResult:
     """Atomically claim a receipt and activate it exactly once per claim.
 
@@ -639,11 +703,19 @@ def approve_payment_sync(
             current_amount = (max(0, int(owner_row[0])) if owner_row and owner_row[0] is not None else
                               max(0, int(round(float(getattr(config, "PAYMENT_PRICE", 0) or 0)))) * (1 + int(count[0] or 0)))
             quoted_amount = int(saved_quote.get("expected_amount") if saved_quote.get("expected_amount") is not None else saved_quote.get("amount") or 0)
-            if current_owner != quoted_owner or not owner_row or current_amount != quoted_amount:
+            payer = int(saved_quote.get("payer_tg_id") or quoted_owner)
+            payer_mapping = connection.execute(
+                "SELECT profile_tg_id FROM telegram_profile_links WHERE telegram_id=?", (payer,),
+            ).fetchone()
+            payer_owner = int(payer_mapping[0]) if payer_mapping else payer
+            needs_review = (bool(saved_quote.get("quote_needs_review")) or
+                            payer_owner != quoted_owner or current_amount != quoted_amount)
+            manual_accept = accept_original_quote and not str(processed_by).startswith("ocr:")
+            if current_owner != quoted_owner or not owner_row or (needs_review and not manual_accept):
                 message = ("С момента заявки изменился владелец или стоимость семейного профиля. "
-                           "Доступ не выдавался; требуется ручная сверка. Верните прежний состав/цену "
-                           "или оформите новую корректную оплату; платёж не перенесён другому профилю.")
-                connection.execute("UPDATE payments SET last_error=? WHERE id=? AND (status='pending' OR status IS NULL)", (message, payment_id))
+                           "Доступ не выдавался; требуется ручная сверка чека и исходного профиля в веб-панели. "
+                           "Повторный перевод не требуется.")
+                connection.execute("UPDATE payments SET last_error=?,quote_needs_review=1 WHERE id=? AND (status='pending' OR status IS NULL)", (message, payment_id))
                 return PaymentApprovalResult(False, message)
             from types import SimpleNamespace
             from services.receipt_ocr import find_duplicate_receipt, lock_receipt_fingerprints
@@ -663,7 +735,7 @@ def approve_payment_sync(
             """
             UPDATE payments
                SET status='processing',processed_at=CURRENT_TIMESTAMP,
-                   processed_by=?,last_error=NULL
+                   processed_by=?,last_error=NULL,activation_claim_v2=1,activation_plan=NULL
              WHERE id=? AND (status='pending' OR status IS NULL)
          RETURNING *
             """,
@@ -684,7 +756,7 @@ def approve_payment_sync(
             return PaymentApprovalResult(
                 False,
                 "Платёж уже обрабатывается или требует сверки после ошибки 3x-ui. "
-                "Проверьте срок клиента и сбросьте обработку в веб-панели только после сверки.",
+                "Проверьте запись в разделе оплат веб-панели.",
             )
         elif status == "declined":
             return PaymentApprovalResult(False, "Платёж уже отклонён; создайте новую заявку или верните статус в ожидание")
@@ -706,12 +778,29 @@ def approve_payment_sync(
             purchased_days=int(payment.get("purchased_days") or days),
         )
 
+    def remember_activation(email: str, uuid_value: str, expiry: int, created: bool, inbounds: tuple[int, ...]) -> None:
+        if not email or not uuid_value or expiry <= 0:
+            raise RuntimeError("Не удалось зафиксировать ожидаемый срок и личность клиента")
+        plan = json.dumps({
+            "email": email, "uuid": uuid_value, "expiry": expiry,
+            "created": created, "inbounds": list(inbounds),
+        })
+        with _connect(db_path) as connection:
+            result = connection.execute(
+                """UPDATE payments SET activation_plan=?
+                   WHERE id=? AND status='processing' AND processed_by=? AND activation_plan IS NULL""",
+                (plan, payment_id, claim_id),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Платёж потерял право на изменение 3x-ui")
+
     try:
         result = ensure_subscription_sync(
             int(payment["tg_id"]),
             str(payment.get("username") or ""),
             days=int(payment.get("purchased_days") or days),
             db_path=db_path,
+            before_write=remember_activation,
         )
     except Exception as error:
         logger.exception("Не удалось подтвердить платёж %s", payment_id)
@@ -740,6 +829,9 @@ def approve_payment_sync(
             (str(processed_by), int(str(processed_by).startswith("ocr:")), payment_id, claim_id),
         )
         if cursor.rowcount != 1:
+            current = connection.execute("SELECT status FROM payments WHERE id=?", (payment_id,)).fetchone()
+            if current and current[0] == "approved":
+                return PaymentApprovalResult(True, "Платёж уже был завершён при сверке", already_processed=True)
             raise RuntimeError("Платёж потерял атомарный claim до фиксации результата")
     action = "создана" if result.created else "продлена"
     referral_result = referral_rewards.apply_referral_reward(
@@ -793,25 +885,138 @@ def decline_payment_sync(
         raise RuntimeError(f"Платёж нельзя отклонить из статуса {status}")
 
 
+def _payment_ready_for_reconciliation(payment: dict[str, Any]) -> bool:
+    if payment.get("last_error"):
+        return True
+    try:
+        started = datetime.fromisoformat(str(payment["processed_at"]))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return time.time() - started.timestamp() >= 300
+    except (KeyError, ValueError):
+        return False
+
+
+def finalize_payment_processing_sync(
+    payment_id: int,
+    processed_by: str,
+    db_path: str | Path | None = None,
+    *,
+    verified_legacy_expiry: int | None = None,
+) -> PaymentApprovalResult:
+    """Record an already-applied activation after verifying its exact outcome."""
+    payment_id = int(payment_id)
+    with _connect(db_path) as connection:
+        row = connection.execute("SELECT tg_id FROM payments WHERE id=?", (payment_id,)).fetchone()
+    if not row:
+        raise LookupError("Платёж не найден")
+    owner = int(row[0])
+    with _subscription_identity_lock_sync(owner, db_path):
+        with _connect(db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM payments WHERE id=? AND tg_id=?", (payment_id, owner),
+            ).fetchone()
+        if not row:
+            raise RuntimeError("Получатель платежа изменился. Обновите страницу и повторите сверку")
+        payment = dict(row)
+        if payment.get("status") == "approved":
+            return PaymentApprovalResult(True, "Платёж уже подтверждён", already_processed=True)
+        if payment.get("status") != "processing" or not _payment_ready_for_reconciliation(payment):
+            raise RuntimeError("Обработка ещё выполняется. Обновите страницу через несколько минут")
+        plan_raw = payment.get("activation_plan")
+        legacy = plan_raw is None and not payment.get("activation_claim_v2")
+        if legacy:
+            local = get_user_by_tg_id(owner, db_path) or {}
+            if not verified_legacy_expiry or not local.get("email") or not local.get("uuid"):
+                raise RuntimeError("Укажите подтверждённый срок и проверьте привязку клиента")
+            plan = {"email": local["email"], "uuid": local["uuid"],
+                    "expiry": int(verified_legacy_expiry), "created": False, "inbounds": []}
+        elif plan_raw:
+            plan = json.loads(plan_raw)
+        else:
+            raise RuntimeError("Изменение срока в 3x-ui ещё не начиналось. Верните платёж в очередь")
+        record = get_client_record_sync(plan["email"])
+        client = record["normalized"]
+        actual_expiry = int(client.get("expiry_time") or 0)
+        expiry_matches = actual_expiry == plan["expiry"]
+        if legacy:
+            expiry_matches = actual_expiry > 0 and actual_expiry // 1000 == plan["expiry"] // 1000
+        if (str(client.get("email") or "").casefold() != plan["email"].casefold()
+                or str(client.get("uuid") or "").casefold() != plan["uuid"].casefold()
+                or not expiry_matches
+                or not client.get("enable")
+                or not set(plan["inbounds"]).issubset(set(record["inbound_ids"]))):
+            raise RuntimeError("3x-ui не подтвердила ожидаемый срок, клиента или его подключения")
+        current = _upsert_user(owner, clean_username(payment.get("username"), owner), client, db_path)
+        with _connect(db_path) as connection:
+            result = connection.execute(
+                """UPDATE payments SET status='approved',processed_at=CURRENT_TIMESTAMP,
+                   processed_by=?,last_error=NULL,auto_approved=0
+                   WHERE id=? AND tg_id=? AND status='processing' AND processed_by IS NOT DISTINCT FROM ? AND activation_plan IS NOT DISTINCT FROM ?""",
+                (str(processed_by), payment_id, owner, payment["processed_by"], plan_raw),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Платёж изменился во время сверки")
+    subscription = SubscriptionResult(
+        owner, str(current.get("username") or ""), plan["email"], plan["uuid"],
+        str(client.get("sub_id") or ""), actual_expiry, bool(plan["created"]),
+    )
+    referral_result = referral_rewards.apply_referral_reward(owner, payment_id=payment_id, db_path=db_path)
+    return PaymentApprovalResult(True, "Срок подтверждён по данным 3x-ui", subscription=subscription,
+                                 referral=referral_result, purchased_days=payment.get("purchased_days"))
+
+
+def close_unapplied_payment_sync(
+    payment_id: int,
+    processed_by: str,
+    db_path: str | Path | None = None,
+) -> None:
+    """Close an unresolved payment after the administrator settles it manually."""
+    payment_id = int(payment_id)
+    with _connect(db_path) as connection:
+        match = connection.execute("SELECT tg_id FROM payments WHERE id=?", (payment_id,)).fetchone()
+    if not match:
+        raise LookupError("Платёж не найден")
+    owner = int(match[0])
+    with _subscription_identity_lock_sync(owner, db_path):
+        with _connect(db_path) as connection:
+            row = connection.execute("SELECT * FROM payments WHERE id=? AND tg_id=?", (payment_id, owner)).fetchone()
+            if not row or row["status"] != "processing" or not _payment_ready_for_reconciliation(dict(row)):
+                raise RuntimeError("Платёж не ожидает ручной сверки")
+            result = connection.execute(
+                """UPDATE payments SET status='declined',processed_at=CURRENT_TIMESTAMP,
+                       processed_by=?,last_error=?
+                   WHERE id=? AND tg_id=? AND status='processing' AND processed_by IS NOT DISTINCT FROM ?""",
+                (str(processed_by), "Закрыт администратором после ручной сверки; срок не изменялся",
+                 payment_id, owner, row["processed_by"]),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Платёж изменился во время сверки")
+
+
 def reset_payment_processing_sync(
     payment_id: int,
     processed_by: str,
     db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Return an ambiguous payment claim to manual review after operator reconciliation."""
+    """Retry only when the operation could not have reached the panel."""
+    payment_id = int(payment_id)
     with _connect(db_path) as connection:
-        row = connection.execute(
-            """
-            UPDATE payments
-               SET status='pending',processed_at=NULL,processed_by=NULL,
-                   last_error=?
-             WHERE id=? AND status='processing'
-         RETURNING *
-            """,
-            (f"Сброшено после ручной сверки: {str(processed_by)[:200]}", int(payment_id)),
-        ).fetchone()
+        payment = connection.execute("SELECT tg_id FROM payments WHERE id=?", (payment_id,)).fetchone()
+    if not payment:
+        raise LookupError("Платёж не найден")
+    owner = int(payment[0])
+    with _subscription_identity_lock_sync(owner, db_path):
+        with _connect(db_path) as connection:
+            row = connection.execute(
+                """UPDATE payments SET status='pending',processed_at=NULL,processed_by=NULL,last_error=?
+                    WHERE id=? AND tg_id=? AND status='processing'
+                      AND activation_claim_v2=1 AND activation_plan IS NULL
+                RETURNING *""",
+                (f"Сброшено до отправки в 3x-ui: {str(processed_by)[:200]}", payment_id, owner),
+            ).fetchone()
     if not row:
-        raise RuntimeError("Сброс доступен только для платежа в обработке")
+        raise RuntimeError("Повтор запрещён: запрос мог уже изменить срок. Сверьте платёж и срок в 3x-ui")
     return dict(row)
 
 

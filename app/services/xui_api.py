@@ -1,7 +1,8 @@
 """3x-ui API access, normalization and live snapshot synchronization.
 
 Traffic, expiry and last-online values from 3x-ui are authoritative. The application
-uses PostgreSQL for its own data; legacy 3x-ui SQLite is accessed read-only for discovery when needed.
+uses PostgreSQL for its own data. The explicit comment repair can backfill an empty
+comment in the verified local 3x-ui database without rewriting its client settings.
 """
 from __future__ import annotations
 
@@ -17,9 +18,10 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -312,11 +314,13 @@ def _editable_client_payload(
         if key in source:
             payload[key] = _int(source.get(key))
 
-    if "keepAlive" in source:
-        # 3x-ui 3.11 returns an AmneziaWG range as a string and scalar
-        # values as numbers. Keep the original range through a full update.
-        value = source.get("keepAlive")
-        payload["keepAlive"] = value if isinstance(value, str) and "-" in value else _int(value)
+    keep_alive = source.get("keepAlive")
+    # Omission preserves the current peer setting. Zero disables it, so empty
+    # responses cannot be coerced to zero.
+    if isinstance(keep_alive, int) and not isinstance(keep_alive, bool):
+        payload["keepAlive"] = keep_alive
+    elif isinstance(keep_alive, str) and keep_alive:
+        payload["keepAlive"] = int(keep_alive) if keep_alive.isascii() and keep_alive.isdigit() else keep_alive
 
     if "enable" in source:
         payload["enable"] = _bool(source.get("enable"), True)
@@ -395,14 +399,21 @@ def _has_expiry_value(raw: dict[str, Any]) -> bool:
     return False
 
 
-def _validated_expiry(value: Any) -> int:
-    """Unknown, malformed and unsupported delayed-activation dates are not unlimited."""
+def _parsed_expiry(value: Any) -> int:
+    """Validate the raw value without changing its units on a round trip."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError('3x-ui вернула некорректный срок клиента; синхронизация отменена')
     text = str(value).strip()
     if not text or not text.isascii() or not text.isdigit():
         raise ValueError('3x-ui вернула некорректный или отложенный срок; требуется сверка')
-    return normalize_timestamp_ms(int(text))
+    result = int(text)
+    if result > 2**63 - 1:
+        raise ValueError('3x-ui вернула срок вне допустимого диапазона')
+    return result
+
+
+def _validated_expiry(value: Any) -> int:
+    return normalize_timestamp_ms(_parsed_expiry(value))
 
 
 def normalize_client(raw: dict[str, Any]) -> dict[str, Any]:
@@ -688,6 +699,8 @@ def request_json_sync(
     path: str,
     payload: dict[str, Any] | None = None,
     timeout: float | None = None,
+    *,
+    local_base_url: str | None = None,
 ) -> dict[str, Any]:
     """Perform an authenticated 3x-ui request with bounded concurrency and safe retries."""
     method = method.upper()
@@ -698,7 +711,13 @@ def request_json_sync(
     configured_timeout = max(3.0, float(getattr(config, "XUI_REQUEST_TIMEOUT_SECONDS", 12.0)))
     timeout_value = max(3.0, min(float(timeout if timeout is not None else configured_timeout), 60.0))
     headers = _headers()
-    candidates = _request_url_candidates(path)
+    if local_base_url is None:
+        candidates = _request_url_candidates(path)
+    else:
+        parsed_base = urlsplit(local_base_url)
+        if parsed_base.scheme not in {"http", "https"} or parsed_base.hostname not in {"127.0.0.1", "::1"}:
+            raise ValueError("Точечное заполнение комментария требует локальную 3x-ui")
+        candidates = [local_base_url.rstrip("/") + "/" + path.lstrip("/")]
     retry_methods = {"GET", "HEAD"}
     retry_statuses = {429, 502, 503, 504}
     retry_attempts = 3 if method in retry_methods else 1
@@ -2055,12 +2074,16 @@ def remove_client_hwid_sync(email: str, device_id: int) -> None:
         raise RuntimeError('Не удалось удалить запись устройства в 3x-ui')
 
 
-def get_client_record_sync(email: str) -> dict[str, Any]:
+def get_client_record_sync(email: str, *, local_base_url: str | None = None) -> dict[str, Any]:
     """Return the raw ClientRecord, typed update payload and attachments."""
     clean_email = str(email or "").strip()
     if not clean_email:
         raise ValueError("Email клиента не указан")
-    data = request_json_sync("GET", f"panel/api/clients/get/{quote(clean_email, safe='')}")
+    path = f"panel/api/clients/get/{quote(clean_email, safe='')}"
+    if local_base_url is None:
+        data = request_json_sync("GET", path)
+    else:
+        data = request_json_sync("GET", path, local_base_url=local_base_url)
     obj = data.get("obj")
     if not isinstance(obj, dict):
         raise RuntimeError(f"Клиент {clean_email} не найден в 3x-ui")
@@ -2074,45 +2097,162 @@ def get_client_record_sync(email: str) -> dict[str, Any]:
     if not isinstance(inbound_ids, list):
         inbound_ids = raw_client.get("inboundIds") if isinstance(raw_client.get("inboundIds"), list) else []
 
-    normalized = normalize_client({"client": raw_client, "inboundIds": inbound_ids})
+    source = {**obj, "client": raw_client, "inboundIds": inbound_ids}
+    if "expiryTime" in raw_client:
+        source["expiryTime"] = raw_client["expiryTime"]
+    normalized = normalize_client(source)
     editable = _editable_client_payload(raw_client, fallback_id=str(normalized.get("uuid") or ""))
-    return {
+    record = {
         "client": raw_client,
         "editable_client": editable,
         "inbound_ids": [_int(value) for value in inbound_ids],
         "normalized": normalized,
         "raw": obj,
     }
+    if _has_expiry_value(source):
+        editable["expiryTime"] = _client_record_expiry(record)
+    else:
+        normalized["expiry_time"] = None
+    return record
+
+
+def _client_record_expiry(record: dict[str, Any]) -> int:
+    client = record.get("client")
+    client = client if isinstance(client, dict) else {}
+    source = record.get("raw")
+    source = source if isinstance(source, dict) else {}
+    for candidate in (client, source, source.get("traffic"), client.get("traffic")):
+        if isinstance(candidate, dict) and "expiryTime" in candidate:
+            return _parsed_expiry(candidate["expiryTime"])
+    raise ValueError("3x-ui не вернула срок клиента; изменение отменено")
+
+
+def require_client_record_expiry(record: dict[str, Any]) -> int:
+    """Return an explicit, validated panel expiry, including a legitimate zero."""
+    return normalize_timestamp_ms(_client_record_expiry(record))
+
+
+def _fill_empty_comment_on_connection(
+    connection: Any, record: dict[str, Any], comment: str, *, postgres: bool
+) -> bool:
+    client = record["client"]
+    param = "%s" if postgres else "?"
+    lock = " FOR UPDATE" if postgres else ""
+    row_id = _int(client.get("id"))
+    row = connection.execute(
+        f"SELECT email, uuid, sub_id, tg_id, comment FROM clients WHERE id={param}{lock}", (row_id,)
+    ).fetchone()
+    uuid = str(client.get("uuid") or "")
+    sub_id = str(client.get("subId") or "")
+    if (
+        row_id <= 0 or not (uuid or sub_id) or "tgId" not in client or row is None
+        or (row[0], str(row[1] or ""), str(row[2] or ""), _int(row[3]))
+        != (client["email"], uuid, sub_id, _int(client["tgId"]))
+    ):
+        raise RuntimeError("Локальная запись 3x-ui не подтверждена через API")
+    if str(row[4] or "").strip():
+        return False
+
+    # A blank central comment may coexist with a manual comment in an
+    # inbound. Leave that case for the administrator instead of hiding it.
+    inbounds = connection.execute(
+        f"""SELECT i.id, i.settings FROM inbounds i
+            JOIN client_inbounds ci ON ci.inbound_id=i.id
+            WHERE ci.client_id={param}""" + (" FOR SHARE OF i" if postgres else ""), (row_id,)
+    ).fetchall()
+    if {int(inbound_id) for inbound_id, _ in inbounds} != set(record["inbound_ids"]):
+        raise RuntimeError("Список подключений изменился; требуется сверка")
+    for _, settings in inbounds:
+        document = json.loads(settings)
+        clients = document.get("clients") if isinstance(document, dict) else None
+        if not isinstance(clients, list):
+            raise RuntimeError("Не удалось проверить комментарий в настройках подключения")
+        matches = [entry for entry in clients if isinstance(entry, dict) and entry.get("email") == client["email"]]
+        if len(matches) != 1:
+            raise RuntimeError("Не удалось однозначно подтвердить клиента в подключении")
+        inbound_comment = str(matches[0].get("comment") or "").strip()
+        if inbound_comment and inbound_comment != comment:
+            raise RuntimeError("В подключении уже есть другой комментарий; требуется сверка")
+
+    current_comment = row[4]
+    result = connection.execute(
+        f"""UPDATE clients SET comment={param} WHERE id={param} AND email={param}
+            AND COALESCE(comment, '')={param}""",
+        (comment, row_id, client["email"], current_comment or ""),
+    )
+    if result.rowcount != 1:
+        raise RuntimeError("Комментарий изменился во время проверки; повторите сверку")
+    return True
+
+
+def fill_empty_local_client_comment_sync(email: str, comment: str) -> bool:
+    """Fill only the central client comment on a verified local panel.
+
+    The full-row API also rewrites inbound settings, so a comment-only repair
+    uses a narrowly scoped local database update instead.
+    """
+    clean_email = str(email or "").strip()
+    clean_comment = str(comment or "").strip()
+    if not clean_email or not clean_comment or len(clean_comment) > 255:
+        raise ValueError("Укажите клиента и комментарий до 255 символов")
+    base = _db_xui_internal_base_url()
+    if not base or base != _base_url():
+        raise RuntimeError("Автозаполнение доступно только для подтверждённой локальной 3x-ui")
+    record = get_client_record_sync(clean_email, local_base_url=base)
+    if record["client"].get("email") != clean_email:
+        raise RuntimeError("3x-ui вернула другого клиента; требуется сверка")
+    if str(record["client"].get("comment") or "").strip():
+        return False
+
+    dsn = _xui_postgres_dsn()
+    if dsn:
+        if dsn.startswith("postgresql+psycopg://"):
+            dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+        with psycopg.connect(dsn, connect_timeout=3, options="-c lock_timeout=3000 -c statement_timeout=5000") as connection:
+            changed = _fill_empty_comment_on_connection(connection, record, clean_comment, postgres=True)
+    else:
+        path = Path(str(getattr(config, "XUI_DB_PATH", "/etc/x-ui/x-ui.db") or "/etc/x-ui/x-ui.db")).expanduser().resolve()
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=3)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = _fill_empty_comment_on_connection(connection, record, clean_comment, postgres=False)
+    if changed:
+        invalidate_snapshot_cache()
+    return changed
 
 
 def update_client_sync(
     email: str,
     changes: dict[str, Any],
     record: dict[str, Any] | None = None,
+    *,
+    before_send: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Replace a 3x-ui client row while preserving every editable field."""
     record = record or get_client_record_sync(email)
     fallback_id = str(record.get("normalized", {}).get("uuid") or "")
     base = record.get("editable_client")
     client = dict(base) if isinstance(base, dict) else _editable_client_payload(record.get("client"), fallback_id)
+    original_expiry = _client_record_expiry(record)
     client.update(changes)
+    client["expiryTime"] = _parsed_expiry(changes["expiryTime"]) if "expiryTime" in changes else original_expiry
     client = _editable_client_payload(client, fallback_id=fallback_id)
     client["email"] = str(client.get("email") or email).strip()
+    raw = record.get("raw") or {}
+    tunnel_addresses = raw.get("tunnelAllowedIPs")
+    if isinstance(tunnel_addresses, dict) and len(tunnel_addresses) > 1:
+        # 3x-ui preserves per-inbound addresses/keys and keepAlive when the
+        # multi-tunnel update supplies no shared peer overrides.
+        for key in ("allowedIPs", "privateKey", "publicKey", "preSharedKey", "keepAlive", "forwardedPorts"):
+            if key not in changes:
+                client.pop(key, None)
 
-    defaults = {
-        "comment": "VPN Service Platform",
-        "enable": True,
-        "expiryTime": 0,
-        "limitIp": 0,
-        "reset": 0,
-        "security": "auto",
-        "subId": "",
-        "tgId": 0,
-        "totalGB": 0,
-    }
-    for key, value in defaults.items():
-        client.setdefault(key, value)
+    required = {"comment", "enable", "expiryTime", "limitIp", "reset", "security", "subId", "tgId", "totalGB"}
+    missing = required - client.keys()
+    if missing:
+        raise ValueError("3x-ui вернула неполную карточку; изменение отменено: " + ", ".join(sorted(missing)))
 
+    if before_send is not None:
+        before_send(client)
     result = request_json_sync(
         "POST",
         f"panel/api/clients/update/{quote(str(email), safe='')}",
@@ -2127,6 +2267,8 @@ def extend_client_sync(
     days: int,
     tg_id: int | None = None,
     display_name: str | None = None,
+    *,
+    before_write: Callable[[str, str, int, bool, tuple[int, ...]], None] | None = None,
 ) -> dict[str, Any]:
     """Extend from the later of now/current expiry and re-enable the client.
 
@@ -2154,6 +2296,21 @@ def extend_client_sync(
         # be ASCII-only or include a Telegram-ID suffix.
         changes["comment"] = clean_display_name
     client_key = str(changes.get("email") or email).strip()
+    checkpoint_saved = False
+    normalized_client = record["normalized"]
+    client_uuid = str(normalized_client.get("uuid") or "")
+    checked_inbounds = tuple(record.get("inbound_ids") or ())
+
+    def checkpoint_before_send(payload: dict[str, Any]) -> None:
+        nonlocal checkpoint_saved
+        if before_write is None:
+            return
+        if not client_uuid or str(payload.get("id") or "").casefold() != client_uuid.casefold():
+            raise ValueError("UUID клиента изменился; продление остановлено")
+        if not checkpoint_saved:
+            before_write(str(payload["email"]), client_uuid, int(payload["expiryTime"]), False, checked_inbounds)
+            checkpoint_saved = True
+
     last_error: Exception | None = None
 
     # Updating a client by email is a full-row replacement in 3x-ui.  The
@@ -2162,7 +2319,8 @@ def extend_client_sync(
     # followed by a transient GET failure from double-extending the client.
     for cycle in range(2):
         try:
-            update_client_sync(client_key, changes, record=record if cycle == 0 else None)
+            write_args = {"before_send": checkpoint_before_send} if before_write else {}
+            update_client_sync(client_key, changes, record=record if cycle == 0 else None, **write_args)
         except Exception as error:
             last_error = error
             logger.warning(
@@ -2246,9 +2404,7 @@ def change_client_days_sync(
     normalized = dict(record.get("normalized") or {})
     if int(record.get('client', {}).get('expiryTime') or 0) < 0:
         raise ValueError('Подписка ожидает первого подключения; изменение срока требует ручной сверки')
-    current = normalize_timestamp_ms(
-        record.get("client", {}).get("expiryTime", normalized.get("expiry_time", 0))
-    )
+    current = require_client_record_expiry(record)
     now_ms = int(time.time() * 1000)
     if days_delta > 0:
         base = max(now_ms, current if current > 0 else now_ms)
@@ -2285,9 +2441,9 @@ def change_client_days_sync(
                 updated = get_client_record_sync(email)
                 result = dict(updated["normalized"])
                 actual_client = updated.get("client") if isinstance(updated.get("client"), dict) else {}
-                actual_expiry = normalize_timestamp_ms(actual_client.get("expiryTime", result.get("expiry_time", 0)))
+                actual_expiry = require_client_record_expiry(updated)
                 actual_enable = _bool(actual_client.get("enable", result.get("enable", False)), False)
-                acceptable = actual_expiry == expiry and actual_enable == enable
+                acceptable = _client_record_expiry(updated) == expiry and actual_enable == enable
                 if acceptable:
                     result["expiry_time"] = actual_expiry
                     result["enable"] = actual_enable

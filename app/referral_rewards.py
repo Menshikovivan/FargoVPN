@@ -18,7 +18,7 @@ from typing import Any
 
 import config
 from init_db import migrate as migrate_database
-from services.xui_api import get_client_record_sync, update_client_sync
+from services.xui_api import get_client_record_sync, require_client_record_expiry, update_client_sync
 
 logger = logging.getLogger(__name__)
 REWARD_DAYS = 10
@@ -313,8 +313,7 @@ def _apply_referral_reward_unlocked(
 
     try:
         record = get_client_record_sync(email)
-        client = record.get("client") or {}
-        current_expiry = int(client.get("expiryTime") or record.get("normalized", {}).get("expiry_time") or 0)
+        current_expiry = require_client_record_expiry(record)
         if current_expiry <= 0:
             with _connect(db_path) as connection:
                 cur = connection.execute(
@@ -353,8 +352,7 @@ def _apply_referral_reward_unlocked(
         # exceeding the target means the ten-day benefit is already economically
         # satisfied, so mark it granted without overwriting the newer expiry.
         latest = get_client_record_sync(email)
-        latest_client = latest.get("client") or {}
-        latest_expiry = int(latest_client.get("expiryTime") or latest.get("normalized", {}).get("expiry_time") or 0)
+        latest_expiry = require_client_record_expiry(latest)
         if latest_expiry <= 0:
             final_expiry = 0
             with _connect(db_path) as connection:
@@ -388,8 +386,7 @@ def _apply_referral_reward_unlocked(
         else:
             update_client_sync(email, {"expiryTime": target_expiry, "enable": True}, record=latest)
             final_record = get_client_record_sync(email)
-            final_client = final_record.get("client") or {}
-            final_expiry = int(final_client.get("expiryTime") or final_record.get("normalized", {}).get("expiry_time") or 0)
+            final_expiry = require_client_record_expiry(final_record)
             if final_expiry < target_expiry:
                 raise RuntimeError(f"3x-ui не подтвердила целевой срок {target_expiry}; получено {final_expiry}")
 

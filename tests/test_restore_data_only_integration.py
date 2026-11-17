@@ -48,6 +48,7 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
             conn.execute('CREATE TABLE telegram_profile_links(telegram_id BIGINT PRIMARY KEY, profile_tg_id BIGINT REFERENCES users(id))')
             for table in manager.USERS_ONLY_REVOKE_TABLES:
                 conn.execute(sql.SQL('CREATE TABLE {} (id BIGINT PRIMARY KEY)').format(sql.Identifier(table)))
+            conn.execute("INSERT INTO payment_quotes(id) VALUES (41)")
             conn.execute("INSERT INTO referral_rewards(id,value) VALUES (7,'reward')")
             conn.execute('INSERT INTO users(id,name,nullable) VALUES (%s,%s,%s)', (41, 'Р®РЅРёРєРѕРґ\\.\nline\tTAB \\N', None))
             conn.execute('INSERT INTO payments(id,user_id,note) VALUES (4,41,%s)', ('payment text',))
@@ -58,11 +59,15 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
         payload = ('\\! touch ' + str(sentinel) + '\nDROP TABLE public.users CASCADE;\nSELECT pg_write_file(\'' + str(sentinel) + "', 'bad');\n").encode()
         dump.write_bytes(payload + original + payload)
         restored = stage()
-        manager.restore_dump(dump, restored, schema_dsn=source_dsn)
+        with patch.object(manager, "_cfg", return_value=source_dsn), patch.object(
+            manager, "find_application_artifact", return_value=("PostgreSQL", dump)
+        ):
+            manager.restore_application_to_staging(tmp_path, {}, restored)
         assert not sentinel.exists()
         with psycopg.connect(restored) as conn:
             assert conn.execute('SELECT id,name,nullable FROM users').fetchall() == [(41, 'Р®РЅРёРєРѕРґ\\.\nline\tTAB \\N', None)]
             assert conn.execute('SELECT user_id,note FROM payments').fetchall() == [(41, 'payment text')]
+            assert conn.execute('SELECT id FROM payment_quotes').fetchall() == []
             assert conn.execute("INSERT INTO users(name) VALUES ('next') RETURNING id").fetchone()[0] == 42
             with pytest.raises(psycopg.errors.ForeignKeyViolation):
                 conn.execute("INSERT INTO payments(user_id) VALUES (999)")
@@ -81,6 +86,7 @@ def test_real_postgres_copy_restore_and_no_code_execution(tmp_path):
         first_result = manager._selected_restore_with_snapshot(source_dsn, restored, {})
         with psycopg.connect(source_dsn) as conn:
             assert conn.execute('SELECT user_id,note FROM payments').fetchall() == [(41, 'payment text')]
+            assert conn.execute('SELECT id FROM payment_quotes').fetchall() == []
             assert conn.execute("SELECT COUNT(*) FROM pg_constraint WHERE conname='payments_user_id_fkey'").fetchone()[0] == 1
             conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(first_result['snapshot_schema'])))
             conn.execute('CREATE TABLE external_user_reference(user_id BIGINT REFERENCES users(id))')

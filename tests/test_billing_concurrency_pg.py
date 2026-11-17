@@ -192,7 +192,7 @@ def test_purchased_duration_snapshot_used_on_approval(app,sample,monkeypatch):
     ids,sql=sample;s=app['subscriptions'];submission=app['payment_submission']
     pid,_=submission.submit_receipt_sync(ids[0],'synthetic','file',200,'test-'+secrets.token_hex(16),'synthetic',purchased_days=45)
     seen=[]
-    def provision(tg,username,days,db_path):
+    def provision(tg,username,days,db_path,**_):
         seen.append(days)
         return s.SubscriptionResult(tg,username,'synthetic','uuid','sub',123456,True)
     monkeypatch.setattr(s,'ensure_subscription_sync',provision)
@@ -250,7 +250,7 @@ def test_pending_payment_then_family_join_stays_pending_for_review(app,sample,mo
     token=b.create_profile_link_request_sync(owner)
     assert b.approve_profile_link_sync(token,member)==owner
     calls=[]
-    def provision(tg,username,days,db_path):
+    def provision(tg,username,days,db_path,**_):
         calls.append(tg)
         return s.SubscriptionResult(tg,username,'synthetic','uuid','sub',123456,True)
     monkeypatch.setattr(s,'ensure_subscription_sync',provision)
@@ -268,7 +268,7 @@ def test_family_amount_change_after_receipt_stays_pending_for_review(app,sample,
     b.approve_profile_link_sync(b.create_profile_link_request_sync(owner),member)
     assert b.expected_payment_amount(owner)==400
     calls=[]
-    def provision(tg,username,days,db_path):
+    def provision(tg,username,days,db_path,**_):
         calls.append(tg)
         return s.SubscriptionResult(tg,username,'synthetic','uuid','sub',123456,True)
     monkeypatch.setattr(s,'ensure_subscription_sync',provision)
@@ -283,7 +283,7 @@ def test_family_join_cannot_race_in_flight_activation(app,sample,monkeypatch):
     pid,_=app['payment_submission'].submit_receipt_sync(member,'synthetic','file',200,'test-'+secrets.token_hex(16),'synthetic')
     token=b.create_profile_link_request_sync(owner)
     started=threading.Event();release=threading.Event()
-    def provision(tg,username,days,db_path):
+    def provision(tg,username,days,db_path,**_):
         started.set();assert release.wait(15)
         return s.SubscriptionResult(tg,username,'synthetic','uuid','sub',123456,True)
     monkeypatch.setattr(s,'ensure_subscription_sync',provision)
@@ -297,3 +297,108 @@ def test_family_join_cannot_race_in_flight_activation(app,sample,monkeypatch):
             assert b.profile_owner(member)==member
         finally:release.set()
         assert pending.result().success
+
+
+def test_persistent_purchase_quote_retains_changed_terms_and_receipt(app,sample,monkeypatch):
+    ids, sql = sample
+    payer, owner = ids[:2]
+    submission = app["payment_submission"]
+    quote = submission.open_purchase_quote_sync(payer, owner, 200, 30, "synthetic")
+    assert submission.get_purchase_quote_sync(payer, "synthetic") == quote
+    assert submission.open_purchase_quote_sync(payer, payer, 400, 31, "synthetic") == quote
+
+    payment_id, created = submission.submit_quoted_receipt_sync(
+        payer, quote["purchase_token"], "synthetic", "test-receipt", True, "synthetic",
+    )
+    assert created
+    same_id, created = submission.submit_quoted_receipt_sync(
+        payer, quote["purchase_token"], "synthetic", "test-receipt", True, "synthetic",
+    )
+    assert (same_id, created) == (payment_id, False)
+    assert submission.get_purchase_quote_sync(payer, "synthetic", include_submitted=False) is None
+    row = sql("SELECT tg_id,payer_tg_id,expected_amount,purchased_days,status,quote_needs_review FROM payments WHERE id=?",
+              (payment_id,))[0]
+    assert tuple(row) == (owner, payer, 200, 30, "pending", 1)
+    subscriptions = app["subscriptions"]
+    assert not subscriptions.approve_payment_sync(payment_id, "ocr:auto").success
+    activated = []
+
+    def apply_to_original_profile(tg_id, username, days, db_path, *, before_write):
+        activated.append(tg_id)
+        return subscriptions.SubscriptionResult(tg_id, username, "synthetic", "uuid", "sub", 1900000000000, True)
+
+    monkeypatch.setattr(subscriptions, "ensure_subscription_sync", apply_to_original_profile)
+    monkeypatch.setattr(app["referral_rewards"], "apply_referral_reward", lambda *a, **k: {"status": "not_eligible"})
+    assert subscriptions.approve_payment_sync(payment_id, "web", accept_original_quote=True).success
+    assert activated == [owner]
+
+    replacement = submission.open_purchase_quote_sync(payer, payer, 400, 31, "synthetic")
+    assert replacement["purchase_token"] != quote["purchase_token"]
+    assert not submission.cancel_purchase_quote_sync(payer, quote["cancel_token"], "synthetic")
+    assert submission.cancel_purchase_quote_sync(payer, replacement["cancel_token"], "synthetic")
+    assert submission.get_purchase_quote_sync(payer, "synthetic") is None
+
+
+def test_applied_renewal_can_be_reconciled_without_replay(app,sample,monkeypatch):
+    ids, sql = sample
+    owner = ids[0]
+    s = app["subscriptions"]
+    payment_id, _ = app["payment_submission"].submit_receipt_sync(
+        owner, "synthetic", "test-receipt", 200, "test-"+secrets.token_hex(16), "synthetic",
+    )
+    expected = 1900000000000
+    panel = {"email":"synthetic", "uuid":"synthetic-uuid", "sub_id":"synthetic-sub", "expiry_time":expected, "enable":True}
+    writes = []
+
+    def timeout_after_write(tg_id, username, days, db_path, *, before_write):
+        before_write(panel["email"], panel["uuid"], expected, False, (17,))
+        writes.append(tg_id)
+        raise TimeoutError("synthetic response lost")
+
+    monkeypatch.setattr(s, "ensure_subscription_sync", timeout_after_write)
+    monkeypatch.setattr(s, "get_client_record_sync", lambda _email: {"normalized": panel, "inbound_ids": [17]})
+    monkeypatch.setattr(app["referral_rewards"], "apply_referral_reward", lambda *a, **k: {"status": "not_eligible"})
+    assert not s.approve_payment_sync(payment_id, "synthetic").success
+    assert sql("SELECT status FROM payments WHERE id=?", (payment_id,))[0][0] == "processing"
+    with pytest.raises(RuntimeError, match="Повтор запрещён"):
+        s.reset_payment_processing_sync(payment_id, "synthetic")
+    with monkeypatch.context() as patch:
+        patch.setattr(s, "get_client_record_sync", lambda _email: {
+            "normalized": dict(panel, expiry_time=expected-1), "inbound_ids": [17],
+        })
+        with pytest.raises(RuntimeError, match="ожидаемый срок"):
+            s.finalize_payment_processing_sync(payment_id, "synthetic")
+    result = s.finalize_payment_processing_sync(payment_id, "synthetic")
+    assert result.success and result.subscription.expiry_time == expected
+    assert s.finalize_payment_processing_sync(payment_id, "synthetic").already_processed
+    assert writes == [owner]
+
+
+def test_legacy_processing_requires_evidence_or_manual_closure(app, sample, monkeypatch):
+    ids, sql = sample
+    s = app["subscriptions"]
+    expected = 1900000000100
+    mocked_panel = {
+        "email": "synthetic", "uuid": "synthetic-uuid", "sub_id": "synthetic-sub",
+        "expiry_time": expected, "enable": True,
+    }
+    monkeypatch.setattr(s, "get_client_record_sync", lambda _email: {"normalized": mocked_panel, "inbound_ids": []})
+    monkeypatch.setattr(app["referral_rewards"], "apply_referral_reward", lambda *a, **k: {"status": "not_eligible"})
+
+    sql("UPDATE users SET email='synthetic', uuid='synthetic-uuid' WHERE tg_id=?", (ids[0],))
+    first, _ = app["payment_submission"].submit_receipt_sync(
+        ids[0], "synthetic", "receipt", 200, "test-"+secrets.token_hex(16), "synthetic",
+    )
+    sql("UPDATE payments SET status='processing',last_error='synthetic lost response' WHERE id=?", (first,))
+    with pytest.raises(RuntimeError, match="Укажите подтверждённый срок"):
+        s.finalize_payment_processing_sync(first, "web")
+    with pytest.raises(RuntimeError, match="ожидаемый срок"):
+        s.finalize_payment_processing_sync(first, "web", verified_legacy_expiry=expected-1000)
+    assert s.finalize_payment_processing_sync(first, "web", verified_legacy_expiry=expected).success
+
+    second, _ = app["payment_submission"].submit_receipt_sync(
+        ids[1], "synthetic", "receipt", 200, "test-"+secrets.token_hex(16), "synthetic",
+    )
+    sql("UPDATE payments SET status='processing',last_error='synthetic rejected' WHERE id=?", (second,))
+    s.close_unapplied_payment_sync(second, "web")
+    assert sql("SELECT status FROM payments WHERE id=?", (second,))[0][0] == "declined"

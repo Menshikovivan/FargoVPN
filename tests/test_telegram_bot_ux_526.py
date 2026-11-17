@@ -170,7 +170,7 @@ def test_purchase_wait_has_explicit_cancel_and_cancel_clears_only_wait_state():
     cancel = functions["cancel_receipt_wait"]
     strings = _strings(cancel)
     assert any("Ожидание чека остановлено" in item for item in strings)
-    assert any("покупку " in item and "продление подписки" in item for item in strings)
+    assert any("покупку или продление подписки" in item for item in strings)
     assert "purchase" not in strings
     assert any(
         isinstance(node, ast.Call)

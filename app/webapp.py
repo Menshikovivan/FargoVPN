@@ -62,7 +62,7 @@ import registration_access
 import expiry_snapshots
 from user_identity import build_unique_identity_index, is_generated_identity_comment, match_local_identity, normalize_username
 from detached_jobs import DetachedJobError, launch_detached
-from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local
+from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local, local_tz, configured_timezone_name
 from backup import read_live_state, request_backup_now
 from init_db import migrate as migrate_database
 from services.media import (
@@ -80,6 +80,8 @@ from services.subscriptions import (
     import_local_users_to_3xui_sync,
     repair_panel_client_identities_sync,
     reset_payment_processing_sync,
+    finalize_payment_processing_sync,
+    close_unapplied_payment_sync,
 )
 from services.xui_api import (
     bind_client_tg_id_sync,
@@ -5075,13 +5077,41 @@ def payments(request: Request):
                  FROM payments LEFT JOIN users ON users.tg_id=payments.tg_id
                 ORDER BY payments.id DESC LIMIT 500"""
         ).fetchall()
+    csrf = html.escape(session_csrf_token(request), quote=True)
+    payment_csrf = f'<input type="hidden" name="csrf_token" value="{csrf}">'
     table_rows: list[str] = []
     for row in rows:
         actions = f'<a class="button small secondary" href="/payments/{row["id"]}/receipt" target="_blank">Чек</a>'
         if row["status"] in ("pending", None):
-            actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/approve"><button class="small">Подтвердить</button></form> <form class="inline" method="post" action="/payments/{row["id"]}/decline"><button class="small danger">Отклонить</button></form>'
+            if int(row["quote_needs_review"] or 0):
+                actions += (
+                    f' <form class="inline" method="post" action="/payments/{row["id"]}/approve-original">'
+                    f'{payment_csrf}<label><input type="checkbox" name="confirm_original" value="1" required> '
+                    'Чек и исходный профиль сверены</label>'
+                    '<button class="small">Выдать подписку исходному профилю</button></form>'
+                )
+            else:
+                actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/approve"><button class="small">Подтвердить</button></form>'
+            actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/decline"><button class="small danger">Отклонить</button></form>'
         elif row["status"] == "processing":
-            actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/reset-processing" onsubmit="return confirm(\'Сначала сверьте срок клиента в 3x-ui. Вернуть платёж в очередь ручной проверки?\')"><button class="small danger">Сбросить после сверки</button></form>'
+            if row["activation_plan"]:
+                actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/finalize-processing">{payment_csrf}<button class="small">Сверить и завершить без продления</button></form>'
+            elif int(row["activation_claim_v2"] or 0):
+                actions += f' <form class="inline" method="post" action="/payments/{row["id"]}/reset-processing">{payment_csrf}<button class="small secondary">Вернуть в очередь</button></form>'
+            else:
+                zone = html.escape(configured_timezone_name())
+                actions += (
+                    f' <form class="inline" method="post" action="/payments/{row["id"]}/finalize-processing">{payment_csrf}'
+                    f'<label>Подтверждённый срок ({zone}) <input name="observed_expiry" type="datetime-local" step="1" required></label>'
+                    '<label><input type="checkbox" name="confirm_legacy" value="1" required> Срок уже выдан по этой оплате</label>'
+                    '<button class="small">Завершить без продления</button></form>'
+                )
+            if row["activation_plan"] or not int(row["activation_claim_v2"] or 0):
+                actions += (
+                    f' <form class="inline" method="post" action="/payments/{row["id"]}/close-unapplied">{payment_csrf}'
+                    '<label><input type="checkbox" name="confirm_closed" value="1" required> Платёж урегулирован вручную</label>'
+                    '<button class="small danger">Закрыть без продления</button></form>'
+                )
         if row["status"] == "declined":
             badge = '<span class="badge bad">Отклонён</span>'
         elif row["status"] == "approved":
@@ -5193,8 +5223,11 @@ def receipt_image(request: Request, payment_id: int):
     )
 
 
-def approve_payment_logic(payment_id: int) -> tuple[bool, str]:
-    result = approve_payment_sync(payment_id, "web", days=int(getattr(config, "SUBSCRIPTION_DAYS", 30)), db_path=config.DB_PATH)
+def approve_payment_logic(payment_id: int, *, accept_original_quote: bool = False) -> tuple[bool, str]:
+    result = approve_payment_sync(
+        payment_id, "web", days=int(getattr(config, "SUBSCRIPTION_DAYS", 30)),
+        db_path=config.DB_PATH, accept_original_quote=accept_original_quote,
+    )
     if not result.success:
         return False, result.message
     if result.already_processed:
@@ -5244,6 +5277,70 @@ def approve_payment(request: Request, payment_id: int):
     return RedirectResponse(public_path("/payments"), 303)
 
 
+@app.post("/payments/{payment_id}/approve-original")
+def approve_original_payment_quote(
+    request: Request, payment_id: int, confirm_original: str = Form(""), csrf_token: str = Form(""),
+):
+    require_auth(request, csrf_token)
+    if confirm_original != "1":
+        set_flash(request, "Подтвердите сверку чека и исходного профиля", "bad")
+        return RedirectResponse(public_path("/payments"), 303)
+    ok, message = approve_payment_logic(payment_id, accept_original_quote=True)
+    if ok:
+        audit(str(request.session.get("user", "web")), "approve_original_payment_quote", str(payment_id))
+    set_flash(request, message, "good" if ok else "bad")
+    return RedirectResponse(public_path("/payments"), 303)
+
+
+@app.post("/payments/{payment_id}/finalize-processing")
+def finalize_payment_processing(
+    request: Request, payment_id: int, observed_expiry: str = Form(""),
+    confirm_legacy: str = Form(""), csrf_token: str = Form(""),
+):
+    require_auth(request, csrf_token)
+    actor = str(request.session.get("user", "web"))
+    try:
+        legacy_expiry = None
+        if observed_expiry:
+            confirmed = datetime.fromisoformat(observed_expiry)
+            if confirm_legacy != "1" or confirmed.tzinfo is not None:
+                raise ValueError("Подтвердите, что срок уже выдан по этой оплате")
+            legacy_expiry = int(confirmed.replace(tzinfo=local_tz()).timestamp() * 1000)
+        result = finalize_payment_processing_sync(
+            payment_id, actor, db_path=config.DB_PATH, verified_legacy_expiry=legacy_expiry,
+        )
+    except Exception as error:
+        set_flash(request, str(error), "bad")
+    else:
+        if not result.already_processed and result.subscription:
+            subscription = result.subscription
+            telegram_send(
+                subscription.tg_id, f"✅ Платёж подтверждён. Подписка действует до {fmt_date(subscription.expiry_time)}.",
+                message_kind="service", event_type="payment_notification",
+            )
+            audit(actor, "finalize_payment_processing", str(payment_id))
+        set_flash(request, result.message)
+    return RedirectResponse(public_path("/payments"), 303)
+
+
+@app.post("/payments/{payment_id}/close-unapplied")
+def close_unapplied_payment(
+    request: Request, payment_id: int, confirm_closed: str = Form(""), csrf_token: str = Form(""),
+):
+    require_auth(request, csrf_token)
+    actor = str(request.session.get("user", "web"))
+    try:
+        if confirm_closed != "1":
+            raise ValueError("Подтвердите, что вопрос по платежу решён вручную")
+        close_unapplied_payment_sync(payment_id, actor, db_path=config.DB_PATH)
+    except Exception as error:
+        set_flash(request, str(error), "bad")
+    else:
+        audit(actor, "close_unapplied_payment", str(payment_id))
+        set_flash(request, "Платёж закрыт после ручной сверки")
+    return RedirectResponse(public_path("/payments"), 303)
+
+
 @app.post("/payments/{payment_id}/decline")
 def decline_payment(request: Request, payment_id: int):
     require_auth(request)
@@ -5261,8 +5358,8 @@ def decline_payment(request: Request, payment_id: int):
 
 
 @app.post("/payments/{payment_id}/reset-processing")
-def reset_payment_processing(request: Request, payment_id: int):
-    require_auth(request)
+def reset_payment_processing(request: Request, payment_id: int, csrf_token: str = Form("")):
+    require_auth(request, csrf_token)
     actor = str(request.session.get("user", "web"))
     try:
         reset_payment_processing_sync(payment_id, actor, db_path=config.DB_PATH)
@@ -5384,6 +5481,11 @@ def restore_backup(request: Request, archive: str = Form(""), mode: str = Form("
     current = restore_manager.read_restore_state()
     if str(current.get("status") or "") in {"queued", "validating", "running", "rolling_back"}:
         set_flash(request, "Другое восстановление уже выполняется", "bad")
+        return RedirectResponse(public_path("/backups"), 303)
+    try:
+        restore_manager.ensure_maintenance_idle()
+    except restore_manager.MaintenanceBusyError as exc:
+        set_flash(request, str(exc), "bad")
         return RedirectResponse(public_path("/backups"), 303)
     try:
         manifest = restore_manager.validate_archive_file(path, require_xui=(mode == "full"))

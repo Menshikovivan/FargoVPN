@@ -27,6 +27,9 @@ class CompatibilityTest(unittest.TestCase):
     def test_keepalive_omission_stays_omitted(self):
         payload = load_payload(Path(__file__).resolve().parents[1] / "app" / "services" / "xui_api.py")
         self.assertNotIn("keepAlive", payload({"uuid": "test-id"}))
+        for value in (None, "", False):
+            with self.subTest(keepAlive=value):
+                self.assertNotIn("keepAlive", payload({"uuid": "test-id", "keepAlive": value}))
 
 
 if __name__ == "__main__":
