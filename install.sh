@@ -13,6 +13,17 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   exit 1
 fi
 
+# A bootstrap started as a file may already be inside an unpacked FULL release.
+# Calls via curl | bash and explicit remote overrides retain the download path.
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" && "${FARGOVPN_USE_REMOTE_LATEST:-0}" != "1" && -z "${FARGOVPN_ARCHIVE_URL:-}" && -z "${FARGOVPN_CHECKSUM_URL:-}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+  LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"
+  LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"
+  if [[ -f "$LOCAL_INSTALLER" && -f "$LOCAL_VERSION_FILE" ]]; then
+    exec /bin/bash "$LOCAL_INSTALLER" "$@"
+  fi
+fi
+
 mkdir -p "$TMP_BASE"
 
 download() {

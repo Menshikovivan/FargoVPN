@@ -249,27 +249,30 @@ def test_github_publish_bootstrap_is_panel_driven():
 
 def test_public_bootstrap_downloads_verified_release_package():
     bootstrap = (ROOT.parent / "install.sh").read_text(encoding="utf-8")
-    # The publisher may keep main/install.sh release-independent while FULL
-    # archives can also be installed directly from their embedded app tree.
+    # The running publisher can still ship its own bootstrap when it uploads a newer archive.
     assert "releases/latest/download" in bootstrap
     assert "FargoVPN_FULL.tar.gz" in bootstrap
-    assert "sha256sum -c" in bootstrap
-    assert "app/install.sh" in bootstrap
-    assert 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap
-    assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
-    assert 'exec /bin/bash "$LOCAL_INSTALLER" "$@"' in bootstrap
-    assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
     assert 'INSTALLER="$PACKAGE_ROOT/app/install.sh"' in bootstrap
-    assert bootstrap.index('exec /bin/bash "$LOCAL_INSTALLER"') < bootstrap.index('download "$ARCHIVE_URL"')
+    download = bootstrap.index('download "$ARCHIVE_URL"')
+    verify = bootstrap.index('sha256sum -c')
+    install = bootstrap.index('/bin/bash "$INSTALLER" "$@"')
+    assert download < verify < install
 
+
+def test_generated_bootstrap_prefers_embedded_release():
     import ast
     source = (ROOT / "update_manager.py").read_text(encoding="utf-8")
     generator = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
                      and node.name == "_github_main_bootstrap")
     namespace = {"github_owner": lambda: "Menshikovivan", "github_repo": lambda: "FargoVPN"}
     exec(compile(ast.Module(body=[generator], type_ignores=[]), "update_manager.py", "exec"), namespace)
-    generated = namespace["_github_main_bootstrap"]()
-    assert generated[generated.index('# A bootstrap'):].strip() == bootstrap[bootstrap.index('# A bootstrap'):].strip()
+    bootstrap = namespace["_github_main_bootstrap"]()
+    assert 'LOCAL_INSTALLER="$SCRIPT_DIR/app/install.sh"' in bootstrap
+    assert 'LOCAL_VERSION_FILE="$SCRIPT_DIR/app/VERSION"' in bootstrap
+    assert 'FARGOVPN_USE_REMOTE_LATEST' in bootstrap
+    local = bootstrap.index('exec /bin/bash "$LOCAL_INSTALLER" "$@"')
+    download = bootstrap.index('download "$ARCHIVE_URL"')
+    assert local < download
 
 
 def test_publish_worker_ack_is_persistent():
