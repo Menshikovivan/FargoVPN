@@ -36,6 +36,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import DBAPIError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -1324,8 +1325,8 @@ def get_user(tg_id: int) -> dict[str, Any] | None:
     try:
         with database() as connection:
             row = connection.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error).lower():
+    except DBAPIError as error:
+        if database_adapter.postgres_sqlstate(error) != "42P01":
             raise
         row = None
     if row:
@@ -2091,7 +2092,7 @@ def dashboard_backup_status() -> dict[str, Any]:
                         result["telegram_ok"] = bool(row["telegram_ok"])
                         result["run_created_at"] = str(row["created_at"] or "")
                         result["error"] = str(row["error"] or "")
-    except (OSError, sqlite3.Error) as error:
+    except (OSError, DBAPIError) as error:
         LOGGER.warning("Не удалось прочитать статус доставки бэкапа: %s", error)
 
     try:
@@ -2458,15 +2459,16 @@ def dashboard(request: Request):
         else:
             recent_events = []
 
-        recent_audit = []
-        try:
+    recent_audit = []
+    try:
+        with database() as connection:
             audit_exists = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_log'").fetchone())
             if audit_exists:
                 recent_audit = connection.execute(
                     "SELECT actor,action,details,created_at FROM audit_log ORDER BY id DESC LIMIT 5"
                 ).fetchall()
-        except sqlite3.Error as error:
-            LOGGER.warning("Не удалось прочитать audit_log для обзора: %s", error)
+    except DBAPIError as error:
+        LOGGER.warning("Не удалось прочитать audit_log для обзора: %s", error)
 
     try:
         unread_snapshot = user_events.unread_messages_summary(db_path=config.DB_PATH)
@@ -4188,6 +4190,18 @@ def cabinet_logout(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _inline_script_json(value: str) -> str:
+    # Escape HTML delimiters before placing a JSON string inside a script element.
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 @app.get("/open-whitelist/{platform}/{app}", response_class=HTMLResponse)
 def open_whitelist_app(request: Request, platform: str, app: str, backup: int = 0):
     """Launch a public collection chosen from administrator-owned settings only."""
@@ -4199,11 +4213,7 @@ def open_whitelist_app(request: Request, platform: str, app: str, backup: int = 
     if not sub_url:
         raise HTTPException(404, "Ссылка подборки пока не задана администратором")
     native_url = f"{app}://add/{sub_url}"
-    # An administrator-owned URL can still contain HTML/script delimiters.
-    # Keep it a JavaScript string rather than allowing it to close this script.
-    native_json = (json.dumps(native_url, ensure_ascii=False)
-                   .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-                   .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+    native_json = _inline_script_json(native_url)
     native_html = html.escape(native_url, quote=True)
     subscription_html = html.escape(sub_url, quote=True)
     app_label = "Happ" if app == "happ" else "Incy"
@@ -4255,7 +4265,7 @@ def open_native_app(request: Request, app: str, exp: int = 0, tg_id: int = 0, si
     if not sub_url:
         raise HTTPException(404, "Ссылка подписки временно недоступна")
     native_url = f"happ://add/{sub_url}" if app == "happ" else f"incy://add/{sub_url}"
-    native_json = json.dumps(native_url, ensure_ascii=False)
+    native_json = _inline_script_json(native_url)
     native_html = html.escape(native_url, quote=True)
     app_label = "HAPP" if app == "happ" else "INCY"
     icon = "⚡" if app == "happ" else "🟢"
@@ -4322,7 +4332,7 @@ def cabinet_connection_page(request: Request, access: str = ""):
     happ_url = html.escape(f"happ://add/{sub_url}", quote=True)
     incy_url = html.escape(f"incy://add/{sub_url}", quote=True)
     return HTMLResponse(
-        f"""<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"theme-color\" content=\"#10161a\"><link rel=\"stylesheet\" href=\"{cabinet_css}?v={version}\"><link rel=\"stylesheet\" href=\"{cabinet_grid_css}?v={version}\"><link rel=\"stylesheet\" href=\"{cabinet_mobile_css}?v={version}\"><title>Как подключиться</title></head><body class=\"cabinet-page\"><div class=\"cabinet-shell\"><header class=\"cabinet-head\"><div><div class=\"cabinet-brand\">{_brand_mark()}{html.escape(str(config.SERVICE_NAME))}</div><div class=\"cabinet-subtitle\">Как подключиться</div></div><a class=\"button secondary small\" href=\"{path}\">← Кабинет</a></header><main class=\"cabinet-main\"><section class=\"cabinet-welcome\"><div><div class=\"cabinet-eyebrow\">Быстрое подключение</div><h1>Выберите устройство</h1><p>Мы не показываем серверы, порты и настройки 3x-ui. Нажмите кнопку приложения — оно откроется и получит вашу подписку автоматически.</p></div><span class=\"badge good\">Подписка готова</span></section><section class=\"cabinet-platform-grid cabinet-app-grid\"><div class=\"card cabinet-card cabinet-app-card\" data-os=\"android\"><div class=\"cabinet-app-icon\">🤖</div><h2>Android</h2><p class=\"muted\">Рекомендуем HAPP. Также можно открыть подписку в INCY.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{happ_url}\" data-app=\"happ\">⚡ Открыть в HAPP</a><a class=\"button secondary app-deeplink\" href=\"{incy_url}\" data-app=\"incy\">Открыть в INCY</a></div></div><div class=\"card cabinet-card cabinet-app-card\" data-os=\"ios\"><div class=\"cabinet-app-icon\">🍎</div><h2>iPhone / iPad</h2><p class=\"muted\">Рекомендуем INCY. HAPP тоже поддерживает импорт подписки.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{incy_url}\" data-app=\"incy\">⚡ Открыть в INCY</a><a class=\"button secondary app-deeplink\" href=\"{happ_url}\" data-app=\"happ\">Открыть в HAPP</a></div></div><div class=\"card cabinet-card cabinet-app-card\" data-os=\"windows\"><div class=\"cabinet-app-icon\">🪟</div><h2>Windows</h2><p class=\"muted\">Откройте подписку прямо в установленном VPN-клиенте.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{happ_url}\" data-app=\"happ\">⚡ Открыть в HAPP</a><a class=\"button secondary app-deeplink\" href=\"{incy_url}\" data-app=\"incy\">Открыть в INCY</a></div></div></section><section class=\"card cabinet-card\"><h2>Не открылось?</h2><p class=\"muted\">Если приложение не запустилось, это обычно означает, что HAPP или INCY не установлено либо браузер заблокировал переход. В таком случае можно скопировать ссылку подписки.</p><button id=\"cabinet-copy-sub\" class=\"button secondary\" type=\"button\">📋 Скопировать ссылку подписки</button><div id=\"cabinet-copy-result\" class=\"muted cabinet-result\" aria-live=\"polite\"></div></section></main></div><script>(function(){{const ua=navigator.userAgent||'',cards=[...document.querySelectorAll('.cabinet-app-card')];const os=/iPhone|iPad|iPod/i.test(ua)?'ios':(/Android/i.test(ua)?'android':(/Windows/i.test(ua)?'windows':''));cards.forEach(card=>{{if(os&&card.dataset.os===os)card.classList.add('detected')}});const copy=document.getElementById('cabinet-copy-sub'),out=document.getElementById('cabinet-copy-result'),sub={json.dumps(sub_url)};copy?.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(sub);out.textContent='✅ Ссылка скопирована'}}catch(e){{out.textContent='❌ Не удалось скопировать ссылку'}}}});document.querySelectorAll('.app-deeplink').forEach(link=>link.addEventListener('click',()=>{{setTimeout(()=>{{if(document.visibilityState==='visible')out.textContent='Если приложение не открылось, установите выбранный клиент или используйте кнопку копирования ниже.'}},1200)}}))}})();</script></body></html>"""
+        f"""<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"theme-color\" content=\"#10161a\"><link rel=\"stylesheet\" href=\"{cabinet_css}?v={version}\"><link rel=\"stylesheet\" href=\"{cabinet_grid_css}?v={version}\"><link rel=\"stylesheet\" href=\"{cabinet_mobile_css}?v={version}\"><title>Как подключиться</title></head><body class=\"cabinet-page\"><div class=\"cabinet-shell\"><header class=\"cabinet-head\"><div><div class=\"cabinet-brand\">{_brand_mark()}{html.escape(str(config.SERVICE_NAME))}</div><div class=\"cabinet-subtitle\">Как подключиться</div></div><a class=\"button secondary small\" href=\"{path}\">← Кабинет</a></header><main class=\"cabinet-main\"><section class=\"cabinet-welcome\"><div><div class=\"cabinet-eyebrow\">Быстрое подключение</div><h1>Выберите устройство</h1><p>Мы не показываем серверы, порты и настройки 3x-ui. Нажмите кнопку приложения — оно откроется и получит вашу подписку автоматически.</p></div><span class=\"badge good\">Подписка готова</span></section><section class=\"cabinet-platform-grid cabinet-app-grid\"><div class=\"card cabinet-card cabinet-app-card\" data-os=\"android\"><div class=\"cabinet-app-icon\">🤖</div><h2>Android</h2><p class=\"muted\">Рекомендуем HAPP. Также можно открыть подписку в INCY.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{happ_url}\" data-app=\"happ\">⚡ Открыть в HAPP</a><a class=\"button secondary app-deeplink\" href=\"{incy_url}\" data-app=\"incy\">Открыть в INCY</a></div></div><div class=\"card cabinet-card cabinet-app-card\" data-os=\"ios\"><div class=\"cabinet-app-icon\">🍎</div><h2>iPhone / iPad</h2><p class=\"muted\">Рекомендуем INCY. HAPP тоже поддерживает импорт подписки.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{incy_url}\" data-app=\"incy\">⚡ Открыть в INCY</a><a class=\"button secondary app-deeplink\" href=\"{happ_url}\" data-app=\"happ\">Открыть в HAPP</a></div></div><div class=\"card cabinet-card cabinet-app-card\" data-os=\"windows\"><div class=\"cabinet-app-icon\">🪟</div><h2>Windows</h2><p class=\"muted\">Откройте подписку прямо в установленном VPN-клиенте.</p><div class=\"cabinet-app-actions\"><a class=\"button app-deeplink recommended\" href=\"{happ_url}\" data-app=\"happ\">⚡ Открыть в HAPP</a><a class=\"button secondary app-deeplink\" href=\"{incy_url}\" data-app=\"incy\">Открыть в INCY</a></div></div></section><section class=\"card cabinet-card\"><h2>Не открылось?</h2><p class=\"muted\">Если приложение не запустилось, это обычно означает, что HAPP или INCY не установлено либо браузер заблокировал переход. В таком случае можно скопировать ссылку подписки.</p><button id=\"cabinet-copy-sub\" class=\"button secondary\" type=\"button\">📋 Скопировать ссылку подписки</button><div id=\"cabinet-copy-result\" class=\"muted cabinet-result\" aria-live=\"polite\"></div></section></main></div><script>(function(){{const ua=navigator.userAgent||'',cards=[...document.querySelectorAll('.cabinet-app-card')];const os=/iPhone|iPad|iPod/i.test(ua)?'ios':(/Android/i.test(ua)?'android':(/Windows/i.test(ua)?'windows':''));cards.forEach(card=>{{if(os&&card.dataset.os===os)card.classList.add('detected')}});const copy=document.getElementById('cabinet-copy-sub'),out=document.getElementById('cabinet-copy-result'),sub={_inline_script_json(sub_url)};copy?.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(sub);out.textContent='✅ Ссылка скопирована'}}catch(e){{out.textContent='❌ Не удалось скопировать ссылку'}}}});document.querySelectorAll('.app-deeplink').forEach(link=>link.addEventListener('click',()=>{{setTimeout(()=>{{if(document.visibilityState==='visible')out.textContent='Если приложение не открылось, установите выбранный клиент или используйте кнопку копирования ниже.'}},1200)}}))}})();</script></body></html>"""
     )
 
 @app.get("/messages", response_class=HTMLResponse)

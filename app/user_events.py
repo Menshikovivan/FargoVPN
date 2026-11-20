@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from sqlalchemy.exc import DBAPIError
+
 import config
 from init_db import migrate as migrate_database
 from message_sanitize import redact_message_text
@@ -1110,9 +1112,10 @@ def _with_busy_retry(operation):
     for attempt in range(5):
         try:
             return operation()
-        except sqlite3.OperationalError as error:
-            message = str(error).lower()
-            if attempt >= 4 or not any(token in message for token in ("locked", "busy")):
+        except DBAPIError as error:
+            # The operation owns its transaction and has rolled it back before retry.
+            # PostgreSQL reports serialization failure, deadlock, and lock timeout by SQLSTATE.
+            if attempt >= 4 or database_adapter.postgres_sqlstate(error) not in {"40001", "40P01", "55P03"}:
                 raise
             time.sleep(0.04 * (2 ** attempt))
     raise RuntimeError("Не удалось обновить состояние прочтения")

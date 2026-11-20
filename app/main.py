@@ -10,6 +10,7 @@ import sqlite3
 import time
 import json
 import secrets
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime
@@ -33,6 +34,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
+from sqlalchemy.exc import DBAPIError
 
 import config as config
 import whitelist_help
@@ -2483,11 +2485,12 @@ def admin_summary_text() -> str:
             (now_ms, now_ms, week_ms),
         ).fetchone()
         pending = connection.execute("SELECT COUNT(*) FROM payments WHERE status='pending'").fetchone()[0]
-        unread = 0
-        try:
+    unread = 0
+    try:
+        with closing(database_adapter.connect(config.DB_PATH, timeout=20)) as connection:
             unread = connection.execute("SELECT COALESCE(SUM(unread_count),0) FROM user_message_state").fetchone()[0]
-        except sqlite3.Error:
-            pass
+    except DBAPIError:
+        logger.warning("Не удалось прочитать счётчик непрочитанных сообщений для сводки")
     return (
         "<b>📊 СВОДКА СЕРВИСА</b>\n"
         f"<code>Версия {html.escape(current_version())}</code>\n"
@@ -3293,7 +3296,7 @@ async def manual_grant_from_shared_user(msg: Message, state: FSMContext):
         await msg.answer(
             f"✅ Подписка {action} для <b>@{html.escape(username)}</b>.\n"
             f"Telegram ID: <code>{tg_id}</code>\n"
-            f"Ссылка подписки:\n<code>{full_sub_url}</code>",
+            f"Ссылка подписки:\n<code>{html.escape(full_sub_url)}</code>",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -3361,7 +3364,7 @@ async def manual_grant_process(msg: Message, state: FSMContext):
             delivered = await bot.send_message(
                 subscription.tg_id,
                 "✅ Администратор активировал вашу VPN-подписку.\n\n"
-                f"Ссылка подписки:\n<code>{full_sub_url}</code>",
+                f"Ссылка подписки:\n<code>{html.escape(full_sub_url)}</code>",
                 parse_mode="HTML",
             )
             delivery_note = (
@@ -3378,7 +3381,7 @@ async def manual_grant_process(msg: Message, state: FSMContext):
         delivery_note = "\nℹ️ Telegram-привязки нет, ссылку нужно передать пользователю вручную."
     await msg.answer(
         f"✅ Подписка {action} для {target_label}.\n"
-        f"Ссылка подписки:\n<code>{full_sub_url}</code>{delivery_note}",
+        f"Ссылка подписки:\n<code>{html.escape(full_sub_url)}</code>{delivery_note}",
         parse_mode="HTML",
         reply_markup=get_admin_menu(),
     )
