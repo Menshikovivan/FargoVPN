@@ -16,10 +16,15 @@ from typing import Any, Iterable, Sequence
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, Row
+from sqlalchemy.exc import DBAPIError
 
 _ENGINE: Engine | None = None
 LOGGER = logging.getLogger("vpn-service-db")
 
+
+def postgres_sqlstate(error: DBAPIError) -> str | None:
+    """Return the SQLSTATE exposed by the PostgreSQL driver."""
+    return getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
 
 def _slow_query_seconds() -> float:
     try:

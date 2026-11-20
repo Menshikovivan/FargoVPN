@@ -29,7 +29,10 @@ class Tags(HTMLParser):
 
 def cabinet_functions(sub_url='https://example.test/sub'):
     tree = ast.parse((ROOT / 'app/webapp.py').read_text(encoding='utf-8'))
-    names = {'_cabinet_markup', 'cabinet_connection_page', '_brand_mark'}
+    names = {
+        '_cabinet_markup', 'cabinet_connection_page', '_brand_mark',
+        '_inline_script_json', 'open_native_app',
+    }
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     for node in functions:
         node.decorator_list = []
@@ -40,10 +43,14 @@ def cabinet_functions(sub_url='https://example.test/sub'):
         public_path=lambda path: '/private123' + path,
         _cabinet_bot_username=lambda: 'testbot',
         referral_codes=SimpleNamespace(ensure_referral_code=lambda *args: 'TEST'),
-        cabinet_service=SimpleNamespace(public_username=lambda tg_id, *values: next(
-            (normalize_username(value, tg_id) for value in values if normalize_username(value, tg_id)),
-            ''
-        )),
+        cabinet_service=SimpleNamespace(
+            verify_app_launch=lambda *args: True,
+            get_user=lambda *args: {'tg_id': 1, 'sub_id': 'test'},
+            public_username=lambda tg_id, *values: next(
+                (normalize_username(value, tg_id) for value in values if normalize_username(value, tg_id)),
+                '',
+            ),
+        ),
         bytes_to_gb=lambda value: 0, remaining_label=lambda *args: '0',
         panel_from_timestamp=lambda _value: __import__('datetime').datetime.fromtimestamp(0),
         billing=SimpleNamespace(
@@ -224,3 +231,22 @@ def test_connection_page_preserves_public_prefix(sub_url):
     anchors = [attrs['href'] for tag, attrs in tags if tag == 'a']
     assert '/private123/cabinet' in anchors
     assert '/cabinet' not in anchors
+
+
+@pytest.mark.parametrize('client', ['happ', 'incy', None])
+def test_connection_scripts_preserve_subscription_url_without_html_delimiters(client):
+    sub_url = 'https://example.test/sub/Ю?label=<>&line=\u2028\u2029'
+    ns = cabinet_functions(sub_url)
+    if client:
+        response = ns['open_native_app'](object(), client, tg_id=1)
+        marker = 'const u='
+        expected = f'{client}://add/{sub_url}'
+    else:
+        response = ns['cabinet_connection_page'](object())
+        marker = ',sub='
+        expected = sub_url
+
+    script = re.search(r'<script>(.*?)</script>', response.body, re.S).group(1)
+    encoded = script.split(marker, 1)[1].split(';', 1)[0]
+    assert not any(character in encoded for character in '<>&\u2028\u2029')
+    assert json.loads(encoded) == expected
