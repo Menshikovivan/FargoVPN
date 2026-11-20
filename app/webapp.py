@@ -64,6 +64,7 @@ import expiry_snapshots
 from user_identity import build_unique_identity_index, is_generated_identity_comment, match_local_identity, normalize_username
 from detached_jobs import DetachedJobError, launch_detached
 from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local, utc_sql_day_start_for_local, local_tz, configured_timezone_name
+from time_utils import format_subscription_expiry
 from backup import read_live_state, request_backup_now
 from init_db import migrate as migrate_database
 from services.media import (
@@ -5256,7 +5257,7 @@ def approve_payment_logic(payment_id: int, *, accept_original_quote: bool = Fals
     action = "активирована" if subscription.created else "продлена"
     notification = (
         f"🎉 Ваша подписка {config.SERVICE_NAME} успешно {action} "
-        f"до {fmt_date(subscription.expiry_time)}!"
+        f"до {format_subscription_expiry(subscription.expiry_time)}!"
     )
     sent, detail = telegram_send(subscription.tg_id, notification, message_kind="service", event_type="payment_notification")
     referral = result.referral or {}
@@ -5325,7 +5326,7 @@ def finalize_payment_processing(
         if not result.already_processed and result.subscription:
             subscription = result.subscription
             telegram_send(
-                subscription.tg_id, f"✅ Платёж подтверждён. Подписка действует до {fmt_date(subscription.expiry_time)}.",
+                subscription.tg_id, f"✅ Платёж подтверждён. Подписка действует до {format_subscription_expiry(subscription.expiry_time)}.",
                 message_kind="service", event_type="payment_notification",
             )
             audit(actor, "finalize_payment_processing", str(payment_id))

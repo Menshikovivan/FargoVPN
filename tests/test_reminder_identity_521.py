@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timedelta, timezone
 import html
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from user_identity import get_display_name as canonical_get_display_name
 
@@ -52,3 +54,29 @@ def test_reminder_report_bounds_labels_and_chunks_whole_html_lines():
     assert all(entry in joined for entry in entries)
     assert all(part.count("<a ") == part.count("</a>") for part in parts)
 
+
+def test_reminder_uses_panel_expiry_and_yekaterinburg_midnight():
+    root = Path(__file__).resolve().parents[1]
+    namespace = {
+        "datetime": datetime, "timedelta": timedelta, "timezone": timezone,
+        "ZoneInfo": ZoneInfo, "ZoneInfoNotFoundError": ZoneInfoNotFoundError,
+        "SUBSCRIPTION_TIMEZONE": "Asia/Yekaterinburg", "html": html,
+        "config": SimpleNamespace(SERVICE_NAME="FargoVPN", PAYMENT_PRICE=150, SUBSCRIPTION_DAYS=30),
+    }
+    for path, names in [
+        ("time_utils.py", {"_resolve_timezone", "subscription_datetime", "format_subscription_expiry"}),
+        ("trigger_reminders.py", {"reminder_day", "_reminder_text"}),
+    ]:
+        tree = ast.parse((root / "app" / path).read_text(encoding="utf-8"))
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), path, "exec"), namespace)
+
+    def timestamp(day, hour, minute, second=0):
+        return int(datetime(2026, 11, day, hour, minute, second, tzinfo=timezone.utc).timestamp() * 1000)
+
+    expiry = timestamp(21, 18, 33, 42)
+    assert namespace["reminder_day"](expiry, timestamp(20, 18, 59)) == 1
+    assert namespace["reminder_day"](expiry, timestamp(20, 19, 0)) == 0
+    assert namespace["reminder_day"](expiry, expiry) is None
+    assert "<b>21.11.2026 23:33:42 (Екатеринбург)</b>" in namespace["_reminder_text"](0, expiry)
+    assert namespace["format_subscription_expiry"](0) == "Бессрочно"

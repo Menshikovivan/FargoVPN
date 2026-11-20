@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import config
 
 DEFAULT_TIMEZONE = "Asia/Almaty"
+SUBSCRIPTION_TIMEZONE = "Asia/Yekaterinburg"
 
 
 def configured_timezone_name() -> str:
@@ -15,11 +16,15 @@ def configured_timezone_name() -> str:
     return raw
 
 
-def local_tz() -> ZoneInfo | timezone:
+def _resolve_timezone(name: str) -> ZoneInfo | timezone:
     try:
-        return ZoneInfo(configured_timezone_name())
+        return ZoneInfo(name)
     except ZoneInfoNotFoundError:
         return timezone(timedelta(hours=5))
+
+
+def local_tz() -> ZoneInfo | timezone:
+    return _resolve_timezone(configured_timezone_name())
 
 
 def now_local() -> datetime:
@@ -32,6 +37,17 @@ def from_timestamp(value: float | int) -> datetime:
 
 def local_date_from_timestamp(value: float | int):
     return from_timestamp(value).date()
+
+
+def subscription_datetime(expiry_ms: int) -> datetime:
+    """Convert the 3x-ui epoch in milliseconds to Yekaterinburg time."""
+    return datetime.fromtimestamp(expiry_ms / 1000, tz=_resolve_timezone(SUBSCRIPTION_TIMEZONE))
+
+
+def format_subscription_expiry(expiry_ms: int) -> str:
+    if expiry_ms <= 0:
+        return "Бессрочно"
+    return f"{subscription_datetime(expiry_ms):%d.%m.%Y %H:%M:%S} (Екатеринбург)"
 
 
 def utc_sql_day_start_for_local(day: datetime | None = None) -> str:

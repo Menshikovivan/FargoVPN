@@ -14,7 +14,7 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime
-from time_utils import from_timestamp as panel_from_timestamp, local_date_from_timestamp, now_local
+from time_utils import format_subscription_expiry, subscription_datetime
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -778,7 +778,10 @@ async def get_client_from_panel(email: str) -> dict | None:
     """Return the normalized current 3x-ui client snapshot."""
     try:
         snapshot = await asyncio.to_thread(fetch_snapshot_sync, False)
-        return snapshot.get("by_email", {}).get(email.lower().strip())
+        client = snapshot.get("by_email", {}).get(email.lower().strip())
+        if client and snapshot.get("stale"):
+            return {**client, "expiry_snapshot_stale": True}
+        return client
     except Exception as error:
         logger.error("Ошибка получения клиента (email): %s", error)
         return None
@@ -1205,8 +1208,9 @@ async def send_home(
         label = billing.subscription_label({**user, **source}, now_ms)
         status = billing.subscription_status_emoji(label)
         if expiry > 0 and has_subscription(source):
-            until = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
-            summary = f"{status} {label} · до <code>{until}</code>"
+            until = format_subscription_expiry(expiry)
+            freshness = " · по последним данным" if not client or client.get("expiry_snapshot_stale") else ""
+            summary = f"{status} {label} · до <code>{until}</code>{freshness}"
         else:
             summary = f"{status} {label}"
         if client:
@@ -1251,27 +1255,10 @@ async def send_user_stats(
         )
         return
 
-    status_emoji, expiry_str, up_gb, down_gb = "🟢 Активен", "Бессрочно", 0.0, 0.0
-    if panel_client:
-        ts = int(panel_client.get("expiry_time", 0) or 0)
-        if ts > 0:
-            expiry_str = panel_from_timestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            if ts < int(time.time() * 1000):
-                status_emoji = "🔴 Истёк"
-        if not panel_client.get("enable", True):
-            status_emoji = "🔴 Отключён"
-        up_gb = bytes_to_gb(panel_client.get("up", 0) or 0)
-        down_gb = bytes_to_gb(panel_client.get("down", 0) or 0)
-    else:
-        local_expiry = int(u.get("expiry_time") or 0)
-        if local_expiry > 0:
-            expiry_str = panel_from_timestamp(local_expiry / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            if local_expiry < int(time.time() * 1000):
-                status_emoji = "🔴 Истёк"
-        if not bool(u.get("enable", 1)):
-            status_emoji = "🔴 Отключён"
-        up_gb = bytes_to_gb(u.get("up", 0) or 0)
-        down_gb = bytes_to_gb(u.get("down", 0) or 0)
+    expiry_str = format_subscription_expiry(int(source.get("expiry_time") or 0))
+    freshness = " · по последним данным" if not panel_client or panel_client.get("expiry_snapshot_stale") else ""
+    up_gb = bytes_to_gb(source.get("up", 0) or 0)
+    down_gb = bytes_to_gb(source.get("down", 0) or 0)
 
     sub_id = str((panel_client or {}).get("sub_id") or u.get("sub_id") or "").strip()
     sub_url = (await asyncio.to_thread(current_subscription_url_sync, sub_id, fallback_base_url=str(getattr(config, "SUB_BASE_URL", "")))) if sub_id else ""
@@ -1283,8 +1270,8 @@ async def send_user_stats(
     )
     text = (
         f"<b>📊 Подписка {html.escape(str(config.SERVICE_NAME))}</b>\n\n"
-        f"📅 Срок до: <code>{html.escape(expiry_str)}</code>\n"
-        f"⚡ Статус: <b>{status_emoji}</b>\n"
+        f"📅 Срок до: <code>{html.escape(expiry_str)}</code>{freshness}\n"
+        "⚡ Статус: <b>🟢 Активен</b>\n"
         f"📤 Отдано: <code>{up_gb} GB</code>\n"
         f"📥 Скачано: <code>{down_gb} GB</code>\n"
         f"🔄 Общий трафик: <code>{total_tr} GB</code>\n\n"
@@ -2083,7 +2070,7 @@ def mark_receipt_error(payment_id: int, error: Exception) -> None:
 
 
 async def send_subscription_activated(user_id: int, subscription) -> str:
-    expiry_date = panel_from_timestamp(subscription.expiry_time / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    expiry_date = format_subscription_expiry(subscription.expiry_time)
     action = "активирована" if subscription.created else "продлена"
     try:
         with message_journal.service_message():
@@ -2276,7 +2263,7 @@ async def process_receipt_photo(msg: Message, state: FSMContext, purchase_data: 
     if automatically_approved:
         subscription = approval.subscription
         await send_referral_reward_notification(approval.referral)
-        expiry_date = panel_from_timestamp(subscription.expiry_time / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        expiry_date = format_subscription_expiry(subscription.expiry_time)
         action = "активирована" if subscription.created else "продлена"
         user_reply = (
             f"✅ Чек распознан и подтверждён автоматически. Подписка {action} до "
@@ -2578,6 +2565,8 @@ def subscription_report_text(page_no: int = 1, filter_key: str = 'all') -> str:
 
     now_ms = int(time.time() * 1000)
 
+    report_date = subscription_datetime(now_ms).date()
+
     def report_group(row):
         tg_id = int(row[2] or 0)
         profile_tg_id = int(row[10] or 0)
@@ -2594,8 +2583,8 @@ def subscription_report_text(page_no: int = 1, filter_key: str = 'all') -> str:
             return (1, 0, tg_id)  # lifetime, shown with active subscriptions
         if expiry <= now_ms:
             return (2, expiry, tg_id)  # expired
-        expiry_date = local_date_from_timestamp(expiry / 1000)
-        days_left = max(0, (expiry_date - now_local().date()).days)
+        expiry_date = subscription_datetime(expiry).date()
+        days_left = max(0, (expiry_date - report_date).days)
         return (0 if days_left <= 7 else 1, expiry, tg_id)
 
     users.sort(key=report_group)
@@ -2641,24 +2630,22 @@ def subscription_report_text(page_no: int = 1, filter_key: str = 'all') -> str:
         )
         # Username/comment can be user-controlled; escape every dynamic field before HTML parsing.
         label = html.escape(str(label)[:100])
+        expiry_text = format_subscription_expiry(effective_expiry) if has_subscription else "—"
         if not has_subscription:
             status_text, status_icon = "Без подписки", "⚪"
-            expiry_text, remaining_text = "—", "—"
+            remaining_text = "—"
         elif not effective_enabled:
             status_text, status_icon = "Отключена", "🔴"
-            expiry_text = local_date_from_timestamp(effective_expiry / 1000).strftime("%d.%m.%Y") if effective_expiry > 0 else "Бессрочно"
             remaining_text = "—"
         elif effective_expiry <= 0:
             status_text, status_icon = "Активна · бессрочно", "🟢"
-            expiry_text, remaining_text = "Бессрочно", "∞"
+            remaining_text = "∞"
         elif effective_expiry <= now_ms:
             status_text, status_icon = "Истекла", "🔴"
-            expiry_text = local_date_from_timestamp(effective_expiry / 1000).strftime("%d.%m.%Y")
             remaining_text = "0 дн."
         else:
-            expiry_date = local_date_from_timestamp(effective_expiry / 1000)
-            days_left = max(0, (expiry_date - now_local().date()).days)
-            expiry_text = expiry_date.strftime("%d.%m.%Y")
+            expiry_date = subscription_datetime(effective_expiry).date()
+            days_left = max(0, (expiry_date - report_date).days)
             remaining_text = f"{days_left} дн."
             if days_left <= 7:
                 status_text, status_icon = "Скоро закончится", "🟡"
@@ -3083,7 +3070,7 @@ async def crmview_card(call: CallbackQuery):
     builder.adjust(2, 1)
     date_str = billing.subscription_label(u)
     if billing.has_subscription(u) and int(u.get("expiry_time") or 0) > 0:
-        date_str += " · " + panel_from_timestamp(u["expiry_time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        date_str += " · " + format_subscription_expiry(u["expiry_time"])
     amount = await asyncio.to_thread(billing.expected_payment_amount, tg_id, config.DB_PATH)
     linked = await asyncio.to_thread(billing.linked_count, tg_id, config.DB_PATH)
     client_label = html.escape(get_display_name(u, tg_id))
@@ -3108,11 +3095,7 @@ async def crm_mod_proc(call: CallbackQuery):
     if panel_client:
         now_ts = int(time.time() * 1000)
         new_expiry_ts = int(panel_client.get("expiry_time") or 0)
-        new_expiry_str = (
-            "Бессрочно"
-            if new_expiry_ts <= 0
-            else panel_from_timestamp(new_expiry_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
-        )
+        new_expiry_str = format_subscription_expiry(new_expiry_ts)
         await asyncio.to_thread(
             db_upsert_user,
             tg_id,

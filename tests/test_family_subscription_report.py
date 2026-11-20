@@ -1,6 +1,5 @@
 import ast
 import asyncio
-from datetime import datetime
 import html
 from html.parser import HTMLParser
 import re
@@ -13,6 +12,7 @@ import pytest
 
 from db import CompatRow
 from services import billing
+from time_utils import format_subscription_expiry, subscription_datetime
 from user_identity import latest_trusted_telegram_usernames, normalize_username
 
 
@@ -49,8 +49,8 @@ def _report_function(connection, logger=None):
         "latest_trusted_telegram_usernames": latest_trusted_telegram_usernames,
         "SUBSCRIPTION_REPORT_PAGE_SIZE": 8,
         "re": re,
-        "local_date_from_timestamp": lambda value: datetime.fromtimestamp(value).date(),
-        "now_local": lambda: datetime.fromtimestamp(NOW_SECONDS),
+        "subscription_datetime": subscription_datetime,
+        "format_subscription_expiry": format_subscription_expiry,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "subscription_report_text", "exec"), namespace)
     return namespace["subscription_report_text"]

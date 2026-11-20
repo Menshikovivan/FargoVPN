@@ -260,7 +260,7 @@ def test_home_builds_family_cabinet_link_for_the_member_not_the_owner():
         'Message': object, 'has_subscription': has_subscription, 'asyncio': asyncio,
         'billing': billing_stub, 'config': types.SimpleNamespace(DB_PATH='unused'),
         'time': types.SimpleNamespace(time=lambda: 1),
-        'panel_from_timestamp': lambda _value: types.SimpleNamespace(strftime=lambda _format: 'date'),
+        'format_subscription_expiry': lambda _expiry_ms: '01.01.1970 05:00:01 (Екатеринбург)',
         'resolve_user': AsyncMock(return_value={'enable': 1, 'expiry_time': 1000, 'email': 'owner@example.test'}),
         'get_client_from_panel': AsyncMock(return_value=None),
         'get_user_menu_async': menu,
@@ -271,3 +271,4 @@ def test_home_builds_family_cabinet_link_for_the_member_not_the_owner():
     asyncio.run(ns['send_home'](message, 20))
 
     assert menu.await_args.args[0] == 20
+    assert '05:00:01 (Екатеринбург)</code> · по последним данным' in message.answer.call_args.args[0]

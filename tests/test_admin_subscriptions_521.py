@@ -1,5 +1,5 @@
 import ast
-from datetime import date, datetime
+from datetime import datetime, timedelta, timezone
 import html
 import re
 from pathlib import Path
@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW_SECONDS = 1_800_000_000
 NOW_MS = NOW_SECONDS * 1000
 DAY_MS = 86_400_000
+YEKATERINBURG = timezone(timedelta(hours=5))
+
+
+def _subscription_datetime(stamp):
+    return datetime.fromtimestamp(stamp / 1000, tz=YEKATERINBURG)
 
 
 def _extract(name, *, async_function=False):
@@ -56,8 +61,11 @@ def _report(rows, expected_price=None):
         "logger": SimpleNamespace(warning=lambda *_a: None, debug=lambda *_a: None),
         "SUBSCRIPTION_REPORT_PAGE_SIZE": 8,
         "re": re,
-        "local_date_from_timestamp": lambda seconds: datetime.fromtimestamp(seconds).date(),
-        "now_local": lambda: datetime.fromtimestamp(NOW_SECONDS),
+        "subscription_datetime": _subscription_datetime,
+        "format_subscription_expiry": lambda stamp: (
+            f"{_subscription_datetime(stamp):%d.%m.%Y %H:%M:%S} (Екатеринбург)"
+            if stamp > 0 else "Бессрочно"
+        ),
     }
     exec(compile(ast.Module(body=[_extract("subscription_report_text")], type_ignores=[]), "subscription_report_text", "exec"), ns)
     return ns["subscription_report_text"]
@@ -115,6 +123,17 @@ def test_zero_day_reminder_is_not_misreported_as_not_sent():
     text = _report([_row(778, "active", expiry=NOW_MS + 30 * DAY_MS, has_sub=True, reminder=0)])()
     assert "Уведомление: за 0 дн." in text
     assert "Уведомление: не отправлялось" not in text
+
+
+def test_report_distinguishes_two_expiries_on_the_same_local_date():
+    morning = int(datetime(2027, 2, 1, 10, 25, 41, tzinfo=YEKATERINBURG).timestamp() * 1000)
+    evening = morning + 13 * 3600 * 1000
+    text = _report([
+        _row(781, "morning", expiry=morning, has_sub=True, enabled=False),
+        _row(782, "evening", expiry=evening, has_sub=True),
+    ])()
+    assert "01.02.2027 10:25:41 (Екатеринбург)" in text
+    assert "01.02.2027 23:25:41 (Екатеринбург)" in text
 
 
 def test_family_custom_renewal_amount_is_shown_without_claiming_purchase_period():

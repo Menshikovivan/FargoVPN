@@ -12,7 +12,6 @@ import json
 import re
 import sqlite3
 import time
-from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot
@@ -22,6 +21,7 @@ from services import billing
 import message_journal
 import user_events
 from services.xui_api import fetch_and_sync
+from time_utils import format_subscription_expiry, subscription_datetime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("vpn-service-reminders")
@@ -34,8 +34,8 @@ def reminder_day(expiry_ms: int, now_ms: int | None = None) -> int | None:
     expiry_ms = int(expiry_ms or 0)
     if expiry_ms <= now_ms:
         return None
-    expiry_date = datetime.fromtimestamp(expiry_ms / 1000).date()
-    today = datetime.fromtimestamp(now_ms / 1000).date()
+    expiry_date = subscription_datetime(expiry_ms).date()
+    today = subscription_datetime(now_ms).date()
     return max(0, (expiry_date - today).days)
 
 
@@ -63,7 +63,7 @@ def _record_reminder(tg_id: int, username: str, days: int, expiry: int) -> None:
         logger.debug("Не удалось записать reminder_sent в audit_log: %s", error)
 
 
-def _reminder_text(days: int, tg_id: int = 0) -> str:
+def _reminder_text(days: int, expiry_ms: int, tg_id: int = 0) -> str:
     if days == 0:
         remaining = "Подписка заканчивается сегодня."
     elif days == 1:
@@ -74,7 +74,8 @@ def _reminder_text(days: int, tg_id: int = 0) -> str:
     period = max(1, int(getattr(config, "SUBSCRIPTION_DAYS", 30) or 30))
     price_line = f"\n💳 Продление: <b>{price} ₽ / {period} дней</b>" if price > 0 else ""
     return (
-        f"⏳ <b>{html.escape(str(config.SERVICE_NAME))}</b>\n\n{remaining}{price_line}\n"
+        f"⏳ <b>{html.escape(str(config.SERVICE_NAME))}</b>\n\n{remaining}\n"
+        f"📅 Срок до: <b>{format_subscription_expiry(expiry_ms)}</b>{price_line}\n"
         "Продлите доступ через кнопку ниже, чтобы подключение не прерывалось."
     )
 
@@ -154,7 +155,7 @@ async def run() -> int:
             if days is None or days not in configured or int(last_sent if last_sent is not None else -1) == days:
                 continue
             try:
-                reminder_text = _reminder_text(days, int(tg_id))
+                reminder_text = _reminder_text(days, int(expiry), int(tg_id))
                 delivered = await bot.send_message(int(tg_id), reminder_text, parse_mode="HTML", reply_markup=_reminder_markup())
                 message_journal.record_outgoing_sync(
                     int(tg_id), username=str(username or ""), event_type="subscription_reminder", text=reminder_text,

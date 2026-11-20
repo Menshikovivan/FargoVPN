@@ -9,7 +9,6 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -284,6 +283,8 @@ def test_identity_migration_handles_old_schema_without_notes_or_event_table(tmp_
 
 @pytest.mark.parametrize("family_size", [2, 3, 4])
 def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(family_size):
+    from time_utils import format_subscription_expiry, subscription_datetime
+
     source = (APP / "main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "subscription_report_text")
@@ -322,8 +323,8 @@ def test_subscription_report_pages_500_records_and_never_exceeds_telegram_limit(
         "normalize_username": __import__("user_identity").normalize_username,
         "latest_trusted_telegram_usernames": __import__("user_identity").latest_trusted_telegram_usernames,
         "SUBSCRIPTION_REPORT_PAGE_SIZE": 8,
-        "local_date_from_timestamp": lambda value: datetime.fromtimestamp(value).date(),
-        "now_local": lambda: datetime.fromtimestamp(now_seconds),
+        "subscription_datetime": subscription_datetime,
+        "format_subscription_expiry": format_subscription_expiry,
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "subscription_report_text", "exec"), namespace)
     first = namespace["subscription_report_text"](1)
