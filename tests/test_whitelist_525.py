@@ -271,7 +271,7 @@ def launch_env(config):
         # The HTML response boundary is intentionally synthetic; ASGI routing
         # and native app installation require the full integration environment.
         return NS(body=body.encode("utf-8"), headers={k.lower(): v for k, v in headers.items()}, status_code=200)
-    return load("webapp.py", {"open_whitelist_app"}, {
+    return load("webapp.py", {"open_whitelist_app", "_inline_script_json"}, {
         "whitelist_help": help, "config": config, "json": json, "html": html,
         "HTMLResponse": HTMLResponse, "HTTPException": HTTPException,
     })

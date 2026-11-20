@@ -6,17 +6,21 @@ import db as database_adapter
 
 import argparse
 import html
+import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from sqlalchemy.exc import DBAPIError
 
 import config
 import message_journal
 import subscription_refresh_manager as manager
 from services.xui_api import fetch_snapshot_sync, fetch_subscription_settings_sync, subscription_url_from_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _users() -> list[dict[str, Any]]:
@@ -167,8 +171,12 @@ def run(job_id: str) -> int:
             connection.commit()
         finally:
             connection.close()
-    except sqlite3.Error:
-        pass
+    except DBAPIError as error:
+        logger.warning(
+            "Не удалось записать аудит рассылки %s (SQLSTATE %s)",
+            job_id, database_adapter.postgres_sqlstate(error) or "не получен",
+        )
+        recent_log.append("Не удалось сохранить аудит рассылки в базе данных.")
 
     finished_at = datetime.now(timezone.utc)
     elapsed = max(0.0, (finished_at - started_at).total_seconds())
