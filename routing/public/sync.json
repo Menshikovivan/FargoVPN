@@ -1,8 +1,8 @@
 {
-  "input": "659ca06558a088cf07e67104f0dbd98b3b7627934b03e51fece5704210751e39",
-  "timestamp": "1795188260",
+  "input": "5c653ea00ded22b023473775c77ccc29e22689b2a0ead25c2db81d7c0d1dc033",
+  "timestamp": "1795290542",
   "upstreamProfile": "https://raw.githubusercontent.com/SpeedeMiner/RU-Speede-VPN/main/happ/ru-speede-vpn.json",
-  "upstreamGeoSite": "https://cdn.jsdelivr.net/gh/SpeedeMiner/Geosite-ru-light@release/geosite_RU.dat?v=1795181278",
+  "upstreamGeoSite": "https://cdn.jsdelivr.net/gh/SpeedeMiner/Geosite-ru-light@release/geosite_RU.dat?v=1795265716",
   "patchedGeoSiteSHA256": "fb0fd5586b9e74df00a6cc719713b2d6f37c5a51ef589b5a9b0d8ab3b86ee223",
   "removedBlockEntries": 1
 }
