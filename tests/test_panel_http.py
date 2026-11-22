@@ -94,9 +94,21 @@ for session_user, configured_user, expected in (
             assert "История изменений предыдущих версий" in response.text
             assert "Откат к предыдущей версии" not in response.text
             assert "force-version-form" not in response.text
+    web.fetch_control_snapshot_sync = lambda: {"status": {"xray_state": "running"}, "error": ""}
+    response = client.get("/api/system-status")
+    assert response.status_code == 200 and response.json()["xui"] is True
+    web.fetch_control_snapshot_sync = lambda: {"status": {}, "error": "timeout"}
+    response = client.get("/api/system-status")
+    assert response.status_code == 200 and response.json()["xui"] is False
     response = client.get("/api/diagnostics")
     assert response.status_code == 200
     assert response.json()["version"] == (ROOT / "VERSION").read_text().strip()
+    web.fetch_control_snapshot_sync = lambda: {"status": {"xray_state": "running"}, "error": ""}
+    response = client.get("/api/system-status")
+    assert response.status_code == 200 and response.json()["xui"] is True
+    web.fetch_control_snapshot_sync = lambda: {"status": {}, "error": "timeout"}
+    response = client.get("/api/system-status")
+    assert response.status_code == 200 and response.json()["xui"] is False
     response = client.get("/api/updates/releases")
     assert response.status_code == 404, response.text
     response = client.post("/updates/config", headers={"x-csrf-token": "test-csrf"})

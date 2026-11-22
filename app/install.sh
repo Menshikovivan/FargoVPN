@@ -90,6 +90,18 @@ fi
 # panel updates keep stdin untouched and never prompt.
 INPUT_FD=0
 if [[ -z "$UPDATE_PATH" && ! -t 0 ]]; then
+  # With sudo-rs, a script on stdin can see sudo's terminal but keystrokes
+  # from the caller's terminal do not reach it. Fail before opening the menu.
+  if [[ -p /dev/stdin && -n "${SUDO_COMMAND:-}" ]] &&
+      [[ $(sudo --version 2>/dev/null) == sudo-rs* ]]; then
+    cat >&2 <<'TTY_HELP'
+Меню не получает ввод при запуске скрипта через конвейер с sudo-rs.
+Скачайте установщик в файл и запустите так:
+  bootstrap=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh -o "$bootstrap" && sudo bash "$bootstrap"
+Для запуска без меню передайте --update-existing /путь/к/установке.
+TTY_HELP
+    exit 2
+  fi
   if ! { exec {INPUT_FD}<>/dev/tty; } 2>/dev/null; then
     echo 'Нет доступного терминала для меню. Скачайте install.sh и запустите его через sudo bash либо укажите --update-existing /путь/к/установке.' >&2
     exit 2

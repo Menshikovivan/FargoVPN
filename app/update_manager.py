@@ -1710,8 +1710,8 @@ def _github_main_public_files(archive_root: Path, archive_path: Path, version: s
     return files
 
 
-def _github_main_tree_state(owner: str, repo: str, commit_sha: str) -> tuple[str, set[str]]:
-    """Return current commit tree SHA and all non-directory paths in it."""
+def _github_main_tree_state(owner: str, repo: str, commit_sha: str) -> dict[str, tuple[str, str, str]]:
+    """Return each Git file's type, mode, and content SHA from a complete tree."""
     commit = github_request("GET", f"/repos/{owner}/{repo}/git/commits/{quote(commit_sha, safe='')}")
     if commit.status_code >= 400:
         raise UpdateError(f"Не удалось получить дерево текущего main: HTTP {commit.status_code}: {github_json_error(commit)}")
@@ -1721,30 +1721,41 @@ def _github_main_tree_state(owner: str, repo: str, commit_sha: str) -> tuple[str
     tree = github_request("GET", f"/repos/{owner}/{repo}/git/trees/{quote(tree_sha, safe='')}", params={"recursive": "1"})
     if tree.status_code >= 400:
         raise UpdateError(f"Не удалось прочитать дерево текущего main: HTTP {tree.status_code}: {github_json_error(tree)}")
-    payload = tree.json() if isinstance(tree.json(), dict) else {}
+    payload = tree.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("tree"), list):
+        raise UpdateError("GitHub вернул некорректное дерево main")
     if payload.get("truncated"):
         raise UpdateError("GitHub вернул усечённое дерево main; публикация остановлена, чтобы не удалить файлы неверно")
-    paths = {
-        str(item.get("path") or "").strip("/")
-        for item in (payload.get("tree") or [])
-        if isinstance(item, dict)
-        and str(item.get("type") or "") in {"blob", "commit"}
-        and str(item.get("path") or "").strip("/")
-    }
-    return tree_sha, paths
+    files: dict[str, tuple[str, str, str]] = {}
+    for item in payload["tree"]:
+        if not isinstance(item, dict):
+            raise UpdateError("GitHub вернул некорректный объект дерева main")
+        kind = item.get("type")
+        if kind == "tree":
+            continue
+        path = str(item.get("path") or "")
+        mode = str(item.get("mode") or "")
+        sha = str(item.get("sha") or "")
+        if kind not in {"blob", "commit"} or not path or path in files or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise UpdateError("GitHub вернул некорректный объект дерева main")
+        files[path] = (kind, mode, sha)
+    return files
 
 
-def _verify_github_main_tree(owner: str, repo: str, commit_sha: str, expected_paths: set[str]) -> None:
-    """Fail closed unless the published main contains exactly the expected file set."""
-    _tree_sha, actual_paths = _github_main_tree_state(owner, repo, commit_sha)
-    missing = sorted(expected_paths - actual_paths)
-    unexpected = sorted(actual_paths - expected_paths)
-    if missing or unexpected:
+def _verify_github_main_tree(owner: str, repo: str, commit_sha: str, expected: dict[str, tuple[str, str, str]]) -> None:
+    """Verify the complete public paths, file types, modes, and content."""
+    actual = _github_main_tree_state(owner, repo, commit_sha)
+    missing = sorted(expected.keys() - actual.keys())
+    unexpected = sorted(actual.keys() - expected.keys())
+    mismatched = sorted(path for path in expected.keys() & actual.keys() if expected[path] != actual[path])
+    if missing or unexpected or mismatched:
         details: list[str] = []
         if missing:
             details.append("отсутствуют: " + ", ".join(missing[:20]))
         if unexpected:
             details.append("лишние: " + ", ".join(unexpected[:20]))
+        if mismatched:
+            details.append("отличаются содержимое или режим: " + ", ".join(mismatched[:20]))
         raise UpdateError("GitHub main после публикации не совпадает с ожидаемым деревом: " + "; ".join(details))
 
 
@@ -1786,29 +1797,39 @@ def _github_main_sync_public_files(public_files: dict[str, bytes], version: str,
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise UpdateError(f"GitHub вернул некорректный SHA ветки {branch}")
 
-    base_tree_sha, current_paths = _github_main_tree_state(owner, repo, base_sha)
-    expected_paths = set(public_files)
-    stale_paths = sorted(current_paths - expected_paths)
+    current_tree = _github_main_tree_state(owner, repo, base_sha)
+    stale_paths = sorted(current_tree.keys() - public_files.keys())
+    known_blobs = {sha for kind, _, sha in current_tree.values() if kind == "blob"}
 
     backup_ref = _github_create_backup_ref(base_sha, version)
     applied = False
     commit_sha = ""
     try:
         entries: list[dict[str, Any]] = []
+        expected: dict[str, tuple[str, str, str]] = {}
         total_files = max(1, len(public_files))
+        uploaded = 0
         for index, (path, data) in enumerate(sorted(public_files.items()), start=1):
-            blob = github_request(
-                "POST", f"/repos/{owner}/{repo}/git/blobs",
-                json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
-            )
-            if blob.status_code >= 400:
-                raise UpdateError(f"Не удалось создать Git blob для {path}: HTTP {blob.status_code}: {github_json_error(blob)}")
-            blob_sha = str((blob.json() or {}).get("sha") or "").strip()
-            if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
-                raise UpdateError(f"GitHub вернул некорректный blob SHA для {path}")
-            entries.append({"path": path, "mode": "100755" if path.endswith(".sh") else "100644", "type": "blob", "sha": blob_sha})
-            if progress:
-                progress(f"{index}/{total_files}::{path}")
+            digest = hashlib.sha1(f"blob {len(data)}\0".encode("ascii"))
+            digest.update(data)
+            blob_sha = digest.hexdigest()
+            upload = blob_sha not in known_blobs
+            if upload:
+                blob = github_request(
+                    "POST", f"/repos/{owner}/{repo}/git/blobs",
+                    json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
+                )
+                if blob.status_code >= 400:
+                    raise UpdateError(f"Не удалось создать Git blob для {path}: HTTP {blob.status_code}: {github_json_error(blob)}")
+                if (blob.json() or {}).get("sha") != blob_sha:
+                    raise UpdateError(f"GitHub вернул несовпадающий blob SHA для {path}")
+                known_blobs.add(blob_sha)
+                uploaded += 1
+            mode = "100755" if path.endswith(".sh") else "100644"
+            entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob_sha})
+            expected[path] = ("blob", mode, blob_sha)
+            if progress and (upload or index == total_files or index % 25 == 0):
+                progress(f"{index}/{total_files}::отправлено {uploaded}, переиспользовано {index - uploaded} · {path}")
 
         # IMPORTANT: build the new tree from scratch. Do not inherit base_tree.
         # The expected file set is the complete public repository surface, so
@@ -1846,7 +1867,7 @@ def _github_main_sync_public_files(public_files: dict[str, bytes], version: str,
         if str((update_ref.json().get("object") or {}).get("sha") or "") != commit_sha:
             raise UpdateError("GitHub не подтвердил SHA опубликованного commit main")
 
-        _verify_github_main_tree(owner, repo, commit_sha, expected_paths)
+        _verify_github_main_tree(owner, repo, commit_sha, expected)
         return {
             "enabled": True,
             "synced": True,

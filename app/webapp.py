@@ -92,7 +92,6 @@ from services.xui_api import (
     delete_client_sync,
     fetch_and_sync,
     fetch_snapshot_sync,
-    snapshot_cache_status,
     fetch_client_extra_sync,
     get_client_record_sync,
     update_client_sync,
@@ -2411,12 +2410,12 @@ def dashboard(request: Request):
     disk = psutil.disk_usage("/").percent
     bot_status = service_state("vpn-service-bot") == "active"
     web_status = service_state("vpn-service-web") == "active"
-    xui_status = not bool(snapshot.get("stale"))
     try:
         xui_control = fetch_control_snapshot_sync()
     except Exception as error:
         LOGGER.warning("Не удалось загрузить телеметрию 3x-ui для главной: %s", type(error).__name__)
         xui_control = {"status": {}, "fail2ban": {}, "xray_metrics": {}, "observatory": {}, "nodes": [], "error": str(error)}
+    xui_status = bool(xui_control.get("status")) and not xui_control.get("error")
     db_status = False
     backup_status = dashboard_backup_status()
 
@@ -2517,7 +2516,8 @@ def dashboard(request: Request):
 
     source_notice = ""
     if snapshot.get("stale"):
-        source_notice = f'<div class="notice"><strong>3x-ui API временно недоступна.</strong> Показан локальный кэш. Причина: {html.escape(str(snapshot.get("error") or "неизвестно"))}</div>'
+        title = "Показаны сохранённые данные о клиентах." if xui_status else "3x-ui API временно недоступна."
+        source_notice = f'<div class="notice"><strong>{title}</strong> Причина: {html.escape(str(snapshot.get("error") or "неизвестно"))}</div>'
 
     configured_xui_url = str(getattr(config, "XUI_PANEL_URL", "") or "").strip().rstrip("/")
     quick_xui = f'<a class="quick-action xui" href="{html.escape(configured_xui_url, quote=True)}" target="_blank" rel="noopener noreferrer"><span class="quick-icon">◇</span><span><b>Открыть 3x-ui</b><small>Панель сервера</small></span></a>' if configured_xui_url else ''
@@ -2598,12 +2598,8 @@ def _database_health() -> bool:
 def system_status_api(request: Request):
     require_auth(request)
     backup = dashboard_backup_status()
-    # Frequent status polling is intentionally cache-only. A 10s browser poll
-    # must not trigger four upstream 3x-ui calls plus a SQLite sync transaction
-    # whenever the 15s client cache expires. The next page request/sync path can
-    # still refresh the authoritative snapshot.
-    snapshot = snapshot_cache_status()
-    snapshot_stale = bool(snapshot.get("stale"))
+    # Reuse cached control telemetry for connection health. Client list
+    # freshness changes independently and must not trigger a polling sync.
     control = fetch_control_snapshot_sync()
     control_status = control.get("status") if isinstance(control.get("status"), dict) else {}
     fail2ban = control.get("fail2ban") if isinstance(control.get("fail2ban"), dict) else {}
@@ -2611,7 +2607,7 @@ def system_status_api(request: Request):
     return JSONResponse({
         "bot": service_state("vpn-service-bot") == "active",
         "web": service_state("vpn-service-web") == "active",
-        "xui": not snapshot_stale,
+        "xui": bool(control_status) and not control.get("error"),
         "xray": str(control_status.get("xray_state") or "unknown"),
         "xray_version": str(control_status.get("xray_version") or ""),
         "tcp_count": int(control_status.get("tcp_count") or 0),
