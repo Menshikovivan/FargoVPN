@@ -260,7 +260,7 @@ def recover_user_identity_sync(
     if not candidate:
         candidate = find_client_by_telegram_id_sync(tg_id, force=force)
 
-    if not candidate:
+    if not candidate or int(candidate.get("expiry_time") or 0) < 0:
         if local and username is not None and display_name != str(local.get("username") or ""):
             with _connect(db_path) as connection:
                 connection.execute("UPDATE users SET username=? WHERE tg_id=?", (display_name, tg_id))
@@ -396,7 +396,10 @@ def _ensure_subscription_sync_unlocked(
 
     if candidate:
         email = str(candidate.get("email") or "")
-        if int(candidate.get("expiry_time") or 0) <= 0:
+        expiry = int(candidate.get("expiry_time") or 0)
+        if expiry < 0:
+            raise ValueError("Подписка ожидает первого подключения; продление требует ручной сверки")
+        if expiry == 0:
             raise ValueError("Бессрочную подписку можно перевести на конечный срок только явным действием администратора")
         if before_write is None:
             updated = extend_client_sync(email, days, tg_id=tg_id)

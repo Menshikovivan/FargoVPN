@@ -399,24 +399,28 @@ def _has_expiry_value(raw: dict[str, Any]) -> bool:
     return False
 
 
-def _parsed_expiry(value: Any) -> int:
+def _parsed_expiry(value: Any, *, allow_deferred: bool = False) -> int:
     """Validate the raw value without changing its units on a round trip."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError('3x-ui вернула некорректный срок клиента; синхронизация отменена')
     text = str(value).strip()
-    if not text or not text.isascii() or not text.isdigit():
+    negative = text.startswith("-")
+    digits = text[1:] if negative and allow_deferred else text
+    if not digits or not digits.isascii() or not digits.isdigit():
         raise ValueError('3x-ui вернула некорректный или отложенный срок; требуется сверка')
     result = int(text)
-    if result > 2**63 - 1:
+    if abs(result) > 2**63 - 1:
         raise ValueError('3x-ui вернула срок вне допустимого диапазона')
     return result
 
 
-def _validated_expiry(value: Any) -> int:
-    return normalize_timestamp_ms(_parsed_expiry(value))
+def _validated_expiry(value: Any, *, allow_deferred: bool = False) -> int:
+    parsed = _parsed_expiry(value, allow_deferred=allow_deferred)
+    # 3x-ui stores the duration before first use as negative milliseconds.
+    return parsed if parsed < 0 else normalize_timestamp_ms(parsed)
 
 
-def normalize_client(raw: dict[str, Any]) -> dict[str, Any]:
+def normalize_client(raw: dict[str, Any], *, allow_deferred: bool = False) -> dict[str, Any]:
     """Normalize current and legacy 3x-ui client list response shapes.
 
     Current 3x-ui keeps per-client counters in ``traffic`` on clients/list and
@@ -445,9 +449,9 @@ def normalize_client(raw: dict[str, Any]) -> dict[str, Any]:
     # 3x-ui's clients/list returns ClientRecord alongside a traffic record;
     # the ClientRecord's expiry (including zero) describes the subscription.
     if 'expiryTime' in client:
-        expiry = _validated_expiry(client['expiryTime'])
+        expiry = _validated_expiry(client['expiryTime'], allow_deferred=allow_deferred)
     elif 'expiryTime' in traffic:
-        expiry = _validated_expiry(traffic['expiryTime'])
+        expiry = _validated_expiry(traffic['expiryTime'], allow_deferred=allow_deferred)
     else:
         expiry = 0  # Not authoritative until resolved from clientStats below.
     last_online = normalize_timestamp_ms(
@@ -1264,7 +1268,7 @@ def fetch_snapshot_sync(force: bool = False) -> dict[str, Any]:
                 raise ValueError("3x-ui вернула некорректный список клиентов; синхронизация отменена")
             if any(not isinstance(item, dict) for item in raw_clients):
                 raise ValueError("3x-ui вернула неполный список клиентов; синхронизация отменена")
-            clients = [normalize_client(item) for item in raw_clients]
+            clients = [normalize_client(item, allow_deferred=True) for item in raw_clients]
             if any(not item.get("email") for item in clients):
                 raise ValueError("3x-ui вернула клиента без идентификатора; синхронизация отменена")
             # 3x-ui current builds expose authoritative per-client counters as
@@ -1307,7 +1311,7 @@ def fetch_snapshot_sync(force: bool = False) -> dict[str, Any]:
                     if not _has_expiry_value(item.get("raw")):
                         values = fallback.get('_expiry_values', [])
                         if values:
-                            parsed = {_validated_expiry(value) for value in values}
+                            parsed = {_validated_expiry(value, allow_deferred=True) for value in values}
                             if len(parsed) != 1:
                                 raise ValueError('3x-ui вернула конфликтующие сроки статистики; требуется сверка')
                             item['expiry_time'] = parsed.pop()
@@ -1623,6 +1627,12 @@ def sync_snapshot_to_db(snapshot: dict[str, Any], db_path: str | Path | None = N
                 )
             row = dict(source_row) if source_row and not identity_conflict else None
             panel_tg_id = _int(item.get("tg_id"))
+            if _int(item.get("expiry_time")) < 0:
+                # FargoVPN's billing stores deadlines. Preserve the local row until
+                # 3x-ui reports an activated deadline, including its current enable flag.
+                if row:
+                    protected_local_ids.add(int(row["tg_id"]))
+                continue
             inferred_tg_id = panel_tg_id if panel_tg_id > 0 and not identity_conflict else 0
 
             if row:

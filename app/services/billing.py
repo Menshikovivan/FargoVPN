@@ -35,7 +35,9 @@ def subscription_label(user: dict | None, now_ms: int | None = None) -> str:
     prefix = "Семейная · " if family else ""
     if not bool(enabled):
         return prefix + ("доступ отключён" if family else "Доступ отключён")
-    if expiry <= 0:
+    if expiry < 0:
+        return prefix + ("ожидает первого подключения" if family else "Ожидает первого подключения")
+    if expiry == 0:
         return prefix + ("бессрочная подписка" if family else "Бессрочная подписка")
     import time
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)

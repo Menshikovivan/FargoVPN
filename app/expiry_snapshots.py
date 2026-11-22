@@ -27,8 +27,8 @@ def _validated_snapshot(snapshot, *, allow_empty=False):
         if not isinstance(row,dict): raise ValueError('Повреждённый список клиентов 3x-ui')
         uid=str(row.get('uuid') or '').strip(); email=str(row.get('email') or '').strip()
         expiry=row.get('expiry_time')
-        if not uid or not email or len(uid)>512 or len(email)>512 or isinstance(expiry,bool) or not isinstance(expiry,int) or expiry<0 or expiry>253402300799000:
-            raise ValueError('Снимок невозможен: отсутствует идентификатор или есть отложенная подписка')
+        if not uid or not email or len(uid)>512 or len(email)>512 or isinstance(expiry,bool) or not isinstance(expiry,int) or abs(expiry)>253402300799000:
+            raise ValueError('Снимок невозможен: отсутствует идентификатор или срок некорректен')
         if uid.casefold() in seen_uuid or email.casefold() in seen_email:
             raise ValueError('Обнаружены неоднозначные идентификаторы 3x-ui')
         seen_uuid.add(uid.casefold()); seen_email.add(email.casefold())
@@ -126,7 +126,7 @@ def compare_latest(directory, fetch, *, source='manual'):
             if row['email'].casefold()!=fresh['email'].casefold(): count['identity_changed']+=1;continue
             if row['expiry_time']!=fresh['expiry_time']:
                 count['changed']+=1
-                if row['expiry_time']>0 and fresh['expiry_time']==0: count['finite_to_zero']+=1
+                if row['expiry_time']!=0 and fresh['expiry_time']==0: count['finite_to_zero']+=1
                 report.append({'email':row['email'],'before':row['expiry_time'],'after':fresh['expiry_time']})
             else: count['same']+=1
         count['new']=len(set(new)-set(old))

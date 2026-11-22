@@ -26,11 +26,24 @@ def test_client_expiry_authoritative_and_zero_not_overwritten(record,expected):
 def test_missing_expiry_allows_fallback():
     assert not xui_api._has_expiry_value({'client':{'email':'one'},'traffic':{}})
 
-@pytest.mark.parametrize('bad', [None,True,1.2,'abc','-10',-10,[],{}])
+@pytest.mark.parametrize('bad', [None, True, 1.2, 'abc', '--10', 2**63, -(2**63), [], {}])
 def test_invalid_expiry_never_becomes_unlimited(monkeypatch,bad):
     monkeypatch.setattr(xui_api,'_client_list_sync',lambda:{'obj':[{'email':'one@test','expiryTime':bad}]})
     monkeypatch.setattr(xui_api,'sync_snapshot_to_db',lambda *a,**k:pytest.fail('invalid expiry must not sync'))
     assert xui_api.fetch_and_sync(force=True,db_path='unused')['stale'] is True
+
+
+def test_deferred_expiry_is_readable_without_obscuring_other_clients(monkeypatch):
+    rows = [
+        {'email': 'pending@test', 'uuid': 'u1', 'expiryTime': '-86400000'},
+        {'email': 'finite@test', 'uuid': 'u2', 'expiryTime': 1_900_000_000_000},
+        {'email': 'unlimited@test', 'uuid': 'u3', 'expiryTime': 0},
+    ]
+    monkeypatch.setattr(xui_api, '_client_list_sync', lambda: {'obj': rows})
+    monkeypatch.setattr(xui_api, 'request_json_sync', lambda *a, **kw: {'obj': []})
+    result = xui_api.fetch_snapshot_sync(force=True)
+    assert result['stale'] is False
+    assert [row['expiry_time'] for row in result['clients']] == [-86_400_000, 1_900_000_000_000, 0]
 
 @pytest.mark.parametrize('method', ['extend_client_sync','change_client_days_sync'])
 def test_pending_activation_never_mutated_by_generic_days(monkeypatch,method):
@@ -147,14 +160,20 @@ def test_3x_expiry_updates_fargo_existing_profile(tmp_path, monkeypatch, local, 
           last_reminder_days INTEGER,notes TEXT,last_online TEXT,last_online_ts INTEGER,last_sync_at TEXT,
           identity_source TEXT,identity_updated_at TEXT,display_name TEXT,registered_at TEXT,registration_status TEXT)''')
         db.execute('INSERT INTO users(tg_id,username,uuid,email,expiry_time,enable,up,down,total,sub_id,last_reminder_days,notes) VALUES(1,?,?,?,?,1,0,0,0,?,7,?)',('tester','u1','one@example.test',local,'s','note'))
+        db.execute("INSERT INTO users(tg_id,uuid,email,expiry_time,enable,last_reminder_days) VALUES(2,'u2','pending@test',1800000000000,1,3)")
     def connect(path,timeout=20):
         db=sqlite3.connect(path,timeout=timeout)
         db.create_function('GREATEST',-1,lambda *v:max(x for x in v if x is not None))
         return db
     monkeypatch.setattr(xui_api.database_adapter,'connect',connect)
-    xui_api.sync_snapshot_to_db({'clients':[{'tg_id':1,'email':'one@example.test','uuid':'u1','expiry_time':panel,'enable':True,'up':3,'down':0,'total':0,'sub_id':'s'}]}, db_path=path)
+    records = [
+        {'tg_id':1,'email':'one@example.test','uuid':'u1','expiry_time':panel,'enable':True,'up':3,'down':0,'total':0,'sub_id':'s'},
+        {'tg_id':2,'email':'pending@test','uuid':'u2','expiry_time':-86_400_000,'enable':False},
+    ]
+    xui_api.sync_snapshot_to_db({'clients': records}, db_path=path)
     with sqlite3.connect(path) as db:
-        assert db.execute('SELECT expiry_time,last_reminder_days,up FROM users').fetchone()==(panel,-1,3)
+        assert db.execute('SELECT expiry_time,last_reminder_days,up FROM users WHERE tg_id=1').fetchone()==(panel,-1,3)
+        assert db.execute('SELECT expiry_time,last_reminder_days,enable FROM users WHERE tg_id=2').fetchone()==(1800000000000,3,1)
 
 
 @pytest.mark.parametrize("expiry", [0, 1900000000000])

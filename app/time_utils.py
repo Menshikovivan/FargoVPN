@@ -45,7 +45,9 @@ def subscription_datetime(expiry_ms: int) -> datetime:
 
 
 def format_subscription_expiry(expiry_ms: int) -> str:
-    if expiry_ms <= 0:
+    if expiry_ms < 0:
+        return "После первого подключения"
+    if expiry_ms == 0:
         return "Бессрочно"
     return f"{subscription_datetime(expiry_ms):%d.%m.%Y %H:%M:%S} (Екатеринбург)"
 

@@ -45,10 +45,26 @@ def test_changed_between_reads_never_creates_snapshot(tmp_path):
     assert not list(tmp_path.glob('snapshot-*.json'))
 
 
-@pytest.mark.parametrize('bad',[{'stale':True,'clients':[]},{'clients':[]},{'clients':[{'uuid':'x','email':'x','expiry_time':-1}]},{'clients':[{'uuid':'x','email':'x','expiry_time':True}]}])
-def test_invalid_or_deferred_snapshot_is_rejected(tmp_path,bad):
+@pytest.mark.parametrize('bad',[{'stale':True,'clients':[]},{'clients':[]},snapshot(-(2**63)),snapshot(True)])
+def test_invalid_snapshot_is_rejected(tmp_path,bad):
     with pytest.raises(ValueError): s.create_snapshot(tmp_path,lambda:bad)
     assert not list(tmp_path.glob('snapshot-*.json'))
+
+
+def test_deferred_duration_is_captured_and_compared_without_conversion(tmp_path):
+    deferred = -30 * 86_400_000
+    s.create_snapshot(tmp_path, lambda: snapshot(deferred), pre_update=True)
+    result = s.compare_latest(tmp_path, lambda: snapshot(0), source='preupdate')
+    assert result['changes'][0]['before'] == deferred
+    assert result['changes'][0]['after'] == 0
+    assert result['counts']['finite_to_zero'] == 1
+
+
+def test_first_use_during_capture_requires_another_capture(tmp_path):
+    values = iter([snapshot(-86_400_000), snapshot(1_900_000_000_000)])
+    with pytest.raises(ValueError, match='меняются'):
+        s.create_snapshot(tmp_path, lambda: next(values), pre_update=True)
+    assert not list(tmp_path.glob('preupdate-*.json'))
 
 
 def test_ambiguous_identity_not_assumed(tmp_path):

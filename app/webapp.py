@@ -748,6 +748,8 @@ def fmt_bytes(value: float | int) -> str:
 def fmt_date(milliseconds: int | None) -> str:
     if not milliseconds:
         return "Бессрочно"
+    if milliseconds < 0:
+        return "После первого подключения"
     try:
         return panel_from_timestamp(int(milliseconds) / 1000).strftime("%d.%m.%Y %H:%M")
     except Exception:
@@ -776,6 +778,8 @@ def remaining_days(expiry_ms: int, now_ms: int | None = None) -> float:
 def remaining_label(expiry_ms: int, now_ms: int | None = None) -> str:
     if not expiry_ms:
         return "∞"
+    if expiry_ms < 0:
+        return "После первого подключения"
     now_ms = now_ms or int(time.time() * 1000)
     if int(expiry_ms) < now_ms:
         expired_date = local_date_from_timestamp(int(expiry_ms) / 1000)
@@ -1422,7 +1426,9 @@ def _cabinet_markup(username: str, user: dict[str, Any], sub_url: str) -> str:
     has_vpn_subscription = billing.has_subscription(user)
     if not has_vpn_subscription:
         expiry_text, remaining = status_label, "—"
-    elif expiry <= 0:
+    elif expiry < 0:
+        expiry_text, remaining = fmt_date(expiry), "—"
+    elif expiry == 0:
         expiry_text, remaining = "Бессрочно", "∞"
     else:
         expiry_text = panel_from_timestamp(expiry / 1000).strftime("%d.%m.%Y %H:%M")
@@ -2946,7 +2952,10 @@ def expiry_snapshots_page(request: Request, source: str = "manual"):
         report = f'<p>Дата снимка: {html.escape(result["created_utc"])} · Совпадают: {amount("same")} · Срок изменился: {amount("changed")} · Стали бессрочными: {amount("finite_to_zero")} · Отсутствуют: {amount("missing")} · Новые: {amount("new")} · Идентичность изменилась: {amount("identity_changed")}</p>'
         if result.get('current_empty'): report += '<p class="notice">Текущий список 3x-ui пуст. Проверьте панель перед любыми решениями.</p>'
         def fmt(value):
-            return "Бессрочно" if not value else panel_from_timestamp(value / 1000).strftime("%d.%m.%Y %H:%M")
+            if value < 0:
+                return f"{fmt_date(value)} ({abs(value) / 86_400_000:g} дн.)"
+            return fmt_date(value)
+
         lines = []
         for row in result.get("changes", []):
             lines.append(f'<tr><td>{html.escape(row["email"])}</td><td>{html.escape(fmt(row["before"]))}</td><td>{html.escape(fmt(row["after"]))}</td></tr>')
