@@ -84,6 +84,12 @@ for session_user, configured_user, expected in (
         response = client.get(route)
         assert response.status_code == 200, (route, response.status_code, response.text)
         assert heading in response.text
+        if route == "/settings":
+            assert 'id="settings-tab-updates"' in response.text
+            assert 'id="updates" data-tab-section="updates"' in response.text
+            assert "Открыть центр обновлений" in response.text
+            if session_user == "admin":
+                assert 'name="github_api_token"' not in response.text
         if route == "/updates" and expected:
             assert "История изменений предыдущих версий" in response.text
             assert "Откат к предыдущей версии" not in response.text

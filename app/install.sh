@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-export PYTHONUTF8=1
+export PYTHONUTF8=1 PYTHONUNBUFFERED=1
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo 'Запустите установщик через sudo или от пользователя root.'; exit 1; }
 
@@ -88,12 +88,25 @@ fi
 # A bootstrap invoked as curl | bash inherits the script pipe as stdin.
 # All interactive reads must use the controlling terminal instead. Explicit
 # panel updates keep stdin untouched and never prompt.
+INPUT_FD=0
 if [[ -z "$UPDATE_PATH" && ! -t 0 ]]; then
-  if ! exec 0</dev/tty; then
-    echo 'Нет доступного терминала для меню. Для автоматического обновления используйте --update-existing /root/vpn_bot.' >&2
+  if ! { exec {INPUT_FD}<>/dev/tty; } 2>/dev/null; then
+    echo 'Нет доступного терминала для меню. Скачайте install.sh и запустите его через sudo bash либо укажите --update-existing /путь/к/установке.' >&2
     exit 2
   fi
 fi
+
+read_reply() {
+  local prompt=$1 output=$2 secret=${3:-no}
+  local flags=(-r -u "$INPUT_FD")
+  printf '%s' "$prompt" >&2
+  if [[ $secret == yes ]]; then flags+=(-s); fi
+  if ! IFS= read "${flags[@]}" "$output"; then
+    printf '\nВвод завершён. Установка прервана.\n' >&2
+    exit 2
+  fi
+  if [[ $secret == yes ]]; then printf '\n' >&2; fi
+}
 
 # Panel updates pass the worker's lock descriptor. Direct console installs
 # acquire the same lock, including mode 3 which invokes restore_manager.
@@ -116,9 +129,13 @@ if ! flock -n "$FARGOVPN_MAINTENANCE_FD"; then
 fi
 
 INSTALL_LOG="/var/log/vpn-service-install.log"
-mkdir -p "$(dirname "$INSTALL_LOG")"
-# Сохраняем полный журнал установки, не скрывая вывод в терминале.
-exec > >(tee -a "$INSTALL_LOG") 2>&1
+(umask 077; touch -- "$INSTALL_LOG")
+chmod 0600 -- "$INSTALL_LOG"
+exec {INSTALL_STDOUT}>&1 {INSTALL_STDERR}>&2
+# tee получает весь вывод, но не удерживает lock после завершения установщика.
+exec > >(tee -a -- "$INSTALL_LOG" {FARGOVPN_MAINTENANCE_FD}>&-) 2>&1
+INSTALL_LOG_PID=$!
+printf 'Живой журнал установки: %s\n' "$INSTALL_LOG"
 
 INSTALL_STEP=0
 log_step() {
@@ -321,8 +338,8 @@ PYREQ
   fi
 
   log_step "Устанавливаются/проверяются Python-зависимости из $requirements"
-  run_timed 120 "обновление pip/wheel" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip wheel
-  run_timed 600 "установка Python-зависимостей" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade -r "$requirements"
+  run_timed 120 "обновление pip/wheel" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --progress-bar off --upgrade pip wheel
+  run_timed 600 "установка Python-зависимостей" "$TARGET/.venv/bin/python" -m pip install --disable-pip-version-check --progress-bar off --upgrade -r "$requirements"
   run_timed 60 "проверка установленных требований" pip_requirements_ok "$requirements"
   run_timed 60 "pip check" "$TARGET/.venv/bin/python" -m pip check
   printf '%s\n' "$digest" > "$stamp"
@@ -557,6 +574,8 @@ cleanup() {
   [[ -z ${PREUPDATE_BACKUP_PART:-} ]] || rm -f -- "$PREUPDATE_BACKUP_PART"
   [[ -z $TMP ]] || rm -rf "$TMP"
   [[ -z ${RESTORE_PREP:-} ]] || rm -rf "$RESTORE_PREP"
+  exec 1>&"$INSTALL_STDOUT" 2>&"$INSTALL_STDERR"
+  wait "$INSTALL_LOG_PID" || true
 }
 
 restart_unit_family() {
@@ -705,12 +724,7 @@ trap 'on_signal HUP' HUP
 ask() {
   local name=$1 prompt=$2 default=${3:-} secret=${4:-no} value=''
   while [[ -z $value ]]; do
-    if [[ $secret == yes ]]; then
-      read -rsp "$prompt${default:+ [$default]}: " value
-      echo
-    else
-      read -rp "$prompt${default:+ [$default]}: " value
-    fi
+    read_reply "$prompt${default:+ [$default]}: " value "$secret"
     value=${value:-$default}
   done
   printf -v "$name" '%s' "$value"
@@ -745,11 +759,11 @@ setup_existing_nginx_route() {
     echo "FargoVPN nginx guard not found: $TARGET/nginx_panel_guard.py" >&2
     return 1
   fi
-  if ! target_python "$TARGET/nginx_panel_guard.py" --install-check >>"$INSTALL_LOG" 2>&1; then
+  if ! target_python "$TARGET/nginx_panel_guard.py" --install-check; then
     echo 'Внешний nginx: не удалось синхронизировать managed FargoVPN location.' >&2
     return 1
   fi
-  if ! nginx -t >>"$INSTALL_LOG" 2>&1; then
+  if ! nginx -t; then
     echo "Внешний nginx: ошибка конфигурации после синхронизации; подробности в $INSTALL_LOG" >&2
     return 1
   fi
@@ -864,8 +878,11 @@ PYREC
 find_old() {
   local paths=() path normalized unit
   for unit in fargovpn-bot fargovpn-web vpn-service-bot vpn-service-web; do
-    if path=$(systemctl show -p WorkingDirectory --value "$unit.service" 2>/dev/null); then :; else path=""; fi
-    [[ -z $path ]] || paths+=("$path")
+    if path=$(run_with_timeout 3 systemctl show -p WorkingDirectory --value "$unit.service" 2>/dev/null); then
+      [[ -z $path ]] || paths+=("$path")
+    else
+      printf '  Не удалось прочитать каталог службы %s. Проверяю другие пути.\n' "$unit" >&2
+    fi
   done
   paths+=("/root/vpn_bot" "/opt/vpn-service/app" "/opt/vpn-service" "/opt/fargovpn" "/opt/fargovpn-bot" "/root/FargoVPN_Bot" "/srv/vpn-bot")
   for path in "${paths[@]}"; do
@@ -894,15 +911,18 @@ else
 2) Обновление существующей установки
 3) Восстановление конфигурации и баз данных из резервной копии
 EOF_MENU
-  read -rp 'Выберите вариант: ' MODE
+  read_reply 'Выберите вариант: ' MODE
   [[ $MODE =~ ^[123]$ ]] || { echo 'Некорректный выбор.' >&2; exit 1; }
   if [[ $MODE == 2 ]]; then
+    log_step "Поиск существующей установки FargoVPN"
     mapfile -t LIST < <(find_old)
-    if ((${#LIST[@]})); then
+    if ((${#LIST[@]} == 1)); then
+      OLD=${LIST[0]}
+    elif ((${#LIST[@]} > 1)); then
       echo 'Найдены установки:'
       for index in "${!LIST[@]}"; do echo "$((index + 1))) ${LIST[$index]}"; done
       echo "$(( ${#LIST[@]} + 1 ))) Указать путь вручную"
-      read -rp 'Выберите вариант: ' number
+      read_reply 'Выберите вариант: ' number
       if [[ $number =~ ^[0-9]+$ ]] && ((number >= 1 && number <= ${#LIST[@]})); then
         OLD=${LIST[$((number - 1))]}
       else
@@ -915,6 +935,7 @@ EOF_MENU
     fi
     [[ -n $OLD ]] || { echo 'Существующая установка не найдена.' >&2; exit 1; }
     TARGET="$OLD"
+    echo "Целевой каталог обновления: $TARGET"
   elif [[ $MODE == 3 ]]; then
     ask RESTORE_DIR 'Путь к папке с резервной копией (обе части .part001/.part002)'
     [[ -d $RESTORE_DIR ]] || { echo 'Каталог резервной копии не найден.' >&2; exit 1; }
@@ -926,7 +947,7 @@ EOF_MENU
     echo 'Что восстановить:'
     echo '1) Пользователи, подписки и семейные связи (users/payments/referral_rewards/telegram_profile_links)'
     echo '2) Все данные FargoVPN/3x-ui и разрешенные параметры FargoVPN'
-    read -rp 'Выберите вариант [1-2]: ' RESTORE_CHOICE
+    read_reply 'Выберите вариант [1-2]: ' RESTORE_CHOICE
     case "$RESTORE_CHOICE" in
       1) RESTORE_MODE=users-only ;;
       2) RESTORE_MODE=full ;;
@@ -957,7 +978,7 @@ PY_RESTORE_INFO
       echo 'Текущие подключения, доступы и настройки 3x-ui сохраняются. Для нового сервера их нужно настроить отдельно.'
       echo 'Код, systemd, Xray, VAPID и окружение из архива не применяются.'
     fi
-    read -rp 'Подтвердить выбранное восстановление? Введите YES: ' RESTORE_CONFIRM
+    read_reply 'Подтвердить выбранное восстановление? Введите YES: ' RESTORE_CONFIRM
     [[ "$RESTORE_CONFIRM" == "YES" ]] || { echo 'Восстановление отменено пользователем.'; exit 0; }
     if [[ "$RESTORE_MODE" == "users-only" ]]; then
       mapfile -t LIST < <(find_old)
@@ -965,7 +986,7 @@ PY_RESTORE_INFO
         echo 'Найдены установки FargoVPN для восстановления базы:'
         for index in "${!LIST[@]}"; do echo "$((index + 1))) ${LIST[$index]}"; done
         echo "$(( ${#LIST[@]} + 1 ))) Указать путь вручную"
-        read -rp 'Выберите установку: ' number
+        read_reply 'Выберите установку: ' number
         if [[ $number =~ ^[0-9]+$ ]] && ((number >= 1 && number <= ${#LIST[@]})); then
           OLD=${LIST[$((number - 1))]}
         else
@@ -1023,6 +1044,7 @@ mkdir -p "$BACKUP" "$(dirname "$TARGET")" /var/lib/vpn-service/updates /var/lib/
 chmod 700 /var/lib/vpn-service/updates /var/lib/vpn-service/broadcasts /var/cache/vpn-service/chat-media /var/lib/vpn-service/migration-state
 
 VPN_UPDATE_PROGRESS=60
+log_step "Подготовка установки и резервное копирование"
 summary_running stop-services "Останавливаются службы перед безопасной заменой файлов"
 write_update_status "installing" "Останавливаются службы перед безопасной заменой файлов" "$VPN_UPDATE_PROGRESS" "stop-services"
 quiesce_application
@@ -1246,11 +1268,11 @@ PY_RECOVERY_BOOTSTRAP
   echo 'Telegram, 3x-ui, оплата и GitHub можно оставить пустыми и заполнить после установки в разделе «Настройки».'
   echo
   ask SERVICE_NAME 'Название VPN-сервиса' 'FargoVPN'
-  read -r -s -p 'Токен Telegram-бота (Enter — настроить позже в панели): ' BOT_TOKEN; echo
-  read -r -p 'Telegram ID администраторов через запятую (Enter — настроить позже): ' ADMIN_IDS
-  read -r -p 'Адрес 3x-ui (Enter — настроить позже): ' BASE_URL
-  read -r -s -p 'API-токен 3x-ui (Enter — настроить позже): ' API_TOKEN; echo
-  read -r -p 'Базовый URL подписок (Enter — настроить позже): ' SUB_URL
+  read_reply 'Токен Telegram-бота (Enter — настроить позже в панели): ' BOT_TOKEN yes
+  read_reply 'Telegram ID администраторов через запятую (Enter — настроить позже): ' ADMIN_IDS
+  read_reply 'Адрес 3x-ui (Enter — настроить позже): ' BASE_URL
+  read_reply 'API-токен 3x-ui (Enter — настроить позже): ' API_TOKEN yes
+  read_reply 'Базовый URL подписок (Enter — настроить позже): ' SUB_URL
   PRICE=150
   PHONE=''
   BANK=''
@@ -1272,13 +1294,18 @@ PY
     )
   fi
 
-  read -r -p 'Владелец GitHub-репозитория (Enter — настроить позже): ' GITHUB_OWNER
-  read -r -p 'Имя GitHub-репозитория [FargoVPN]: ' GITHUB_REPO; GITHUB_REPO=${GITHUB_REPO:-FargoVPN}
+  read_reply 'Владелец GitHub-репозитория (Enter — настроить позже): ' GITHUB_OWNER
+  read_reply 'Имя GitHub-репозитория [FargoVPN]: ' GITHUB_REPO; GITHUB_REPO=${GITHUB_REPO:-FargoVPN}
   GITHUB_TOKEN=''
   if [[ -f "$TARGET/scripts/setup_postgresql.sh" ]]; then
     chmod +x "$TARGET/scripts/setup_postgresql.sh"
     log_step "Подготавливается локальный PostgreSQL"
-    DATABASE_URL="$(bash "$TARGET/scripts/setup_postgresql.sh" | sed -n 's/^DATABASE_URL=//p' | tail -n 1)"
+    DATABASE_URL="$(
+      bash "$TARGET/scripts/setup_postgresql.sh" | awk '
+        /^DATABASE_URL=/ { print substr($0, length("DATABASE_URL=") + 1); next }
+        { print > "/dev/stderr"; fflush("/dev/stderr") }
+      ' | tail -n 1
+    )"
     if [[ -z "$DATABASE_URL" ]]; then abort_install 'Не удалось получить DATABASE_URL PostgreSQL'; fi
   else
     echo 'Не найден scripts/setup_postgresql.sh' >&2
@@ -1948,11 +1975,13 @@ importlib.import_module("webapp")
 print("Проверка импортов и синтаксиса Python: успешно")
 PY
 run_timed 360 "Резервная копия БД и нормализация Telegram-идентичностей" "$TARGET/.venv/bin/python" "$TARGET/normalize_user_identities.py"
+log_step "Проверка и миграция схемы базы данных"
 "$TARGET/.venv/bin/python" "$TARGET/init_db.py"
 VPN_UPDATE_PROGRESS=89
 write_update_status "migrating" "Конфигурация и структура базы данных проверены" "$VPN_UPDATE_PROGRESS" "database"
 
 VPN_UPDATE_PROGRESS=91
+log_step "Настройка системных служб"
 write_update_status "installing" "Обновляются systemd-службы" "$VPN_UPDATE_PROGRESS" "services"
 if ! cat > /etc/systemd/system/vpn-service-bot.service <<EOF_UNIT
 [Unit]

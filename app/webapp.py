@@ -6106,9 +6106,7 @@ def settings(request: Request):
     bot_status = service_state("vpn-service-bot.service") if str(getattr(config, "BOT_TOKEN", "") or "").strip() else ""
     bot_notice = (f'<div class="notice bad">Токен сохранён, но бот сейчас не работает: {html.escape(str(bot_status)[:160])}. Проверьте журнал vpn-service-bot.service и /var/log/vpn_bot.log.</div>' if bot_status and not str(bot_status).startswith("active") else '')
     missing_notice = (f'<div class="notice">Сохранённые inbound, которых сейчас нет или они отключены: {html.escape(", ".join(map(str, inbound_missing)))}. При наличии доступных выбранных inbound новые клиенты будут созданы только в них.</div>' if inbound_missing else '')
-    updates_settings_block = "" if not (publisher or github_setup) else f'''
-  <section class="setting-section" role="tabpanel" aria-labelledby="settings-tab-updates" id="updates" data-tab-section="updates">
-  <div class="grid">
+    publisher_settings = f'''
     <div class="card half">
       <h2>GitHub Releases</h2>
       <div class="notice"><b>Текущая роль:</b> {html.escape(role_label)}.<br>Все панели получают обновления из последнего GitHub Release. Публикация доступна назначенной главной панели (<span class="code">{html.escape(publisher_username or 'не назначена')}</span>).</div>
@@ -6129,11 +6127,22 @@ def settings(request: Request):
       <div class="setting"><label for="setting-update_max_archive_mb">Максимальный архив, МБ</label><input id="setting-update_max_archive_mb" type="number" name="update_max_archive_mb" value="{int(getattr(config, 'UPDATE_MAX_ARCHIVE_MB', 1024))}" min="64" max="4096"></div>
       <div class="setting"><label for="setting-update_stale_job_seconds">Считать задачу зависшей через, сек.</label><input id="setting-update_stale_job_seconds" type="number" name="update_stale_job_seconds" value="{int(getattr(config, 'UPDATE_STALE_JOB_SECONDS', 7200))}" min="900" max="86400"></div>
       <div class="setting"><label for="setting-publish_stale_job_seconds">Считать публикацию GitHub зависшей через, сек.</label><input id="setting-publish_stale_job_seconds" type="number" name="publish_stale_job_seconds" value="{int(getattr(config, 'PUBLISH_STALE_JOB_SECONDS', 1800))}" min="300" max="86400"></div>
+    </div>
+    ''' if (publisher or github_setup) else ""
+    installed_version = html.escape(update_manager.current_version())
+    updates_settings_block = f'''
+  <section class="setting-section" role="tabpanel" aria-labelledby="settings-tab-updates" id="updates" data-tab-section="updates">
+  <div class="grid">
+    <div class="card full">
+      <h2>Обновления FargoVPN</h2>
+      <p>Установлена версия {installed_version}.</p>
+      <p class="muted">В центре обновлений можно проверить новую версию, установить её и посмотреть журнал.</p>
       <a class="button secondary" href="{html.escape(public_path("/updates"), quote=True)}">Открыть центр обновлений</a>
     </div>
+    {publisher_settings}
   </div>
   </section>
-    ''' if publisher else ""
+    '''
 
     panel_push_script = f'<script src="{html.escape(public_path("/static/push.js"), quote=True)}?v={_panel_asset_version()}" defer></script>'
 
@@ -6169,7 +6178,7 @@ def settings(request: Request):
     <a role="tab" id="settings-tab-payment" aria-controls="payment" tabindex="-1" data-tab="payment" href="{html.escape(public_path('/settings'), quote=True)}#payment">Оплата и чеки</a>
     <a role="tab" id="settings-tab-xui" aria-controls="xui" tabindex="-1" data-tab="xui" href="{html.escape(public_path('/settings'), quote=True)}#xui">3x-ui</a>
     <a role="tab" id="settings-tab-security" aria-controls="security" tabindex="-1" data-tab="security" href="{html.escape(public_path('/settings'), quote=True)}#security">Панель и защита</a>
-    {('<a role="tab" id="settings-tab-updates" aria-controls="updates" tabindex="-1" data-tab="updates" href="' + html.escape(public_path('/settings'), quote=True) + '#updates">Обновления</a>') if publisher else ''}
+    <a role="tab" id="settings-tab-updates" aria-controls="updates" tabindex="-1" data-tab="updates" href="{html.escape(public_path('/settings'), quote=True)}#updates">Обновления</a>
     <a role="tab" id="settings-tab-notifications" aria-controls="notifications" tabindex="-1" data-tab="notifications" href="{html.escape(public_path('/settings'), quote=True)}#notifications">Уведомления</a>
     <a role="tab" id="settings-tab-data" aria-controls="data" tabindex="-1" data-tab="data" href="{html.escape(public_path('/settings'), quote=True)}#data">Бэкапы и данные</a>
   </nav>
@@ -6542,7 +6551,7 @@ def _save_settings(request: Request, form):
     faq_incy_url = _http_url(text_value("faq_incy_url"), "Ссылка Incy", allow_empty=True)
     current_session_username = str(request.session.get("user") or "").strip()
     current_is_publisher = update_publisher_for_request(request)
-    github_configurable = current_is_publisher or not update_manager.github_token()
+    github_configurable = current_is_publisher or (not update_manager.github_token() and "github_repository_owner" in form)
     if not current_is_publisher and update_manager.is_publisher_username(web_username):
         raise HTTPException(403, "Логин главного издателя доступен только главной панели")
     is_publisher = current_is_publisher
@@ -6917,7 +6926,8 @@ def updates_page(request: Request):
     state_badge_class = "bad" if state_code == "failed" else ("warn" if busy else "good")
     source_code = str(info.get("source") or "")
     source_text = "GitHub Releases" if source_code == "github" else (source_code or "—")
-    configured_repo = f"{getattr(config, 'GITHUB_REPOSITORY_OWNER', '')}/{getattr(config, 'GITHUB_REPOSITORY_NAME', 'FargoVPN')}"
+    configured_owner = update_manager.github_update_owner()
+    configured_repo = f"{configured_owner}/{update_manager.github_repo()}" if configured_owner else "не настроен"
     metadata_url = str(info.get("github_release_url") or "").strip()
     source_details = f'<p>Репозиторий: <span class="code">{html.escape(configured_repo)}</span></p>'
     if metadata_url:

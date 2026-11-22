@@ -8,10 +8,10 @@
   "DomesticDNSType": "DoH",
   "DomesticDNSDomain": "https://77.88.8.8/dns-query",
   "DomesticDNSIP": "77.88.8.8",
-  "Geoipurl": "https://cdn.jsdelivr.net/gh/SpeedeMiner/Geoip-ru-server@cdn/geoip_RU.dat?v=1795265716",
+  "Geoipurl": "https://cdn.jsdelivr.net/gh/SpeedeMiner/Geoip-ru-server@cdn/geoip_RU.dat?v=1795181278",
   "Geositeurl": "https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/routing/public/geosite-fb0fd5586b9e74df00a6cc719713b2d6.dat",
-  "LastUpdated": "1795290542",
-  "lastUpdatedDate": "1795290542",
+  "LastUpdated": "1795188260",
+  "lastUpdatedDate": "1795188260",
   "DnsHosts": {
     "lkfl2.nalog.ru": "213.24.64.175",
     "lknpd.nalog.ru": "213.24.64.181"

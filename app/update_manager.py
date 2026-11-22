@@ -983,6 +983,14 @@ def github_token() -> str:
     return str(getattr(config, "GITHUB_API_TOKEN", "") or "").strip()
 
 
+def github_update_owner() -> str:
+    owner = str(getattr(config, "GITHUB_REPOSITORY_OWNER", "") or "").strip()
+    api = str(getattr(config, "GITHUB_API_BASE_URL", GITHUB_API) or GITHUB_API).strip().rstrip("/")
+    if not owner and not github_token() and github_repo().casefold() == "fargovpn" and api == GITHUB_API:
+        return "Menshikovivan"
+    return owner
+
+
 def github_api_base() -> str:
     value = str(getattr(config, "GITHUB_API_BASE_URL", GITHUB_API) or GITHUB_API).strip().rstrip("/")
     parts = urlsplit(value)
@@ -1273,7 +1281,10 @@ def github_validate_configuration() -> dict[str, Any]:
 
 
 def github_latest_release() -> dict[str, Any]:
-    response = github_request("GET", f"/repos/{quote(github_owner(), safe='')}/{quote(github_repo(), safe='')}/releases/latest")
+    owner = github_update_owner()
+    if not owner:
+        raise UpdateError("Не указан владелец GitHub-репозитория обновлений")
+    response = github_request("GET", f"/repos/{quote(owner, safe='')}/{quote(github_repo(), safe='')}/releases/latest")
     if response.status_code == 404:
         raise UpdateError("В репозитории GitHub ещё нет опубликованных релизов")
     if response.status_code >= 400:
@@ -1456,7 +1467,7 @@ def check_available_update(force: bool = False) -> dict[str, Any]:
         if not force and now - float(_CHECK_CACHE.get("ts", 0)) < interval and _CHECK_CACHE.get("info") is not None:
             return dict(_CHECK_CACHE["info"])
     installed = current_version()
-    owner = str(getattr(config, "GITHUB_REPOSITORY_OWNER", "") or "").strip()
+    owner = github_update_owner()
     repo = github_repo()
     configured_repository = f"{owner}/{repo}" if owner else "не настроен"
     if not owner:
@@ -1465,7 +1476,7 @@ def check_available_update(force: bool = False) -> dict[str, Any]:
             "available": False,
             "source": "github",
             "configured_repository": configured_repository,
-            "error": "GitHub обновления пока не настроен. Укажите владельца репозитория в Настройки → Обновления.",
+            "error": "Источник обновлений не настроен. Укажите владельца репозитория в настройках издателя.",
         }
     else:
         try:
@@ -1530,7 +1541,7 @@ def github_main_sync_enabled() -> bool:
 
 def github_install_command() -> str:
     repo_raw = f"https://raw.githubusercontent.com/{github_owner()}/{github_repo()}/main"
-    return f"curl -fsSL {repo_raw}/install.sh | sudo bash"
+    return f'bootstrap=$(mktemp) && curl -fsSL {repo_raw}/install.sh -o "$bootstrap" && sudo bash "$bootstrap"'
 
 
 def _github_main_bootstrap() -> str:

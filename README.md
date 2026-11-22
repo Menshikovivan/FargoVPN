@@ -1,4 +1,4 @@
-# FargoVPN 5.3.5
+# FargoVPN 5.3.6
 
 > FargoVPN помогает запустить собственный VPN-сервис: Telegram-бот принимает пользователей и показывает подписки, а веб-панель нужна владельцу сервиса для управления ими.
 
@@ -8,7 +8,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)](https://telegram.org/)
 [![3x-ui](https://img.shields.io/badge/3x--ui-integrated-444444)](https://github.com/MHSanaei/3x-ui)
 
-**Текущая версия: 5.3.5**
+**Текущая версия: 5.3.6**
 
 ## С чего начать
 
@@ -108,14 +108,14 @@ graph LR
 Для уже опубликованных релизов можно использовать стандартный bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh | sudo bash
+bootstrap=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Menshikovivan/FargoVPN/main/install.sh -o "$bootstrap" && sudo bash "$bootstrap"
 ```
 
 Для новой версии до её первой публикации в GitHub Releases используйте локальный release-архив. Распакуйте его на сервере и запустите корневой `install.sh`: он обнаружит соседний `app/VERSION` и установит именно этот архив, не скачивая старый `latest` из GitHub.
 
 ```bash
-tar -xzf FargoVPN-5.3.5_FULL.tar.gz
-cd FargoVPN-5.3.5
+tar -xzf FargoVPN-5.3.6_FULL.tar.gz
+cd FargoVPN-5.3.6
 sudo ./install.sh
 ```
 
